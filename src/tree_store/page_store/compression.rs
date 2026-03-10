@@ -390,9 +390,7 @@ pub(crate) fn compress_value(data: &[u8], config: CompressionConfig) -> Vec<u8> 
         let result: Option<(Vec<u8>, u8)> = match config {
             CompressionConfig::None => None,
             #[cfg(feature = "compression_lz4")]
-            CompressionConfig::Lz4 => {
-                Some((lz4_flex::compress_prepend_size(data), VALUE_FLAG_LZ4))
-            }
+            CompressionConfig::Lz4 => Some((lz4_flex::compress_prepend_size(data), VALUE_FLAG_LZ4)),
             #[cfg(feature = "compression_zstd")]
             CompressionConfig::Zstd { level } => zstd::bulk::compress(data, level)
                 .ok()
@@ -443,16 +441,17 @@ pub(crate) fn decompress_value(data: &[u8]) -> Result<Cow<'_, [u8]>> {
     }
 
     let flags = data[0];
-    let original_size =
-        u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+    let original_size = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
     let compressed_data = &data[VALUE_ENVELOPE_SIZE..];
 
     let algo_bits = flags & 0x06; // bits 1-2
     match algo_bits {
         #[cfg(feature = "compression_lz4")]
         0x02 => {
-            let decompressed = lz4_flex::decompress_size_prepended(compressed_data)
-                .map_err(|e| StorageError::Corrupted(format!("LZ4 value decompression failed: {e}")))?;
+            let decompressed =
+                lz4_flex::decompress_size_prepended(compressed_data).map_err(|e| {
+                    StorageError::Corrupted(format!("LZ4 value decompression failed: {e}"))
+                })?;
             if decompressed.len() != original_size {
                 return Err(StorageError::Corrupted(format!(
                     "decompressed value size mismatch: expected {original_size}, got {}",
@@ -463,8 +462,10 @@ pub(crate) fn decompress_value(data: &[u8]) -> Result<Cow<'_, [u8]>> {
         }
         #[cfg(feature = "compression_zstd")]
         0x04 => {
-            let decompressed = zstd::bulk::decompress(compressed_data, original_size)
-                .map_err(|e| StorageError::Corrupted(format!("zstd value decompression failed: {e}")))?;
+            let decompressed =
+                zstd::bulk::decompress(compressed_data, original_size).map_err(|e| {
+                    StorageError::Corrupted(format!("zstd value decompression failed: {e}"))
+                })?;
             if decompressed.len() != original_size {
                 return Err(StorageError::Corrupted(format!(
                     "decompressed value size mismatch: expected {original_size}, got {}",
@@ -689,20 +690,18 @@ mod tests {
         assert_eq!(result, data);
     }
 
+    #[cfg(feature = "compression_lz4")]
     #[test]
     fn value_small_skipped() {
         let data = make_compressible_value(32); // below MIN_VALUE_COMPRESS_SIZE
-        #[cfg(feature = "compression_lz4")]
-        {
-            let result = compress_value(&data, CompressionConfig::Lz4);
-            // Flags byte (0x00) prepended, original data follows
-            assert_eq!(result.len(), data.len() + 1);
-            assert_eq!(result[0], 0x00);
-            assert_eq!(&result[1..], &data[..]);
-            // Round-trip through decompress
-            let decompressed = decompress_value(&result).unwrap();
-            assert_eq!(decompressed.as_ref(), &data[..]);
-        }
+        let result = compress_value(&data, CompressionConfig::Lz4);
+        // Flags byte (0x00) prepended, original data follows
+        assert_eq!(result.len(), data.len() + 1);
+        assert_eq!(result[0], 0x00);
+        assert_eq!(&result[1..], &data[..]);
+        // Round-trip through decompress
+        let decompressed = decompress_value(&result).unwrap();
+        assert_eq!(decompressed.as_ref(), &data[..]);
     }
 
     #[cfg(feature = "compression_lz4")]

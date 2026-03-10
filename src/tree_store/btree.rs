@@ -375,7 +375,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     }
 
     fn compression(&self) -> CompressionConfig {
-        self.compression_override.unwrap_or_else(|| self.mem.compression())
+        self.compression_override
+            .unwrap_or_else(|| self.mem.compression())
     }
 
     fn value_width(&self) -> Option<usize> {
@@ -591,8 +592,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             LEAF => {
                 let value_width = self.value_width();
                 let compression = self.compression();
-                let accessor =
-                    LeafAccessor::new(page.memory(), K::fixed_width(), value_width);
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), value_width);
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).unwrap();
                     let guard = AccessGuardMut::new(

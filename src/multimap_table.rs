@@ -652,7 +652,17 @@ impl<V: Key> DynamicCollection<V> {
             SubtreeV2 => {
                 let root = collection.value().as_subtree().root;
                 MultimapValue::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), Some(root), if mem.compression().is_enabled() { None } else { <() as Value>::fixed_width() }, mem, false)?,
+                    BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                        &(..),
+                        Some(root),
+                        if mem.compression().is_enabled() {
+                            None
+                        } else {
+                            <() as Value>::fixed_width()
+                        },
+                        mem,
+                        false,
+                    )?,
                     collection.value().get_num_values(),
                     guard,
                 )
@@ -680,7 +690,11 @@ impl<V: Key> DynamicCollection<V> {
                 let inner = BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     Some(root),
-                    if mem.compression().is_enabled() { None } else { <() as Value>::fixed_width() },
+                    if mem.compression().is_enabled() {
+                        None
+                    } else {
+                        <() as Value>::fixed_width()
+                    },
                     mem.clone(),
                     false,
                 )?;
@@ -1348,7 +1362,17 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
             )?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, if self.mem.compression().is_enabled() { None } else { <() as Value>::fixed_width() }, self.mem.clone(), false)?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        <() as Value>::fixed_width()
+                    },
+                    self.mem.clone(),
+                    false,
+                )?,
                 0,
                 self.transaction.transaction_guard(),
             )
@@ -1390,7 +1414,17 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
             DynamicCollection::iter(collection, guard, self.mem.clone())?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, if self.mem.compression().is_enabled() { None } else { <() as Value>::fixed_width() }, self.mem.clone(), false)?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        <() as Value>::fixed_width()
+                    },
+                    self.mem.clone(),
+                    false,
+                )?,
                 0,
                 guard,
             )
@@ -1529,7 +1563,17 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
             DynamicCollection::iter(collection, self.transaction_guard.clone(), self.mem.clone())?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, if self.mem.compression().is_enabled() { None } else { <() as Value>::fixed_width() }, self.mem.clone(), false)?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        <() as Value>::fixed_width()
+                    },
+                    self.mem.clone(),
+                    false,
+                )?,
                 0,
                 self.transaction_guard.clone(),
             )
@@ -1586,7 +1630,17 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
             DynamicCollection::iter(collection, self.transaction_guard.clone(), self.mem.clone())?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, if self.mem.compression().is_enabled() { None } else { <() as Value>::fixed_width() }, self.mem.clone(), false)?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        <() as Value>::fixed_width()
+                    },
+                    self.mem.clone(),
+                    false,
+                )?,
                 0,
                 self.transaction_guard.clone(),
             )

@@ -247,7 +247,8 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         let node_mem = page.memory();
         Ok(match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
+                let accessor =
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 let (position, found) = accessor.position::<K>(key);
 
                 // Fast-path to avoid re-building and splitting pages with a single large value
@@ -318,8 +319,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     };
                     drop(page);
                     let mut page_mut = self.mem.get_page_mut(page_number)?;
-                    let mut mutator =
-                        LeafMutator::new(page_mut.memory_mut(), K::fixed_width(), self.value_width());
+                    let mut mutator = LeafMutator::new(
+                        page_mut.memory_mut(),
+                        K::fixed_width(),
+                        self.value_width(),
+                    );
                     mutator.insert(position, found, key, value);
                     let new_page_accessor =
                         LeafAccessor::new(page_mut.memory(), K::fixed_width(), self.value_width());
@@ -588,7 +592,8 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
+                let accessor =
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 let (position, found) = accessor.position::<K>(key);
                 assert!(found);
                 let old_len = accessor.entry(position).unwrap().value().len();
@@ -827,8 +832,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 let merge_with_page = self
                     .mem
                     .get_page(accessor.child_page(merge_with).unwrap())?;
-                let merge_with_accessor =
-                    LeafAccessor::new(merge_with_page.memory(), K::fixed_width(), self.value_width());
+                let merge_with_accessor = LeafAccessor::new(
+                    merge_with_page.memory(),
+                    K::fixed_width(),
+                    self.value_width(),
+                );
 
                 let single_large_value = merge_with_accessor.num_pairs() == 1
                     && merge_with_accessor.total_length() >= self.mem.get_page_size();

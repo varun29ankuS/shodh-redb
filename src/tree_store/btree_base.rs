@@ -1,4 +1,6 @@
-use crate::tree_store::page_store::compression::{CompressionConfig, compress_value, decompress_value};
+use crate::tree_store::page_store::compression::{
+    CompressionConfig, compress_value, decompress_value,
+};
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory, xxh3_checksum};
 use crate::tree_store::{PageNumber, PageTrackerPolicy};
 use crate::types::{Key, MutInPlaceValue, Value};
@@ -217,10 +219,7 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
     }
 
     /// Construct an `AccessGuard` for a value from an Arc page, decompressing if needed.
-    pub(crate) fn with_arc_page_decompress(
-        page: Arc<[u8]>,
-        range: Range<usize>,
-    ) -> Result<Self> {
+    pub(crate) fn with_arc_page_decompress(page: Arc<[u8]>, range: Range<usize>) -> Result<Self> {
         let raw = &page[range.clone()];
         match decompress_value(raw)? {
             Cow::Borrowed(_) => {
@@ -439,8 +438,11 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             key_bytes.as_slice(),
             &stored_value,
         ) {
-            let mut mutator =
-                LeafMutator::new(self.page.memory_mut(), self.key_width, self.fixed_value_size);
+            let mut mutator = LeafMutator::new(
+                self.page.memory_mut(),
+                self.key_width,
+                self.fixed_value_size,
+            );
             mutator.insert(self.entry_index, true, &key_bytes, &stored_value);
         } else {
             let accessor =

@@ -125,10 +125,7 @@ impl RangeIterState {
         }
     }
 
-    fn get_entry<K: Key, V: Value>(
-        &self,
-        compression_enabled: bool,
-    ) -> Option<EntryGuard<K, V>> {
+    fn get_entry<K: Key, V: Value>(&self, compression_enabled: bool) -> Option<EntryGuard<K, V>> {
         match self {
             Leaf {
                 page,
@@ -140,7 +137,12 @@ impl RangeIterState {
                 let (key, value) =
                     LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size)
                         .entry_ranges(*entry)?;
-                Some(EntryGuard::new(page.clone(), key, value, compression_enabled))
+                Some(EntryGuard::new(
+                    page.clone(),
+                    key,
+                    value,
+                    compression_enabled,
+                ))
             }
             Internal { .. } => None,
         }
@@ -591,11 +593,7 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
             self.include_left = false;
             let ce = self.compression_enabled;
             if self.left.as_ref().unwrap().get_entry::<K, V>(ce).is_some() {
-                return self
-                    .left
-                    .as_ref()
-                    .map(|s| s.get_entry(ce).unwrap())
-                    .map(Ok);
+                return self.left.as_ref().map(|s| s.get_entry(ce).unwrap()).map(Ok);
             }
         }
     }
@@ -677,8 +675,7 @@ fn find_iter_unbounded<K: Key, V: Value>(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor =
-                LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
             let entry = if reverse { accessor.num_pairs() - 1 } else { 0 };
             Ok(Some(Leaf {
                 page,
@@ -726,8 +723,7 @@ fn find_iter_left<K: Key, V: Value>(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor =
-                LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query || !found
@@ -783,8 +779,7 @@ fn find_iter_right<K: Key, V: Value>(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor =
-                LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query && found

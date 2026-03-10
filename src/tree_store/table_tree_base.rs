@@ -192,8 +192,11 @@ impl InternalTableDefinition {
                 fixed_value_size,
                 ..
             } => {
-                let effective_value_size =
-                    if mem.compression().is_enabled() { None } else { *fixed_value_size };
+                let effective_value_size = if mem.compression().is_enabled() {
+                    None
+                } else {
+                    *fixed_value_size
+                };
                 let tree =
                     UntypedBtree::new(*table_root, mem, *fixed_key_size, effective_value_size);
                 tree.visit_all_pages(visitor)?;
@@ -204,14 +207,13 @@ impl InternalTableDefinition {
                 fixed_value_size,
                 ..
             } => {
-                let effective_value_size =
-                    if mem.compression().is_enabled() { None } else { *fixed_value_size };
-                let tree = UntypedMultiBtree::new(
-                    *table_root,
-                    mem,
-                    *fixed_key_size,
-                    effective_value_size,
-                );
+                let effective_value_size = if mem.compression().is_enabled() {
+                    None
+                } else {
+                    *fixed_value_size
+                };
+                let tree =
+                    UntypedMultiBtree::new(*table_root, mem, *fixed_key_size, effective_value_size);
                 tree.visit_all_pages(visitor)?;
             }
         }

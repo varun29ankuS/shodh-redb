@@ -448,41 +448,43 @@ pub(crate) fn decompress_value(data: &[u8]) -> Result<Cow<'_, [u8]>> {
     let compressed_data = &data[VALUE_ENVELOPE_SIZE..];
 
     let algo_bits = flags & 0x06; // bits 1-2
-    let decompressed: Vec<u8> = match algo_bits {
+    match algo_bits {
         #[cfg(feature = "compression_lz4")]
-        0x02 => lz4_flex::decompress_size_prepended(compressed_data)
-            .map_err(|e| StorageError::Corrupted(format!("LZ4 value decompression failed: {e}")))?,
-        #[cfg(feature = "compression_zstd")]
-        0x04 => zstd::bulk::decompress(compressed_data, original_size)
-            .map_err(|e| StorageError::Corrupted(format!("zstd value decompression failed: {e}")))?,
-        #[cfg(not(feature = "compression_lz4"))]
         0x02 => {
-            return Err(StorageError::Corrupted(
-                "value uses LZ4 compression but compression_lz4 feature is not enabled".to_string(),
-            ));
+            let decompressed = lz4_flex::decompress_size_prepended(compressed_data)
+                .map_err(|e| StorageError::Corrupted(format!("LZ4 value decompression failed: {e}")))?;
+            if decompressed.len() != original_size {
+                return Err(StorageError::Corrupted(format!(
+                    "decompressed value size mismatch: expected {original_size}, got {}",
+                    decompressed.len()
+                )));
+            }
+            Ok(Cow::Owned(decompressed))
         }
-        #[cfg(not(feature = "compression_zstd"))]
+        #[cfg(feature = "compression_zstd")]
         0x04 => {
-            return Err(StorageError::Corrupted(
-                "value uses zstd compression but compression_zstd feature is not enabled"
-                    .to_string(),
-            ));
+            let decompressed = zstd::bulk::decompress(compressed_data, original_size)
+                .map_err(|e| StorageError::Corrupted(format!("zstd value decompression failed: {e}")))?;
+            if decompressed.len() != original_size {
+                return Err(StorageError::Corrupted(format!(
+                    "decompressed value size mismatch: expected {original_size}, got {}",
+                    decompressed.len()
+                )));
+            }
+            Ok(Cow::Owned(decompressed))
         }
-        _ => {
-            return Err(StorageError::Corrupted(format!(
-                "unknown value compression algorithm bits: {algo_bits:#04x}"
-            )));
-        }
-    };
-
-    if decompressed.len() != original_size {
-        return Err(StorageError::Corrupted(format!(
-            "decompressed value size mismatch: expected {original_size}, got {}",
-            decompressed.len()
-        )));
+        #[cfg(not(feature = "compression_lz4"))]
+        0x02 => Err(StorageError::Corrupted(
+            "value uses LZ4 compression but compression_lz4 feature is not enabled".to_string(),
+        )),
+        #[cfg(not(feature = "compression_zstd"))]
+        0x04 => Err(StorageError::Corrupted(
+            "value uses zstd compression but compression_zstd feature is not enabled".to_string(),
+        )),
+        _ => Err(StorageError::Corrupted(format!(
+            "unknown value compression algorithm bits: {algo_bits:#04x}"
+        ))),
     }
-
-    Ok(Cow::Owned(decompressed))
 }
 
 #[cfg(test)]

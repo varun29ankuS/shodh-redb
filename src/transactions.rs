@@ -306,6 +306,7 @@ impl<K: Key + 'static, V: Value + 'static> Display for SystemTableDefinition<'_,
 pub struct DatabaseStats {
     pub(crate) tree_height: u32,
     pub(crate) allocated_pages: u64,
+    pub(crate) free_pages: u64,
     pub(crate) leaf_pages: u64,
     pub(crate) branch_pages: u64,
     pub(crate) stored_leaf_bytes: u64,
@@ -323,6 +324,11 @@ impl DatabaseStats {
     /// Number of pages allocated
     pub fn allocated_pages(&self) -> u64 {
         self.allocated_pages
+    }
+
+    /// Number of pages currently free in the buddy allocator, available for immediate reuse
+    pub fn free_pages(&self) -> u64 {
+        self.free_pages
     }
 
     /// Number of leaf pages that store user data
@@ -1385,6 +1391,31 @@ impl WriteTransaction {
             self.two_phase_commit = true;
         }
 
+        // Early freed page processing: reclaim pages from previous transactions BEFORE
+        // this transaction's B-tree mutations, so the buddy allocator can reuse them.
+        // Without this, freed pages from transaction N are only returned to the allocator
+        // during transaction N+1's commit — after N+1 has already allocated fresh pages.
+        match self.durability {
+            InternalDurability::None => {
+                let mut free_until_transaction = self
+                    .transaction_tracker
+                    .oldest_live_read_nondurable_transaction()
+                    .map_or(self.transaction_id, |x| x.next());
+                if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint() {
+                    free_until_transaction =
+                        TransactionId::min(free_until_transaction, oldest_savepoint);
+                }
+                self.process_freed_pages_nondurable(free_until_transaction)?;
+            }
+            InternalDurability::Immediate => {
+                let free_until_transaction = self
+                    .transaction_tracker
+                    .oldest_live_read_transaction()
+                    .map_or(self.transaction_id, |x| x.next());
+                self.process_freed_pages(free_until_transaction)?;
+            }
+        }
+
         let (user_root, allocated_pages, data_freed) =
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
@@ -1548,11 +1579,8 @@ impl WriteTransaction {
     }
 
     pub(crate) fn durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
-        let free_until_transaction = self
-            .transaction_tracker
-            .oldest_live_read_transaction()
-            .map_or(self.transaction_id, |x| x.next());
-        self.process_freed_pages(free_until_transaction)?;
+        // NOTE: process_freed_pages() has already run in commit_inner() before flush_and_close(),
+        // so previously freed pages are already returned to the buddy allocator.
 
         let mut system_tables = self.system_tables.lock().unwrap();
         let system_freed_pages = system_tables.system_freed_pages();
@@ -1624,21 +1652,8 @@ impl WriteTransaction {
 
     // Commit without a durability guarantee
     pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
-        let mut free_until_transaction = self
-            .transaction_tracker
-            .oldest_live_read_nondurable_transaction()
-            .map_or(self.transaction_id, |x| x.next());
-        // TODO: refactor the non-durable free'ed processing to remove this
-        // The reason it is needed is that non-durable commits edit previous non-durable commits,
-        // but they only edit the freed tree of unpersisted pages.
-        // The allocated tree, which savepoints rely, is not edited for performance reasons
-        // Therefore, we must not edit anything after a savepoint
-        // It would be better for non-durable transaction's unpersisted pages to be kept in-memory
-        // in a data structure where the allocated list can be efficiently edited
-        if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint() {
-            free_until_transaction = TransactionId::min(free_until_transaction, oldest_savepoint);
-        }
-        self.process_freed_pages_nondurable(free_until_transaction)?;
+        // NOTE: process_freed_pages_nondurable() has already run in commit_inner() before
+        // flush_and_close(), so previously freed pages are already returned to the buddy allocator.
 
         let mut post_commit_frees = vec![];
 
@@ -1949,6 +1964,7 @@ impl WriteTransaction {
         Ok(DatabaseStats {
             tree_height: data_tree_stats.tree_height(),
             allocated_pages: self.mem.count_allocated_pages()?,
+            free_pages: self.mem.count_free_pages()?,
             leaf_pages: data_tree_stats.leaf_pages(),
             branch_pages: data_tree_stats.branch_pages(),
             stored_leaf_bytes: data_tree_stats.stored_bytes(),

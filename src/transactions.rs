@@ -1395,24 +1395,21 @@ impl WriteTransaction {
         // this transaction's B-tree mutations, so the buddy allocator can reuse them.
         // Without this, freed pages from transaction N are only returned to the allocator
         // during transaction N+1's commit — after N+1 has already allocated fresh pages.
-        match self.durability {
-            InternalDurability::None => {
-                let mut free_until_transaction = self
-                    .transaction_tracker
-                    .oldest_live_read_nondurable_transaction()
-                    .map_or(self.transaction_id, |x| x.next());
-                if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint() {
-                    free_until_transaction =
-                        TransactionId::min(free_until_transaction, oldest_savepoint);
-                }
-                self.process_freed_pages_nondurable(free_until_transaction)?;
-            }
-            InternalDurability::Immediate => {
-                let free_until_transaction = self
-                    .transaction_tracker
-                    .oldest_live_read_transaction()
-                    .map_or(self.transaction_id, |x| x.next());
-                self.process_freed_pages(free_until_transaction)?;
+        //
+        // Only done for durable commits. Non-durable commits have complex savepoint
+        // interactions that require freed page processing to stay in the commit path.
+        if matches!(self.durability, InternalDurability::Immediate) {
+            let free_until_transaction = self
+                .transaction_tracker
+                .oldest_live_read_transaction()
+                .map_or(self.transaction_id, |x| x.next());
+            if let Err(err) = self.process_freed_pages(free_until_transaction) {
+                self.tables
+                    .lock()
+                    .unwrap()
+                    .table_tree
+                    .clear_root_updates_and_close();
+                return Err(err.into());
             }
         }
 
@@ -1652,8 +1649,21 @@ impl WriteTransaction {
 
     // Commit without a durability guarantee
     pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
-        // NOTE: process_freed_pages_nondurable() has already run in commit_inner() before
-        // flush_and_close(), so previously freed pages are already returned to the buddy allocator.
+        let mut free_until_transaction = self
+            .transaction_tracker
+            .oldest_live_read_nondurable_transaction()
+            .map_or(self.transaction_id, |x| x.next());
+        // TODO: refactor the non-durable free'ed processing to remove this
+        // The reason it is needed is that non-durable commits edit previous non-durable commits,
+        // but they only edit the freed tree of unpersisted pages.
+        // The allocated tree, which savepoints rely, is not edited for performance reasons
+        // Therefore, we must not edit anything after a savepoint
+        // It would be better for non-durable transaction's unpersisted pages to be kept in-memory
+        // in a data structure where the allocated list can be efficiently edited
+        if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint() {
+            free_until_transaction = TransactionId::min(free_until_transaction, oldest_savepoint);
+        }
+        self.process_freed_pages_nondurable(free_until_transaction)?;
 
         let mut post_commit_frees = vec![];
 

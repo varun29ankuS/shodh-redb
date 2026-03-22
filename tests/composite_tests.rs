@@ -178,7 +178,7 @@ fn semantic_only() {
     let read_txn = db.begin_read().unwrap();
     let idx = read_txn.open_ivfpq_index(&INDEX_8D).unwrap();
 
-    // Query with the first blob's vector — it should rank highest
+    // Query with the first blob's vector -- it should rank highest
     let query = &vectors[0].1;
     let results = read_txn
         .composite_query()
@@ -609,13 +609,13 @@ fn validation_semantic_without_index() {
     let mut query = CompositeQuery::new(&read_txn);
     query = query.temporal(0.0); // disable temporal
     // Force semantic weight via the builder but no index
-    // CompositeQuery::semantic() requires index — so test causal without root instead
+    // CompositeQuery::semantic() requires index -- so test causal without root instead
     let result = CompositeQuery::new(&read_txn)
         .causal(BlobId::new(999, 0), 0.0)
         .top_k(10)
         .execute();
 
-    // All weights are 0 → validation error
+    // All weights are 0 -> validation error
     assert!(result.is_err());
     let _ = query; // suppress unused
 }

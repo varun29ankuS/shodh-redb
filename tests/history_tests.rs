@@ -179,7 +179,7 @@ fn history_reopen_persistence() {
         txn.commit().unwrap();
     }
 
-    // Reopen with history enabled — snapshots should be restored
+    // Reopen with history enabled - snapshots should be restored
     {
         let db = Database::builder()
             .set_history_retention(10)
@@ -258,7 +258,7 @@ fn history_retention_zero_purges() {
         assert_eq!(history.len(), 5);
     }
 
-    // Reopen with retention=0 — all history should be purged
+    // Reopen with retention=0 - all history should be purged
     {
         let db = Database::builder()
             .set_history_retention(0)

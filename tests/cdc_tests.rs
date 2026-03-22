@@ -7,8 +7,16 @@ const TABLE_A: TableDefinition<&str, u64> = TableDefinition::new("table_a");
 const TABLE_B: TableDefinition<&str, &str> = TableDefinition::new("table_b");
 const MULTIMAP: MultimapTableDefinition<&str, u64> = MultimapTableDefinition::new("mmap");
 
+fn create_tempfile() -> tempfile::NamedTempFile {
+    if cfg!(target_os = "wasi") {
+        tempfile::NamedTempFile::new_in("/tmp").unwrap()
+    } else {
+        tempfile::NamedTempFile::new().unwrap()
+    }
+}
+
 fn create_cdc_db() -> (tempfile::NamedTempFile, Database) {
-    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::builder()
         .set_cdc(CdcConfig {
             enabled: true,
@@ -21,7 +29,7 @@ fn create_cdc_db() -> (tempfile::NamedTempFile, Database) {
 
 #[test]
 fn cdc_disabled_by_default() {
-    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let txn = db.begin_write().unwrap();
@@ -348,7 +356,7 @@ fn cdc_multimap() {
 
 #[test]
 fn cdc_retention_pruning() {
-    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::builder()
         .set_cdc(CdcConfig {
             enabled: true,

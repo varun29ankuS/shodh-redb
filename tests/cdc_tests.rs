@@ -1,5 +1,6 @@
 use shodh_redb::{
-    CdcConfig, ChangeOp, Database, MultimapTableDefinition, ReadableDatabase, TableDefinition,
+    CdcConfig, ChangeOp, Database, MultimapTableDefinition, ReadableDatabase,
+    ReadableTableMetadata, TableDefinition,
 };
 
 const TABLE_A: TableDefinition<&str, u64> = TableDefinition::new("table_a");
@@ -370,4 +371,174 @@ fn cdc_retention_pruning() {
         all.len()
     );
     assert!(!all.is_empty());
+}
+
+#[test]
+fn cdc_extract_if() {
+    let (_tmp, db) = create_cdc_db();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(TABLE_A).unwrap();
+        table.insert("a", &1u64).unwrap();
+        table.insert("b", &2u64).unwrap();
+        table.insert("c", &3u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Extract entries where value > 1
+    let txn2 = db.begin_write().unwrap();
+    {
+        let mut table = txn2.open_table(TABLE_A).unwrap();
+        let extracted: Vec<_> = table
+            .extract_if(|_k, v: u64| v > 1)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(extracted.len(), 2);
+    }
+    txn2.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let changes = read_txn.read_cdc_since(0).unwrap();
+    // 3 inserts + 2 deletes (b and c extracted)
+    assert_eq!(changes.len(), 5);
+    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    assert_eq!(deletes.len(), 2);
+    for d in &deletes {
+        assert!(d.old_value.is_some());
+        assert!(d.new_value.is_none());
+    }
+}
+
+#[test]
+fn cdc_retain() {
+    let (_tmp, db) = create_cdc_db();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(TABLE_A).unwrap();
+        table.insert("x", &10u64).unwrap();
+        table.insert("y", &20u64).unwrap();
+        table.insert("z", &30u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Retain only entries where value <= 10
+    let txn2 = db.begin_write().unwrap();
+    {
+        let mut table = txn2.open_table(TABLE_A).unwrap();
+        table.retain(|_k, v: u64| v <= 10).unwrap();
+    }
+    txn2.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let changes = read_txn.read_cdc_since(0).unwrap();
+    // 3 inserts + 2 deletes (y and z removed)
+    assert_eq!(changes.len(), 5);
+    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    assert_eq!(deletes.len(), 2);
+
+    // Verify the table only contains "x"
+    let table = read_txn.open_table(TABLE_A).unwrap();
+    assert_eq!(table.len().unwrap(), 1);
+    assert_eq!(table.get("x").unwrap().unwrap().value(), 10);
+}
+
+#[test]
+fn cdc_retain_in_range() {
+    let (_tmp, db) = create_cdc_db();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(TABLE_A).unwrap();
+        table.insert("a", &1u64).unwrap();
+        table.insert("b", &2u64).unwrap();
+        table.insert("c", &3u64).unwrap();
+        table.insert("d", &4u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Retain in range "b".."d", keep only even values
+    let txn2 = db.begin_write().unwrap();
+    {
+        let mut table = txn2.open_table(TABLE_A).unwrap();
+        table.retain_in("b"..="c", |_k, v: u64| v % 2 == 0).unwrap();
+    }
+    txn2.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let changes = read_txn.read_cdc_since(0).unwrap();
+    // 4 inserts + 1 delete (c=3 removed, b=2 kept, a and d outside range)
+    assert_eq!(changes.len(), 5);
+    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0].key, b"c");
+}
+
+#[test]
+fn cdc_multimap_remove_all() {
+    let (_tmp, db) = create_cdc_db();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_multimap_table(MULTIMAP).unwrap();
+        table.insert("key", &10u64).unwrap();
+        table.insert("key", &20u64).unwrap();
+        table.insert("key", &30u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn2 = db.begin_write().unwrap();
+    {
+        let mut table = txn2.open_multimap_table(MULTIMAP).unwrap();
+        let removed: Vec<_> = table
+            .remove_all("key")
+            .unwrap()
+            .map(|r| r.unwrap().value())
+            .collect();
+        assert_eq!(removed.len(), 3);
+    }
+    txn2.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let changes = read_txn.read_cdc_since(0).unwrap();
+    // 3 inserts + 3 deletes
+    assert_eq!(changes.len(), 6);
+    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    assert_eq!(deletes.len(), 3);
+    for d in &deletes {
+        assert!(d.old_value.is_some());
+        assert!(d.new_value.is_none());
+        assert_eq!(d.table_name, "mmap");
+    }
+}
+
+#[test]
+fn cdc_multimap_drain() {
+    let (_tmp, db) = create_cdc_db();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_multimap_table(MULTIMAP).unwrap();
+        table.insert("a", &1u64).unwrap();
+        table.insert("a", &2u64).unwrap();
+        table.insert("b", &3u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn2 = db.begin_write().unwrap();
+    {
+        let mut table = txn2.open_multimap_table(MULTIMAP).unwrap();
+        let drained = table.drain::<&str>(..).unwrap();
+        assert_eq!(drained, 2); // 2 keys
+    }
+    txn2.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let changes = read_txn.read_cdc_since(0).unwrap();
+    // 3 inserts + 3 deletes (all values removed)
+    assert_eq!(changes.len(), 6);
+    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    assert_eq!(deletes.len(), 3);
 }

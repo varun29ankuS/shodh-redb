@@ -40,9 +40,10 @@ pub enum ChangeOp {
 impl ChangeOp {
     fn from_u8(v: u8) -> Self {
         match v {
+            0 => Self::Insert,
             1 => Self::Update,
             2 => Self::Delete,
-            _ => Self::Insert,
+            other => unreachable!("invalid ChangeOp discriminant: {other}"),
         }
     }
 }

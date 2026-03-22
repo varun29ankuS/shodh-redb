@@ -171,9 +171,16 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree
-            .extract_from_if(&range, predicate)
-            .map(ExtractIf::new)
+        let inner = self.tree.extract_from_if(&range, predicate)?;
+        if self.transaction.cdc_log.is_some() {
+            Ok(ExtractIf::with_cdc(
+                inner,
+                self.transaction,
+                self.name.clone(),
+            ))
+        } else {
+            Ok(ExtractIf::new(inner))
+        }
     }
 
     /// Applies `predicate` to all key-value pairs. All entries for which
@@ -183,7 +190,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         &mut self,
         predicate: F,
     ) -> Result {
-        self.tree.retain_in::<K::SelfType<'_>, F>(predicate, ..)
+        self.retain_in::<K::SelfType<'_>, F>(.., predicate)
     }
 
     /// Applies `predicate` to all key-value pairs in the range `start..end`. All entries for which
@@ -192,12 +199,20 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     pub fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         range: impl RangeBounds<KR> + 'a,
-        predicate: F,
+        mut predicate: F,
     ) -> Result
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree.retain_in(predicate, range)
+        if self.transaction.cdc_log.is_some() {
+            // Route through extract_from_if so CDC events are recorded for each removal
+            for result in self.extract_from_if(range, move |k, v| !predicate(k, v))? {
+                result?;
+            }
+            Ok(())
+        } else {
+            self.tree.retain_in(predicate, range)
+        }
     }
 
     /// Removes all key-value pairs in the given range
@@ -207,29 +222,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        let cdc_enabled = self.transaction.cdc_log.is_some();
-        let mut cdc_events: Vec<CdcEvent> = Vec::new();
-        let table_name = if cdc_enabled {
-            Some(self.name.clone())
-        } else {
-            None
-        };
         let mut count = 0u64;
         for result in self.extract_from_if(range, |_, _| true)? {
-            let (key_guard, val_guard) = result?;
-            if cdc_enabled {
-                cdc_events.push(CdcEvent {
-                    table_name: table_name.clone().unwrap(),
-                    op: ChangeOp::Delete,
-                    key: K::as_bytes(&key_guard.value()).as_ref().to_vec(),
-                    new_value: None,
-                    old_value: Some(V::as_bytes(&val_guard.value()).as_ref().to_vec()),
-                });
-            }
+            result?;
             count += 1;
-        }
-        for event in cdc_events {
-            self.transaction.record_cdc(event);
         }
         Ok(count)
     }
@@ -722,6 +718,7 @@ pub struct ExtractIf<
     F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
 > {
     inner: BtreeExtractIf<'a, K, V, F>,
+    cdc: Option<(&'a WriteTransaction, String)>,
 }
 
 impl<
@@ -732,7 +729,18 @@ impl<
 > ExtractIf<'a, K, V, F>
 {
     pub(crate) fn new(inner: BtreeExtractIf<'a, K, V, F>) -> Self {
-        Self { inner }
+        Self { inner, cdc: None }
+    }
+
+    pub(crate) fn with_cdc(
+        inner: BtreeExtractIf<'a, K, V, F>,
+        transaction: &'a WriteTransaction,
+        table_name: String,
+    ) -> Self {
+        Self {
+            inner,
+            cdc: Some((transaction, table_name)),
+        }
     }
 }
 
@@ -755,6 +763,15 @@ impl<
             } else {
                 AccessGuard::with_page(page, value_range)
             };
+            if let Some((txn, table_name)) = &self.cdc {
+                txn.record_cdc(CdcEvent {
+                    table_name: table_name.clone(),
+                    op: ChangeOp::Delete,
+                    key: K::as_bytes(&key.value()).as_ref().to_vec(),
+                    new_value: None,
+                    old_value: Some(V::as_bytes(&value.value()).as_ref().to_vec()),
+                });
+            }
             (key, value)
         }))
     }
@@ -776,6 +793,15 @@ impl<
             } else {
                 AccessGuard::with_page(page, value_range)
             };
+            if let Some((txn, table_name)) = &self.cdc {
+                txn.record_cdc(CdcEvent {
+                    table_name: table_name.clone(),
+                    op: ChangeOp::Delete,
+                    key: K::as_bytes(&key.value()).as_ref().to_vec(),
+                    new_value: None,
+                    old_value: Some(V::as_bytes(&value.value()).as_ref().to_vec()),
+                });
+            }
             (key, value)
         }))
     }

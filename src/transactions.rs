@@ -3391,7 +3391,12 @@ impl ReadTransaction {
 
             // Look up the edge from parent -> current
             let edge = if let Some(parent_id) = parent {
-                Self::lookup_causal_edge(&parent_id, &current, edges_btree.as_ref(), legacy_btree.as_ref())?
+                Self::lookup_causal_edge(
+                    &parent_id,
+                    &current,
+                    edges_btree.as_ref(),
+                    legacy_btree.as_ref(),
+                )?
             } else {
                 None
             };
@@ -3474,8 +3479,12 @@ impl ReadTransaction {
             };
 
             // Edge from parent -> current
-            let edge =
-                Self::lookup_causal_edge(&parent, &current, edges_btree.as_ref(), legacy_btree.as_ref())?;
+            let edge = Self::lookup_causal_edge(
+                &parent,
+                &current,
+                edges_btree.as_ref(),
+                legacy_btree.as_ref(),
+            )?;
             path.push((current, edge));
 
             if parent == *from {

@@ -738,7 +738,9 @@ impl PartialOrd for CausalEdgeKey {
 
 impl Ord for CausalEdgeKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.parent.cmp(&other.parent).then(self.child.cmp(&other.child))
+        self.parent
+            .cmp(&other.parent)
+            .then(self.child.cmp(&other.child))
     }
 }
 

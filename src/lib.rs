@@ -107,12 +107,12 @@ pub use tree_store::{
 };
 pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
-pub use cdc::{CdcConfig, ChangeOp, ChangeStream};
 pub use blob_store::{
     BlobCompactionReport, BlobId, BlobInput, BlobMeta, BlobReader, BlobRef, BlobStats, BlobWriter,
     CausalEdge, CausalLink, CausalPath, ContentType, DedupStats, MAX_TAGS_PER_BLOB, RelationType,
     StoreOptions,
 };
+pub use cdc::{CdcConfig, ChangeOp, ChangeStream};
 pub use composite::{CompositeQuery, ScoredBlob, SignalScores, SignalWeights};
 pub use ivfpq::{
     Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, ReadOnlyIvfPqIndex, SearchParams,

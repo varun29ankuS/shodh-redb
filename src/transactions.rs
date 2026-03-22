@@ -1,12 +1,12 @@
 use crate::blob_store::reader::BlobReader;
-use crate::cdc::types::{CdcEvent, CdcKey, CdcRecord, ChangeStream};
-use crate::cdc::CdcConfig;
 use crate::blob_store::types::{
     BlobDedupConfig, BlobId, BlobMeta, BlobRef, BlobStats, CausalEdge, CausalEdgeKey, CausalPath,
     ContentType, DedupStats, DedupVal, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, Sha256Key,
     StoreOptions, TagKey, TemporalKey,
 };
 use crate::blob_store::writer::BlobWriter;
+use crate::cdc::CdcConfig;
+use crate::cdc::types::{CdcEvent, CdcKey, CdcRecord, ChangeStream};
 use crate::compat::{HashMap, HashSet, Mutex};
 use crate::db::TransactionGuard;
 use crate::error::CommitError;

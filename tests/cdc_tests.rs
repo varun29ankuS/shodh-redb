@@ -33,7 +33,10 @@ fn cdc_disabled_by_default() {
 
     let read_txn = db.begin_read().unwrap();
     let changes = read_txn.read_cdc_since(0).unwrap();
-    assert!(changes.is_empty(), "CDC should produce no events when disabled");
+    assert!(
+        changes.is_empty(),
+        "CDC should produce no events when disabled"
+    );
 }
 
 #[test]
@@ -290,7 +293,10 @@ fn cdc_drain_events() {
     let changes = read_txn.read_cdc_since(0).unwrap();
     // 3 inserts + 3 deletes
     assert_eq!(changes.len(), 6);
-    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    let deletes: Vec<_> = changes
+        .iter()
+        .filter(|c| c.op == ChangeOp::Delete)
+        .collect();
     assert_eq!(deletes.len(), 3);
     for d in &deletes {
         assert!(d.old_value.is_some());
@@ -403,7 +409,10 @@ fn cdc_extract_if() {
     let changes = read_txn.read_cdc_since(0).unwrap();
     // 3 inserts + 2 deletes (b and c extracted)
     assert_eq!(changes.len(), 5);
-    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    let deletes: Vec<_> = changes
+        .iter()
+        .filter(|c| c.op == ChangeOp::Delete)
+        .collect();
     assert_eq!(deletes.len(), 2);
     for d in &deletes {
         assert!(d.old_value.is_some());
@@ -436,7 +445,10 @@ fn cdc_retain() {
     let changes = read_txn.read_cdc_since(0).unwrap();
     // 3 inserts + 2 deletes (y and z removed)
     assert_eq!(changes.len(), 5);
-    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    let deletes: Vec<_> = changes
+        .iter()
+        .filter(|c| c.op == ChangeOp::Delete)
+        .collect();
     assert_eq!(deletes.len(), 2);
 
     // Verify the table only contains "x"
@@ -471,7 +483,10 @@ fn cdc_retain_in_range() {
     let changes = read_txn.read_cdc_since(0).unwrap();
     // 4 inserts + 1 delete (c=3 removed, b=2 kept, a and d outside range)
     assert_eq!(changes.len(), 5);
-    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    let deletes: Vec<_> = changes
+        .iter()
+        .filter(|c| c.op == ChangeOp::Delete)
+        .collect();
     assert_eq!(deletes.len(), 1);
     assert_eq!(deletes[0].key, b"c");
 }
@@ -505,7 +520,10 @@ fn cdc_multimap_remove_all() {
     let changes = read_txn.read_cdc_since(0).unwrap();
     // 3 inserts + 3 deletes
     assert_eq!(changes.len(), 6);
-    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    let deletes: Vec<_> = changes
+        .iter()
+        .filter(|c| c.op == ChangeOp::Delete)
+        .collect();
     assert_eq!(deletes.len(), 3);
     for d in &deletes {
         assert!(d.old_value.is_some());
@@ -539,6 +557,9 @@ fn cdc_multimap_drain() {
     let changes = read_txn.read_cdc_since(0).unwrap();
     // 3 inserts + 3 deletes (all values removed)
     assert_eq!(changes.len(), 6);
-    let deletes: Vec<_> = changes.iter().filter(|c| c.op == ChangeOp::Delete).collect();
+    let deletes: Vec<_> = changes
+        .iter()
+        .filter(|c| c.op == ChangeOp::Delete)
+        .collect();
     assert_eq!(deletes.len(), 3);
 }

@@ -26,9 +26,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
-#[cfg(feature = "std")]
 use alloc::vec;
-#[cfg(feature = "std")]
 use alloc::vec::Vec;
 use core::fmt::{Debug, Display, Formatter};
 use core::marker::PhantomData;

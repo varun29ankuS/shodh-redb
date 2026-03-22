@@ -247,8 +247,7 @@ fn binary_quantized_multi_byte() {
     const BQ_TABLE: TableDefinition<u64, BinaryQuantized<2>> = TableDefinition::new("bq_2byte");
 
     let v1 = [
-        1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5,
-        -0.5,
+        1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5,
     ];
     let bq1_vec = shodh_redb::quantize_binary(&v1);
     assert_eq!(bq1_vec.len(), 2);
@@ -636,9 +635,9 @@ fn concurrent_ivfpq_reads() {
 
     const INDEX: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
         "concurrent_test",
-        8,  // dim
-        4,  // clusters
-        4,  // subvectors
+        8, // dim
+        4, // clusters
+        4, // subvectors
         DistanceMetric::EuclideanSq,
     );
 
@@ -711,17 +710,12 @@ fn merge_unsupported_width_noop() {
         // 3-byte value: not a supported numeric width (1, 2, 4, 8)
         table.insert("key", &[10u8, 20, 30][..]).unwrap();
         // NumericAdd on 3 bytes should be a no-op (return existing)
-        table
-            .merge("key", &[1u8, 1, 1], &NumericAdd)
-            .unwrap();
+        table.merge("key", &[1u8, 1, 1], &NumericAdd).unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(TABLE_BYTES).unwrap();
     // Value unchanged -- the merge was a no-op for unsupported width
-    assert_eq!(
-        table.get("key").unwrap().unwrap().value(),
-        &[10u8, 20, 30]
-    );
+    assert_eq!(table.get("key").unwrap().unwrap().value(), &[10u8, 20, 30]);
 }

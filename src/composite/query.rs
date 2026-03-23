@@ -1,6 +1,7 @@
 use crate::StorageError;
 use crate::blob_store::types::BlobId;
 use crate::compat::HashMap;
+use crate::fractal::{FractalSearchParams, ReadOnlyFractalIndex};
 use crate::ivfpq::{ReadOnlyIvfPqIndex, SearchParams};
 use crate::transactions::ReadTransaction;
 use alloc::collections::BinaryHeap;
@@ -34,10 +35,12 @@ use super::types::{
 pub struct CompositeQuery<'a> {
     txn: &'a ReadTransaction,
 
-    // Semantic signal
+    // Semantic signal (IVF-PQ or Fractal)
     vector_index: Option<&'a ReadOnlyIvfPqIndex>,
+    fractal_index: Option<&'a ReadOnlyFractalIndex>,
     query_vector: Option<&'a [f32]>,
     search_params: Option<SearchParams>,
+    fractal_search_params: Option<FractalSearchParams>,
     semantic_candidates: Option<usize>,
 
     // Temporal signal
@@ -62,8 +65,10 @@ impl<'a> CompositeQuery<'a> {
         Self {
             txn,
             vector_index: None,
+            fractal_index: None,
             query_vector: None,
             search_params: None,
+            fractal_search_params: None,
             semantic_candidates: None,
             time_range: None,
             causal_root: None,
@@ -103,6 +108,30 @@ impl<'a> CompositeQuery<'a> {
     #[must_use]
     pub fn semantic_candidates(mut self, n: usize) -> Self {
         self.semantic_candidates = Some(n);
+        self
+    }
+
+    /// Set the semantic signal using a fractal vector index.
+    ///
+    /// Alternative to [`semantic()`](Self::semantic) -- uses the adaptive
+    /// fractal index instead of IVF-PQ. If both are set, fractal takes priority.
+    #[must_use]
+    pub fn semantic_fractal(
+        mut self,
+        index: &'a ReadOnlyFractalIndex,
+        query: &'a [f32],
+        weight: f32,
+    ) -> Self {
+        self.fractal_index = Some(index);
+        self.query_vector = Some(query);
+        self.weights.semantic = weight.max(0.0);
+        self
+    }
+
+    /// Override fractal search parameters.
+    #[must_use]
+    pub fn fractal_search_params(mut self, params: FractalSearchParams) -> Self {
+        self.fractal_search_params = Some(params);
         self
     }
 
@@ -175,18 +204,31 @@ impl<'a> CompositeQuery<'a> {
         // Phase 1: Collect candidates
         let mut candidates: HashMap<BlobId, CandidateEntry> = HashMap::new();
 
-        // 1a: Semantic candidates
+        // 1a: Semantic candidates (fractal index takes priority over IVF-PQ)
         if sem_active {
-            let index = self.vector_index.unwrap();
             let query = self.query_vector.unwrap();
             let k = self.semantic_candidates.unwrap_or(self.top_k.max(1) * 5);
-            let params = self.search_params.unwrap_or(SearchParams {
-                nprobe: 16,
-                candidates: k * 2,
-                k,
-                rerank: true,
-            });
-            let results = index.search(self.txn, query, &params)?;
+
+            let results = if let Some(fi) = self.fractal_index {
+                let params = self.fractal_search_params.unwrap_or(FractalSearchParams {
+                    nprobe: 8,
+                    candidates: k * 2,
+                    k,
+                    rerank: true,
+                    min_hlc: 0,
+                });
+                fi.search(self.txn, query, &params)?
+            } else {
+                let index = self.vector_index.unwrap();
+                let params = self.search_params.unwrap_or(SearchParams {
+                    nprobe: 16,
+                    candidates: k * 2,
+                    k,
+                    rerank: true,
+                });
+                index.search(self.txn, query, &params)?
+            };
+
             for neighbor in &results {
                 if let Some((id, meta)) = self.txn.blob_by_sequence(neighbor.key)? {
                     let entry = candidates.entry(id).or_insert_with(|| CandidateEntry {
@@ -358,11 +400,17 @@ impl<'a> CompositeQuery<'a> {
                 "CompositeQuery: at least one signal must have weight > 0".to_string(),
             ));
         }
+        if self.weights.semantic > 0.0 && self.query_vector.is_none() {
+            return Err(StorageError::Corrupted(
+                "CompositeQuery: semantic signal requires a query vector".to_string(),
+            ));
+        }
         if self.weights.semantic > 0.0
-            && (self.vector_index.is_none() || self.query_vector.is_none())
+            && self.vector_index.is_none()
+            && self.fractal_index.is_none()
         {
             return Err(StorageError::Corrupted(
-                "CompositeQuery: semantic signal requires both index and query vector".to_string(),
+                "CompositeQuery: semantic signal requires an index (IVF-PQ or fractal)".to_string(),
             ));
         }
         if self.weights.causal > 0.0 && self.causal_root.is_none() {

@@ -1474,6 +1474,14 @@ impl WriteTransaction {
         crate::ivfpq::index::IvfPqIndex::open(self, definition)
     }
 
+    /// Open or create a fractal vector index for writing.
+    pub fn open_fractal_index(
+        &self,
+        definition: &crate::fractal::config::FractalIndexDefinition,
+    ) -> Result<crate::fractal::index::FractalIndex<'_>, TableError> {
+        crate::fractal::index::FractalIndex::open(self, definition)
+    }
+
     /// Open the given table
     ///
     /// The table will be created if it does not exist
@@ -3248,6 +3256,14 @@ impl ReadTransaction {
         definition: &crate::ivfpq::config::IvfPqIndexDefinition,
     ) -> Result<crate::ivfpq::index::ReadOnlyIvfPqIndex, TableError> {
         crate::ivfpq::index::ReadOnlyIvfPqIndex::open(self, definition)
+    }
+
+    /// Open a fractal vector index for reading.
+    pub fn open_fractal_index(
+        &self,
+        definition: &crate::fractal::config::FractalIndexDefinition,
+    ) -> Result<crate::fractal::index::ReadOnlyFractalIndex, TableError> {
+        crate::fractal::index::ReadOnlyFractalIndex::open(self, definition)
     }
 
     /// Open the given table without a type

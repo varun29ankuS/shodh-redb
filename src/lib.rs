@@ -114,6 +114,10 @@ pub use blob_store::{
 };
 pub use cdc::{CdcConfig, ChangeOp, ChangeStream};
 pub use composite::{CompositeQuery, ScoredBlob, SignalScores, SignalWeights};
+pub use fractal::{
+    FractalIndex, FractalIndexConfig, FractalIndexDefinition, FractalSearchParams,
+    ReadOnlyFractalIndex,
+};
 pub use ivfpq::{
     Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, ReadOnlyIvfPqIndex, SearchParams,
 };
@@ -142,6 +146,7 @@ mod complex_types;
 pub mod composite;
 mod db;
 pub mod error;
+pub mod fractal;
 #[cfg(feature = "std")]
 pub mod group_commit;
 pub mod ivfpq;

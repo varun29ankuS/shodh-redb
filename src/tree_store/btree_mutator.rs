@@ -13,8 +13,9 @@ use crate::tree_store::{
     TransactionalMemory,
 };
 use crate::types::{Key, Value};
-use crate::{AccessGuard, Result};
+use crate::{AccessGuard, Result, StorageError};
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
@@ -533,7 +534,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             );
                         }
                     } else {
-                        unreachable!();
+                        return Err(StorageError::Corrupted(format!(
+                            "Branch page {:?} corrupted: missing key at index {}",
+                            page.get_page_number(),
+                            i - 1
+                        )));
                     }
                 }
 
@@ -567,7 +572,15 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                 result
             }
-            _ => unreachable!(),
+            x => {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                    x,
+                    page.get_page_number(),
+                    LEAF,
+                    BRANCH
+                )));
+            }
         })
     }
 
@@ -612,7 +625,15 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 let mut mutator = BranchMutator::new(page.memory_mut());
                 mutator.write_child_page(child_index, child_page, DEFERRED);
             }
-            _ => unreachable!(),
+            x => {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                    x,
+                    page.get_page_number(),
+                    LEAF,
+                    BRANCH
+                )));
+            }
         }
 
         Ok(())
@@ -795,8 +816,9 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
         let final_result = match result {
             Subtree(_, _) => {
-                // Handled in the if above
-                unreachable!();
+                return Err(StorageError::Corrupted(format!(
+                    "Unexpected Subtree deletion result on page {original_page_number:?} after prior handling"
+                )));
             }
             DeletedLeaf => {
                 for i in 0..accessor.count_children() {
@@ -1063,11 +1085,17 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         checksum: Checksum,
         key: &[u8],
     ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
-        let node_mem = page.memory();
-        match node_mem[0] {
+        let page_type = page.memory()[0];
+        match page_type {
             LEAF => self.delete_leaf_helper(page, checksum, key),
             BRANCH => self.delete_branch_helper(page, checksum, key),
-            _ => unreachable!(),
+            x => Err(StorageError::Corrupted(format!(
+                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                x,
+                page.get_page_number(),
+                LEAF,
+                BRANCH
+            ))),
         }
     }
 }

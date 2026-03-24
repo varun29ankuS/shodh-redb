@@ -281,7 +281,48 @@ jobs:
         run: RUSTFLAGS="" just test_wasi
 
   # ──────────────────────────────────────────────
-  # MSRV check: ensure we compile on minimum supported Rust
+  # Feature-isolated test runs (ubuntu-latest only)
+  # ──────────────────────────────────────────────
+  test-features:
+    name: Test Features (${{ matrix.name }})
+    needs: [lint, compile]
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --deny warnings
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: no-default-features
+            args: "--no-default-features"
+          - name: default
+            args: ""
+          - name: compression_lz4
+            args: "--features compression_lz4"
+          - name: compression_zstd
+            args: "--features compression_zstd"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: test-features-${{ matrix.name }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: test-features-${{ matrix.name }}-
+
+      - name: Run tests (${{ matrix.name }})
+        run: cargo test --all ${{ matrix.args }}
+        env:
+          RUST_BACKTRACE: "1"
+
+  # ──────────────────────────────────────────────
+  # MSRV check: ensure we compile and pass tests on minimum supported Rust
   # ──────────────────────────────────────────────
   msrv:
     name: MSRV (1.89)
@@ -309,13 +350,18 @@ jobs:
       - name: Check MSRV
         run: cargo check --all --all-features
 
+      - name: Test MSRV
+        run: cargo test --all --all-features
+        env:
+          RUST_BACKTRACE: "1"
+
   # ──────────────────────────────────────────────
   # Summary gate for branch protection
   # ──────────────────────────────────────────────
   ci-pass:
     name: CI Pass
     if: always()
-    needs: [lint, compile, test, msrv]
+    needs: [lint, compile, test, test-features, msrv]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs
@@ -330,6 +376,10 @@ jobs:
           fi
           if [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "Test failed"
+            exit 1
+          fi
+          if [[ "${{ needs.test-features.result }}" != "success" ]]; then
+            echo "Test Features failed"
             exit 1
           fi
           if [[ "${{ needs.msrv.result }}" != "success" ]]; then

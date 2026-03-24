@@ -347,9 +347,10 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
                             false
                         }
                     };
-                    if !is_panicking {
-                        unreachable!();
-                    }
+                    assert!(
+                        is_panicking,
+                        "AccessGuard with RemoveEntry on-drop requires a mutable page, but page was immutable"
+                    );
                 }
             }
         }

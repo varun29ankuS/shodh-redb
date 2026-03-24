@@ -1,4 +1,3 @@
-use crate::Result;
 use crate::compat::Mutex;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, Checksum, DEFERRED, LEAF, LeafAccessor, branch_checksum, leaf_checksum,
@@ -9,8 +8,10 @@ use crate::tree_store::page_store::compression::{CompressionConfig, decompress_v
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{BtreeHeader, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, Value};
+use crate::{Result, StorageError};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -143,7 +144,13 @@ impl RangeIterState {
                             parent,
                         }))
                     }
-                    _ => unreachable!(),
+                    x => Err(StorageError::Corrupted(format!(
+                        "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                        x,
+                        child_page.get_page_number(),
+                        LEAF,
+                        BRANCH
+                    ))),
                 }
             }
         }
@@ -248,8 +255,8 @@ impl AllPageNumbersBtreeIter {
         manager: Arc<TransactionalMemory>,
     ) -> Result<Self> {
         let root_page = manager.get_page(root)?;
-        let node_mem = root_page.memory();
-        let start = match node_mem[0] {
+        let page_type = root_page.memory()[0];
+        let start = match page_type {
             LEAF => Leaf {
                 page: root_page,
                 fixed_key_size,
@@ -264,7 +271,11 @@ impl AllPageNumbersBtreeIter {
                 child: 0,
                 parent: None,
             },
-            _ => unreachable!(),
+            x => {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid page type byte {x} on page {root:?}, expected LEAF ({LEAF}) or BRANCH ({BRANCH})"
+                )));
+            }
         };
         Ok(Self {
             next: Some(start),
@@ -740,8 +751,8 @@ fn find_iter_unbounded<K: Key, V: Value>(
         fixed_value_size,
         manager,
     )?;
-    let node_mem = page.memory();
-    match node_mem[0] {
+    let page_type = page.memory()[0];
+    match page_type {
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
             let entry = if reverse { accessor.num_pairs() - 1 } else { 0 };
@@ -782,7 +793,13 @@ fn find_iter_unbounded<K: Key, V: Value>(
                 child_checksum,
             )
         }
-        _ => unreachable!(),
+        x => Err(StorageError::Corrupted(format!(
+            "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+            x,
+            page.get_page_number(),
+            LEAF,
+            BRANCH
+        ))),
     }
 }
 
@@ -804,8 +821,8 @@ fn find_iter_left<K: Key, V: Value>(
         fixed_value_size,
         manager,
     )?;
-    let node_mem = page.memory();
-    match node_mem[0] {
+    let page_type = page.memory()[0];
+    match page_type {
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
             let (mut position, found) = accessor.position::<K>(query);
@@ -850,7 +867,13 @@ fn find_iter_left<K: Key, V: Value>(
                 child_checksum,
             )
         }
-        _ => unreachable!(),
+        x => Err(StorageError::Corrupted(format!(
+            "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+            x,
+            page.get_page_number(),
+            LEAF,
+            BRANCH
+        ))),
     }
 }
 
@@ -870,8 +893,8 @@ fn find_iter_right<K: Key, V: Value>(
         fixed_value_size,
         manager,
     )?;
-    let node_mem = page.memory();
-    match node_mem[0] {
+    let page_type = page.memory()[0];
+    match page_type {
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
             let (mut position, found) = accessor.position::<K>(query);
@@ -916,7 +939,13 @@ fn find_iter_right<K: Key, V: Value>(
                 child_checksum,
             )
         }
-        _ => unreachable!(),
+        x => Err(StorageError::Corrupted(format!(
+            "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+            x,
+            page.get_page_number(),
+            LEAF,
+            BRANCH
+        ))),
     }
 }
 
@@ -939,8 +968,8 @@ fn find_iter_unbounded_raw(
         fixed_value_size,
         manager,
     )?;
-    let node_mem = page.memory();
-    match node_mem[0] {
+    let page_type = page.memory()[0];
+    match page_type {
         LEAF => Ok(Some(Leaf {
             page,
             fixed_key_size,
@@ -969,7 +998,13 @@ fn find_iter_unbounded_raw(
                 child_checksum,
             )
         }
-        _ => unreachable!(),
+        x => Err(StorageError::Corrupted(format!(
+            "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+            x,
+            page.get_page_number(),
+            LEAF,
+            BRANCH
+        ))),
     }
 }
 

@@ -15,8 +15,7 @@ use crate::tree_store::{
     PageTrackerPolicy,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
-use crate::{AccessGuard, Result};
-#[cfg(feature = "std")]
+use crate::{AccessGuard, Result, StorageError};
 use alloc::format;
 #[cfg(feature = "std")]
 use alloc::string::ToString;
@@ -125,7 +124,15 @@ impl UntypedBtree {
                     self.visit_pages_helper(child_path, visitor)?;
                 }
             }
-            _ => unreachable!(),
+            x => {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                    x,
+                    page.get_page_number(),
+                    LEAF,
+                    BRANCH
+                )));
+            }
         }
 
         Ok(())
@@ -340,7 +347,13 @@ impl UntypedBtreeMut {
 
                 branch_checksum(&page, self.key_width)
             }
-            _ => unreachable!(),
+            x => Err(StorageError::Corrupted(format!(
+                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                x,
+                page.get_page_number(),
+                LEAF,
+                BRANCH
+            ))),
         }
     }
 
@@ -364,7 +377,15 @@ impl UntypedBtreeMut {
                     drop(page);
                     self.dirty_leaf_visitor_helper(page_number, &visitor)?;
                 }
-                _ => unreachable!(),
+                x => {
+                    return Err(StorageError::Corrupted(format!(
+                        "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                        x,
+                        page.get_page_number(),
+                        LEAF,
+                        BRANCH
+                    )));
+                }
             }
         }
 
@@ -391,7 +412,15 @@ impl UntypedBtreeMut {
                     }
                 }
             }
-            _ => unreachable!(),
+            x => {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                    x,
+                    page.get_page_number(),
+                    LEAF,
+                    BRANCH
+                )));
+            }
         }
 
         Ok(())
@@ -442,7 +471,15 @@ impl UntypedBtreeMut {
                     }
                 }
             }
-            _ => unreachable!(),
+            x => {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                    x,
+                    old_page.get_page_number(),
+                    LEAF,
+                    BRANCH
+                )));
+            }
         }
 
         let mut freed_pages = self.freed_pages.lock();
@@ -780,7 +817,13 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                 };
                 self.get_mut_helper(Some((page, child_index)), child_page_mut, query)
             }
-            _ => unreachable!(),
+            x => Err(StorageError::Corrupted(format!(
+                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                x,
+                page.get_page_number(),
+                LEAF,
+                BRANCH
+            ))),
         }
     }
 
@@ -1391,7 +1434,13 @@ impl<K: Key, V: Value> Btree<K, V> {
                     child_checksum,
                 )
             }
-            _ => unreachable!(),
+            x => Err(StorageError::Corrupted(format!(
+                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                x,
+                page.get_page_number(),
+                LEAF,
+                BRANCH
+            ))),
         }
     }
 
@@ -1436,7 +1485,13 @@ impl<K: Key, V: Value> Btree<K, V> {
                     child_checksum,
                 )
             }
-            _ => unreachable!(),
+            x => Err(StorageError::Corrupted(format!(
+                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                x,
+                page.get_page_number(),
+                LEAF,
+                BRANCH
+            ))),
         }
     }
 
@@ -1483,7 +1538,13 @@ impl<K: Key, V: Value> Btree<K, V> {
                     child_checksum,
                 )
             }
-            _ => unreachable!(),
+            x => Err(StorageError::Corrupted(format!(
+                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                x,
+                page.get_page_number(),
+                LEAF,
+                BRANCH
+            ))),
         }
     }
 
@@ -1538,7 +1599,15 @@ impl<K: Key, V: Value> Btree<K, V> {
                             }
                             accessor.print_node::<K>();
                         }
-                        _ => unreachable!(),
+                        x => {
+                            return Err(StorageError::Corrupted(format!(
+                                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+                                x,
+                                page.get_page_number(),
+                                LEAF,
+                                BRANCH
+                            )));
+                        }
                     }
                     eprint!("  ");
                 }
@@ -1631,6 +1700,12 @@ fn stats_helper(
                 fragmented_bytes,
             })
         }
-        _ => unreachable!(),
+        x => Err(StorageError::Corrupted(format!(
+            "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
+            x,
+            page.get_page_number(),
+            LEAF,
+            BRANCH
+        ))),
     }
 }

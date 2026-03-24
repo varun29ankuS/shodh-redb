@@ -223,6 +223,7 @@ impl<'txn> FractalIndex<'txn> {
         // Create root cluster
         let root_id = self.config.alloc_cluster_id();
         self.config.root_cluster_id = root_id;
+        self.config.num_clusters += 1;
 
         // Compute root centroid from all training data
         let mut sums = alloc::vec![0.0f64; dim];

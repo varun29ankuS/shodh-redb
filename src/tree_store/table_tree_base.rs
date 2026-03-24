@@ -44,7 +44,7 @@ impl From<u8> for TableType {
         match value {
             3 => TableType::Normal,
             4 => TableType::Multimap,
-            _ => unreachable!(),
+            _ => panic!("Invalid TableType byte {value}, expected 3 (Normal) or 4 (Multimap)"),
         }
     }
 }

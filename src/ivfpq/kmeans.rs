@@ -300,6 +300,8 @@ pub fn assign_nearest(
 /// Find the `nprobe` nearest clusters to a query vector.
 ///
 /// Returns a list of `(cluster_id, distance)` sorted by ascending distance.
+/// When `diversity` is enabled, uses Greedy MMR to balance proximity with
+/// spatial diversity across the selected probe set.
 pub fn nearest_clusters(
     query: &[f32],
     centroids: &[f32],
@@ -307,7 +309,10 @@ pub fn nearest_clusters(
     num_clusters: usize,
     nprobe: usize,
     metric: DistanceMetric,
+    diversity: crate::probe_select::DiversityConfig,
 ) -> Vec<(u32, f32)> {
+    let nprobe = nprobe.min(num_clusters).max(1);
+
     #[allow(clippy::cast_possible_truncation)]
     let mut dists: Vec<(u32, f32)> = (0..num_clusters)
         .map(|c| {
@@ -316,14 +321,40 @@ pub fn nearest_clusters(
         })
         .collect();
 
-    // Partial sort: we only need the top `nprobe` closest.
-    let nprobe = nprobe.min(num_clusters).max(1);
-    dists.select_nth_unstable_by(nprobe - 1, |a, b| {
+    if !diversity.enabled() {
+        // Fast path: identical to previous behavior
+        dists.select_nth_unstable_by(nprobe - 1, |a, b| {
+            a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal)
+        });
+        dists.truncate(nprobe);
+        dists.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
+        return dists;
+    }
+
+    // Diversity path: partial sort top 2*nprobe, build centroid shortlist,
+    // then delegate to the shared MMR selector.
+    let shortlist_size = (nprobe.saturating_mul(2)).min(num_clusters);
+    dists.select_nth_unstable_by(shortlist_size - 1, |a, b| {
         a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal)
     });
-    dists.truncate(nprobe);
+    dists.truncate(shortlist_size);
     dists.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
-    dists
+
+    // Build flat centroid array for the shortlist (reindexed from original centroids)
+    let mut shortlist_centroids: Vec<f32> = Vec::with_capacity(shortlist_size * dim);
+    for &(cid, _) in &dists {
+        let start = cid as usize * dim;
+        shortlist_centroids.extend_from_slice(&centroids[start..start + dim]);
+    }
+
+    crate::probe_select::select_diverse_probes(
+        &dists,
+        &shortlist_centroids,
+        dim,
+        nprobe,
+        diversity,
+        metric,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +433,7 @@ mod tests {
             3,
             2,
             DistanceMetric::EuclideanSq,
+            crate::probe_select::DiversityConfig { lambda: 0.0 },
         );
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].0, 1); // closest is (5,5)

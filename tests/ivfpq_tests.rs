@@ -272,6 +272,7 @@ fn reranking_improves_accuracy() {
         candidates: 50,
         k: 5,
         rerank: true,
+        diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
     };
     let reranked = idx.search(&read_txn, query, &params_rerank).unwrap();
 
@@ -281,6 +282,7 @@ fn reranking_improves_accuracy() {
         candidates: 50,
         k: 5,
         rerank: false,
+        diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
     };
     let approx = idx.search(&read_txn, query, &params_no_rerank).unwrap();
 
@@ -656,6 +658,7 @@ fn recall_benchmark_128d() {
             candidates: 200,
             k,
             rerank: true,
+            diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
         };
         let results = idx.search(&read_txn, query, &params).unwrap();
         let result_ids: Vec<u64> = results.iter().map(|r| r.key).collect();
@@ -704,6 +707,7 @@ fn index_without_raw_vectors() {
         candidates: 20,
         k: 3,
         rerank: true,
+        diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
     };
     let results = idx.search(&read_txn, &vectors[0].1, &params).unwrap();
     assert!(!results.is_empty());

@@ -4,6 +4,7 @@ use core::cmp::Ordering as CmpOrdering;
 
 use crate::TableDefinition;
 use crate::error::StorageError;
+use crate::probe_select::DiversityConfig;
 use crate::table::ReadableTable;
 use crate::transactions::{ReadTransaction, WriteTransaction};
 use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
@@ -145,6 +146,7 @@ pub(crate) fn search_write(
         &q,
         nprobe,
         params.min_hlc,
+        params.diversity,
     )?;
 
     // Scan posting lists and buffers of selected leaves
@@ -264,6 +266,7 @@ pub(crate) fn search_read(
         &q,
         nprobe,
         params.min_hlc,
+        params.diversity,
     )?;
 
     let postings_def = TableDefinition::<PostingKey, &[u8]>::new(&idx.names.postings);
@@ -342,6 +345,7 @@ pub(crate) fn search_read(
 
 /// Beam search: walk the cluster tree from root to leaves, selecting the
 /// best `nprobe` children at each internal level.
+#[allow(clippy::too_many_arguments)]
 fn beam_search_leaves_write(
     txn: &WriteTransaction,
     names: &TableNames,
@@ -350,6 +354,7 @@ fn beam_search_leaves_write(
     query: &[f32],
     nprobe: u32,
     min_hlc: u64,
+    diversity: DiversityConfig,
 ) -> crate::Result<Vec<u32>> {
     let dim = config.dim as usize;
     let clusters_def = TableDefinition::<u32, &[u8]>::new(&names.clusters);
@@ -361,6 +366,8 @@ fn beam_search_leaves_write(
 
     loop {
         let mut next_level: Vec<(u32, f32)> = Vec::new();
+        let mut next_centroids: Vec<f32> = Vec::new();
+        let collect_centroids = diversity.enabled();
 
         for &node_id in &current_level {
             let meta = {
@@ -410,6 +417,9 @@ fn beam_search_leaves_write(
                         .collect();
                     let dist = config.metric.compute(query, &centroid);
                     next_level.push((child_id, dist));
+                    if collect_centroids {
+                        next_centroids.extend_from_slice(&centroid);
+                    }
                 }
             }
         }
@@ -418,20 +428,49 @@ fn beam_search_leaves_write(
             break;
         }
 
-        // Sort by distance, keep top nprobe
-        next_level.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(CmpOrdering::Equal));
         let nprobe_usize = nprobe as usize;
-        if next_level.len() > nprobe_usize {
-            next_level.truncate(nprobe_usize);
-        }
 
-        current_level = next_level.iter().map(|(id, _)| *id).collect();
+        if collect_centroids && next_level.len() > nprobe_usize {
+            // Sort with index tracking so we can reorder centroids in lockstep
+            let mut indexed: Vec<(usize, u32, f32)> = next_level
+                .iter()
+                .enumerate()
+                .map(|(i, &(id, d))| (i, id, d))
+                .collect();
+            indexed.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(CmpOrdering::Equal));
+
+            let sorted_candidates: Vec<(u32, f32)> =
+                indexed.iter().map(|&(_, id, d)| (id, d)).collect();
+            let mut sorted_centroids: Vec<f32> = Vec::with_capacity(indexed.len() * dim);
+            for &(orig_idx, _, _) in &indexed {
+                sorted_centroids
+                    .extend_from_slice(&next_centroids[orig_idx * dim..(orig_idx + 1) * dim]);
+            }
+
+            let selected = crate::probe_select::select_diverse_probes(
+                &sorted_candidates,
+                &sorted_centroids,
+                dim,
+                nprobe_usize,
+                diversity,
+                config.metric,
+            );
+            current_level = selected.iter().map(|(id, _)| *id).collect();
+        } else {
+            // Fast path: pure distance ranking
+            next_level.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(CmpOrdering::Equal));
+            if next_level.len() > nprobe_usize {
+                next_level.truncate(nprobe_usize);
+            }
+            current_level = next_level.iter().map(|(id, _)| *id).collect();
+        }
     }
 
     Ok(leaves)
 }
 
 /// Beam search for read transactions (same logic, different table access).
+#[allow(clippy::too_many_arguments)]
 fn beam_search_leaves_read(
     txn: &ReadTransaction,
     names: &TableNames,
@@ -440,6 +479,7 @@ fn beam_search_leaves_read(
     query: &[f32],
     nprobe: u32,
     min_hlc: u64,
+    diversity: DiversityConfig,
 ) -> crate::Result<Vec<u32>> {
     let dim = config.dim as usize;
     let clusters_def = TableDefinition::<u32, &[u8]>::new(&names.clusters);
@@ -451,6 +491,8 @@ fn beam_search_leaves_read(
 
     loop {
         let mut next_level: Vec<(u32, f32)> = Vec::new();
+        let mut next_centroids: Vec<f32> = Vec::new();
+        let collect_centroids = diversity.enabled();
 
         for &node_id in &current_level {
             let meta = {
@@ -497,6 +539,9 @@ fn beam_search_leaves_read(
                         .collect();
                     let dist = config.metric.compute(query, &centroid);
                     next_level.push((child_id, dist));
+                    if collect_centroids {
+                        next_centroids.extend_from_slice(&centroid);
+                    }
                 }
             }
         }
@@ -505,13 +550,40 @@ fn beam_search_leaves_read(
             break;
         }
 
-        next_level.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(CmpOrdering::Equal));
         let nprobe_usize = nprobe as usize;
-        if next_level.len() > nprobe_usize {
-            next_level.truncate(nprobe_usize);
-        }
 
-        current_level = next_level.iter().map(|(id, _)| *id).collect();
+        if collect_centroids && next_level.len() > nprobe_usize {
+            let mut indexed: Vec<(usize, u32, f32)> = next_level
+                .iter()
+                .enumerate()
+                .map(|(i, &(id, d))| (i, id, d))
+                .collect();
+            indexed.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(CmpOrdering::Equal));
+
+            let sorted_candidates: Vec<(u32, f32)> =
+                indexed.iter().map(|&(_, id, d)| (id, d)).collect();
+            let mut sorted_centroids: Vec<f32> = Vec::with_capacity(indexed.len() * dim);
+            for &(orig_idx, _, _) in &indexed {
+                sorted_centroids
+                    .extend_from_slice(&next_centroids[orig_idx * dim..(orig_idx + 1) * dim]);
+            }
+
+            let selected = crate::probe_select::select_diverse_probes(
+                &sorted_candidates,
+                &sorted_centroids,
+                dim,
+                nprobe_usize,
+                diversity,
+                config.metric,
+            );
+            current_level = selected.iter().map(|(id, _)| *id).collect();
+        } else {
+            next_level.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(CmpOrdering::Equal));
+            if next_level.len() > nprobe_usize {
+                next_level.truncate(nprobe_usize);
+            }
+            current_level = next_level.iter().map(|(id, _)| *id).collect();
+        }
     }
 
     Ok(leaves)

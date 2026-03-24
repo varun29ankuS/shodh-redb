@@ -1,3 +1,4 @@
+use crate::probe_select::DiversityConfig;
 use crate::vector_ops::DistanceMetric;
 use core::fmt;
 
@@ -91,6 +92,8 @@ pub struct SearchParams {
     /// If true and the index stores raw vectors, re-rank the top
     /// `candidates` with exact distances for higher recall.
     pub rerank: bool,
+    /// Diversity-aware probe selection. Default: disabled (lambda=0.0).
+    pub diversity: DiversityConfig,
 }
 
 impl SearchParams {
@@ -101,7 +104,16 @@ impl SearchParams {
             candidates: k.saturating_mul(10).max(100),
             k,
             rerank: true,
+            diversity: DiversityConfig { lambda: 0.0 },
         }
+    }
+
+    /// Enable diversity-aware probe selection.
+    /// `lambda` in [0.0, 1.0]: 0.0 = pure distance (default), higher = more diversity.
+    #[must_use]
+    pub fn with_diversity(mut self, lambda: f32) -> Self {
+        self.diversity = DiversityConfig { lambda };
+        self
     }
 }
 

@@ -513,6 +513,7 @@ impl<'txn> IvfPqIndex<'txn> {
             self.config.num_clusters as usize,
             nprobe,
             self.config.metric,
+            params.diversity,
         );
 
         let adc = AdcTable::build(q, &codebooks, self.config.metric);
@@ -861,6 +862,7 @@ impl ReadOnlyIvfPqIndex {
             self.config.num_clusters as usize,
             nprobe,
             self.config.metric,
+            params.diversity,
         );
 
         let adc = AdcTable::build(q, &self.codebooks, self.config.metric);

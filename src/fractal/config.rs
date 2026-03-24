@@ -1,3 +1,4 @@
+use crate::probe_select::DiversityConfig;
 use crate::vector_ops::DistanceMetric;
 use core::fmt;
 
@@ -176,6 +177,8 @@ pub struct FractalSearchParams {
     /// Optional: only consider clusters with data newer than this HLC value.
     /// Set to 0 to disable temporal filtering.
     pub min_hlc: u64,
+    /// Diversity-aware probe selection. Default: disabled (lambda=0.0).
+    pub diversity: DiversityConfig,
 }
 
 impl FractalSearchParams {
@@ -186,6 +189,7 @@ impl FractalSearchParams {
             k,
             rerank: true,
             min_hlc: 0,
+            diversity: DiversityConfig { lambda: 0.0 },
         }
     }
 
@@ -200,6 +204,14 @@ impl FractalSearchParams {
     #[must_use]
     pub const fn with_min_hlc(mut self, min_hlc: u64) -> Self {
         self.min_hlc = min_hlc;
+        self
+    }
+
+    /// Enable diversity-aware probe selection.
+    /// `lambda` in [0.0, 1.0]: 0.0 = pure distance (default), higher = more diversity.
+    #[must_use]
+    pub fn with_diversity(mut self, lambda: f32) -> Self {
+        self.diversity = DiversityConfig { lambda };
         self
     }
 }

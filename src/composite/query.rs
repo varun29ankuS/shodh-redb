@@ -216,6 +216,7 @@ impl<'a> CompositeQuery<'a> {
                     k,
                     rerank: true,
                     min_hlc: 0,
+                    diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
                 });
                 fi.search(self.txn, query, &params)?
             } else {
@@ -225,6 +226,7 @@ impl<'a> CompositeQuery<'a> {
                     candidates: k * 2,
                     k,
                     rerank: true,
+                    diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
                 });
                 index.search(self.txn, query, &params)?
             };

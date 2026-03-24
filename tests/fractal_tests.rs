@@ -427,6 +427,7 @@ fn recall_benchmark_32d() {
                     k,
                     rerank: true,
                     min_hlc: 0,
+                    diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
                 },
             )
             .unwrap();

@@ -1007,7 +1007,7 @@ impl Database {
             if name.starts_with('\0') {
                 continue;
             }
-            // Parse table definition tolerantly — corrupt bytes may cause panics
+            // Parse table definition tolerantly -- corrupt bytes may cause panics
             let vb = value_bytes.clone();
             let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 <InternalTableDefinition as crate::types::Value>::from_bytes(&vb)
@@ -1309,7 +1309,7 @@ impl Database {
     /// Unlike [`compact()`](Self::compact) which requires `&mut self` and blocks
     /// all readers, this method takes `&self` and performs compaction in small steps.
     /// Each step briefly acquires a write lock, relocates a batch of pages, and releases
-    /// it — allowing read transactions to proceed between steps.
+    /// it -- allowing read transactions to proceed between steps.
     ///
     /// Persistent and ephemeral savepoints are not allowed during compaction because
     /// they pin old page versions indefinitely.
@@ -1961,7 +1961,7 @@ impl Drop for Database {
 ///
 /// Created by [`Database::start_compaction()`]. Each call to [`step()`](Self::step)
 /// briefly acquires a write transaction, relocates a batch of pages from the highest
-/// file offsets to lower ones, and commits — allowing concurrent readers to proceed
+/// file offsets to lower ones, and commits -- allowing concurrent readers to proceed
 /// between steps.
 ///
 /// Use [`run()`](Self::run) to loop until compaction is complete.

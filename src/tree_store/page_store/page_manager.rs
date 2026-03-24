@@ -10,7 +10,9 @@ use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::compression::CompressionConfig;
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
-use crate::tree_store::page_store::header::{DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER};
+use crate::tree_store::page_store::header::{
+    DB_HEADER_SIZE, DatabaseHeader, HeaderRepairInfo, MAGICNUMBER, MIRROR_MAGIC,
+};
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
@@ -148,6 +150,10 @@ pub(crate) struct TransactionalMemory {
     compression: CompressionConfig,
     // Pending blob region state, applied to the commit slot during commit
     pending_blob_state: Mutex<BlobCommitState>,
+    // Size of the EOF mirror header appended after data. Non-zero after a
+    // successful durable commit writes the mirror. Used by file_len() to
+    // exclude the mirror so that new blob regions are placed correctly.
+    eof_mirror_size: core::sync::atomic::AtomicU64,
     // Read integrity verification
     read_verification: ReadVerification,
     sampling_rng: SamplingRng,
@@ -269,19 +275,35 @@ impl TransactionalMemory {
             storage.flush()?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
-        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+        let (mut header, mut repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+
+        // If both commit slots are corrupted, attempt recovery from the EOF mirror
+        if repair_info.primary_corrupted
+            && repair_info.secondary_corrupted
+            && let Some((mirror_header, mirror_repair)) = Self::try_load_mirror(&storage)?
+        {
+            header = mirror_header;
+            repair_info = mirror_repair;
+            // Restore the primary header from the mirror so future opens don't
+            // need the mirror. Only possible when the file is writable.
+            if !read_only {
+                storage
+                    .write(0, DB_HEADER_SIZE, true)?
+                    .mem_mut()
+                    .copy_from_slice(&header.to_bytes(true));
+                storage.flush()?;
+            }
+        }
+
         // For existing databases, the on-disk compression config takes precedence.
         let compression = header.compression;
 
         assert_eq!(header.page_size() as usize, page_size);
         // The blob region (if any) is appended after the B-tree region.
         // blob_region_offset marks where the B-tree region ends and blobs begin.
+        // Exclude the EOF mirror (if present) from the B-tree file length.
         let blob_region_offset = header.primary_slot().blob_region_offset;
-        let btree_file_len = if blob_region_offset > 0 {
-            blob_region_offset
-        } else {
-            storage.raw_file_len()?
-        };
+        let btree_file_len = Self::effective_btree_file_len(&storage, blob_region_offset)?;
         assert!(btree_file_len >= header.layout().len());
         let needs_recovery = header.recovery_required || header.layout().len() != btree_file_len;
         if needs_recovery {
@@ -310,6 +332,19 @@ impl TransactionalMemory {
         assert_eq!(layout.len(), btree_file_len);
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
+
+        // Detect whether an EOF mirror currently exists so file_len() can exclude it
+        let initial_mirror_size = {
+            let raw = storage.raw_file_len()?;
+            if raw >= 2 * DB_HEADER_SIZE as u64
+                && Self::has_mirror_at(&storage, raw - DB_HEADER_SIZE as u64)?
+            {
+                DB_HEADER_SIZE as u64
+            } else {
+                0
+            }
+        };
+
         let state = InMemoryState::new(header);
 
         assert!(page_size >= DB_HEADER_SIZE);
@@ -332,6 +367,7 @@ impl TransactionalMemory {
             region_header_with_padding_size: region_header_size,
             compression,
             pending_blob_state: Mutex::new(BlobCommitState::default()),
+            eof_mirror_size: core::sync::atomic::AtomicU64::new(initial_mirror_size),
             read_verification,
             sampling_rng: SamplingRng::new(0xDEAD_BEEF_CAFE_1337),
             read_verification_callback,
@@ -378,19 +414,31 @@ impl TransactionalMemory {
         }
 
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
-        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+        let (mut header, mut repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+
+        // If both commit slots are corrupted, attempt recovery from the EOF mirror
+        if repair_info.primary_corrupted
+            && repair_info.secondary_corrupted
+            && let Some((mirror_header, mirror_repair)) = Self::try_load_mirror(&storage)?
+        {
+            header = mirror_header;
+            repair_info = mirror_repair;
+        }
 
         let mut header_valid = !repair_info.primary_corrupted;
 
+        // Exclude EOF mirror from the effective file length used for layout calculations
+        let blob_region_offset = header.primary_slot().blob_region_offset;
+        let effective_file_len = Self::effective_btree_file_len(&storage, blob_region_offset)?;
         let needs_recovery =
-            header.recovery_required || header.layout().len() != storage.raw_file_len()?;
+            header.recovery_required || header.layout().len() != effective_file_len;
         if needs_recovery {
             // Recalculate layout in memory -- never write to the file
             let layout = header.layout();
             let region_max_pages = layout.full_region_layout().num_pages();
             let region_header_pages = layout.full_region_layout().get_header_pages();
             header.set_layout(DatabaseLayout::recalculate(
-                storage.raw_file_len()?,
+                effective_file_len,
                 region_header_pages,
                 region_max_pages,
                 page_size.try_into().unwrap(),
@@ -435,6 +483,7 @@ impl TransactionalMemory {
             region_header_with_padding_size: region_header_size,
             compression,
             pending_blob_state: Mutex::new(BlobCommitState::default()),
+            eof_mirror_size: core::sync::atomic::AtomicU64::new(0),
             read_verification: ReadVerification::None,
             sampling_rng: SamplingRng::new(0xDEAD_BEEF_CAFE_1337),
             read_verification_callback: None,
@@ -527,9 +576,12 @@ impl TransactionalMemory {
         self.storage.read_direct(file_offset, length)
     }
 
-    /// Get the current file length (for initializing the blob region offset).
+    /// Get the current data-end file length, excluding the EOF mirror header.
+    /// Used for initializing the blob region offset.
     pub(crate) fn file_len(&self) -> Result<u64> {
-        self.storage.raw_file_len()
+        let raw = self.storage.raw_file_len()?;
+        let mirror = self.eof_mirror_size.load(Ordering::Acquire);
+        Ok(raw.saturating_sub(mirror))
     }
 
     /// Truncate the file to the given length.
@@ -538,6 +590,8 @@ impl TransactionalMemory {
     /// The caller must ensure `len` is at least `layout().len()` (the B-tree
     /// region size) and covers the committed blob region.
     pub(crate) fn truncate_to(&self, len: u64) -> Result {
+        // Truncation destroys the EOF mirror; the next commit will rewrite it.
+        self.eof_mirror_size.store(0, Ordering::Release);
         self.storage.resize(len)
     }
 
@@ -659,6 +713,78 @@ impl TransactionalMemory {
             .mem_mut()
             .copy_from_slice(&header.to_bytes(true));
 
+        Ok(())
+    }
+
+    /// Check whether a valid EOF mirror header exists at the given file offset.
+    fn has_mirror_at(storage: &PagedCachedFile, offset: u64) -> Result<bool> {
+        let magic_bytes = storage.read_direct(offset, MIRROR_MAGIC.len())?;
+        Ok(magic_bytes[..] == MIRROR_MAGIC[..])
+    }
+
+    /// Try to load a mirror header from the end of the file.
+    /// Returns `Some((header, repair_info))` if a parseable mirror with at least
+    /// one valid commit slot was found.
+    fn try_load_mirror(
+        storage: &PagedCachedFile,
+    ) -> core::result::Result<Option<(DatabaseHeader, HeaderRepairInfo)>, DatabaseError> {
+        let file_len = storage.raw_file_len()?;
+        if file_len < 2 * DB_HEADER_SIZE as u64 {
+            return Ok(None);
+        }
+        let mirror_offset = file_len - DB_HEADER_SIZE as u64;
+        if !Self::has_mirror_at(storage, mirror_offset)? {
+            return Ok(None);
+        }
+        let mut mirror_bytes = storage.read_direct(mirror_offset, DB_HEADER_SIZE)?;
+        // Restore standard magic number so DatabaseHeader::from_bytes can parse it
+        mirror_bytes[..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
+        match DatabaseHeader::from_bytes(&mirror_bytes) {
+            Ok((header, repair_info)) => {
+                if repair_info.primary_corrupted && repair_info.secondary_corrupted {
+                    Ok(None)
+                } else {
+                    Ok(Some((header, repair_info)))
+                }
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Compute the effective B-tree file length, excluding any EOF mirror.
+    /// When no blob region is present, the raw file length may include a trailing
+    /// mirror header that must not be counted as part of the B-tree layout.
+    fn effective_btree_file_len(storage: &PagedCachedFile, blob_region_offset: u64) -> Result<u64> {
+        if blob_region_offset > 0 {
+            return Ok(blob_region_offset);
+        }
+        let raw_len = storage.raw_file_len()?;
+        if raw_len >= 2 * DB_HEADER_SIZE as u64 {
+            let mirror_start = raw_len - DB_HEADER_SIZE as u64;
+            if Self::has_mirror_at(storage, mirror_start)? {
+                return Ok(mirror_start);
+            }
+        }
+        Ok(raw_len)
+    }
+
+    /// Write a redundant copy of the database header at the end of the data region.
+    ///
+    /// Called during the commit path, before the final header swap and flush.
+    /// If this write fails, the commit fails cleanly (the old commit slot is still
+    /// primary), so errors propagate normally through the commit.
+    fn write_mirror_header(&self, header: &DatabaseHeader, data_end: u64) -> Result {
+        let required_len = data_end + DB_HEADER_SIZE as u64;
+        let current_len = self.storage.raw_file_len()?;
+        if current_len < required_len {
+            self.storage.resize(required_len)?;
+        }
+        let mut mirror_bytes = header.to_bytes(true);
+        mirror_bytes[..MIRROR_MAGIC.len()].copy_from_slice(&MIRROR_MAGIC);
+        self.storage.write_direct(data_end, &mirror_bytes)?;
+        // No separate flush -- the caller's flush persists the mirror data.
+        self.eof_mirror_size
+            .store(DB_HEADER_SIZE as u64, Ordering::Release);
         Ok(())
     }
 
@@ -901,18 +1027,26 @@ impl TransactionalMemory {
         header.swap_primary_slot();
         header.two_phase_commit = two_phase;
 
+        // Compute the data region end for the mirror and shrink logic
+        let btree_len = header.layout().len();
+        let blob_end = blob_state
+            .region_offset
+            .saturating_add(blob_state.region_length);
+        let data_end = btree_len.max(blob_end);
+
         // Write the new header to disk
         self.write_header(&header)?;
+        // Write redundant header mirror at the end of the data region.
+        // This is part of the commit I/O sequence: if it fails, the commit fails
+        // cleanly before the flush, so the old primary slot remains valid.
+        self.write_mirror_header(&header, data_end)?;
         self.storage.flush()?;
 
         if shrunk {
             // When a blob region exists past the B-tree layout, the file must be
             // at least large enough to hold both. Never truncate into the blob region.
-            let btree_len = header.layout().len();
-            let blob_end = blob_state
-                .region_offset
-                .saturating_add(blob_state.region_length);
-            let target_len = btree_len.max(blob_end);
+            // The mirror occupies space beyond data_end, so resize to include it.
+            let target_len = data_end + DB_HEADER_SIZE as u64;
             let result = self.storage.resize(target_len);
             if result.is_err() {
                 // TODO: it would be nice to have a more cohesive approach to setting this.
@@ -921,6 +1055,7 @@ impl TransactionalMemory {
                 return result;
             }
         }
+
         let mut allocated_since_commit = self.allocated_since_commit.lock();
         allocated_since_commit.clear();
         allocated_since_commit.shrink_to_fit();
@@ -1389,6 +1524,8 @@ impl TransactionalMemory {
         );
         assert!(new_layout.len() >= layout.len());
 
+        // Growing the file overwrites the EOF mirror; the next commit will rewrite it.
+        self.eof_mirror_size.store(0, Ordering::Release);
         let result = self.storage.resize(new_layout.len());
         if result.is_err() {
             // TODO: it would be nice to have a more cohesive approach to setting this.

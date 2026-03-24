@@ -7,6 +7,8 @@ pub(crate) mod read_verify;
 mod table_tree;
 mod table_tree_base;
 
+#[cfg(feature = "std")]
+pub(crate) use btree::salvage_tree_leaves;
 pub(crate) use btree::{
     Btree, BtreeMut, BtreeStats, PagePath, RawBtree, UntypedBtree, UntypedBtreeMut, btree_stats,
 };

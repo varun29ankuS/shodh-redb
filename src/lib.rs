@@ -78,14 +78,14 @@
 
 extern crate alloc;
 
-#[cfg(feature = "std")]
-pub use db::VerifyReport;
 pub use db::{
-    Builder, CacheStats, CorruptPageInfo, Database, MultimapTableDefinition, MultimapTableHandle,
-    ReadOnlyDatabase, ReadVerification, ReadVerificationAction, ReadableDatabase, RepairSession,
-    StorageBackend, TableDefinition, TableHandle, TransactionInfo, UntypedMultimapTableHandle,
-    UntypedTableHandle, VerifyLevel,
+    Builder, CacheStats, CompactionHandle, CompactionProgress, CorruptPageInfo, Database,
+    MultimapTableDefinition, MultimapTableHandle, ReadOnlyDatabase, ReadVerification,
+    ReadVerificationAction, ReadableDatabase, RepairSession, StorageBackend, TableDefinition,
+    TableHandle, TransactionInfo, UntypedMultimapTableHandle, UntypedTableHandle, VerifyLevel,
 };
+#[cfg(feature = "std")]
+pub use db::{SalvageReport, VerifyReport};
 pub use error::{
     BackendError, CommitError, CompactionError, DatabaseError, Error, SavepointError,
     SetDurabilityError, StorageError, TableError, TransactionError,

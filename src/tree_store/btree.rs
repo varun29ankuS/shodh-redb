@@ -132,6 +132,136 @@ impl UntypedBtree {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Error-tolerant B-tree leaf extraction (for Database::salvage)
+// ---------------------------------------------------------------------------
+
+/// Walk a B-tree tolerantly, extracting raw key/value byte pairs from leaf pages.
+/// Corrupted or unreadable subtrees are skipped and recorded in `corruptions`.
+/// Returns the number of rows successfully extracted.
+#[cfg(feature = "std")]
+pub(crate) fn salvage_tree_leaves(
+    root: BtreeHeader,
+    mem: &TransactionalMemory,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    pairs: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    corruptions: &mut Vec<CorruptPageInfo>,
+) -> u64 {
+    let mut recovered = 0u64;
+    salvage_node(
+        root.root,
+        mem,
+        fixed_key_size,
+        fixed_value_size,
+        pairs,
+        corruptions,
+        &mut recovered,
+    );
+    recovered
+}
+
+#[cfg(feature = "std")]
+fn salvage_node(
+    page_number: PageNumber,
+    mem: &TransactionalMemory,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    pairs: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    corruptions: &mut Vec<CorruptPageInfo>,
+    recovered: &mut u64,
+) {
+    let Ok(page) = mem.get_page(page_number) else {
+        corruptions.push(CorruptPageInfo {
+            page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+            table_name: None,
+            description: "failed to read page".to_string(),
+        });
+        return;
+    };
+
+    let node_mem = page.memory();
+    if node_mem.is_empty() {
+        corruptions.push(CorruptPageInfo {
+            page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+            table_name: None,
+            description: "empty page".to_string(),
+        });
+        return;
+    }
+
+    match node_mem[0] {
+        LEAF => {
+            // Use catch_unwind to handle panics from corrupt leaf data
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let accessor = LeafAccessor::new(node_mem, fixed_key_size, fixed_value_size);
+                let mut leaf_pairs = Vec::new();
+                for i in 0..accessor.num_pairs() {
+                    if let Some(entry) = accessor.entry(i) {
+                        leaf_pairs.push((entry.key().to_vec(), entry.value().to_vec()));
+                    }
+                }
+                leaf_pairs
+            }));
+            match result {
+                Ok(leaf_pairs) => {
+                    *recovered += leaf_pairs.len() as u64;
+                    pairs.extend(leaf_pairs);
+                }
+                Err(_) => {
+                    corruptions.push(CorruptPageInfo {
+                        page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                        table_name: None,
+                        description: "leaf page data corrupt (parse panic)".to_string(),
+                    });
+                }
+            }
+        }
+        BRANCH => {
+            // Use catch_unwind for the branch accessor too
+            let children: Vec<PageNumber> =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let accessor = BranchAccessor::new(&page, fixed_key_size);
+                    let mut kids = Vec::new();
+                    for i in 0..accessor.count_children() {
+                        if let Some(child) = accessor.child_page(i) {
+                            kids.push(child);
+                        }
+                    }
+                    kids
+                }))
+                .unwrap_or_default();
+
+            if children.is_empty() && node_mem.len() > 4 {
+                corruptions.push(CorruptPageInfo {
+                    page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                    table_name: None,
+                    description: "branch page corrupt or empty".to_string(),
+                });
+            }
+
+            for child in children {
+                salvage_node(
+                    child,
+                    mem,
+                    fixed_key_size,
+                    fixed_value_size,
+                    pairs,
+                    corruptions,
+                    recovered,
+                );
+            }
+        }
+        other => {
+            corruptions.push(CorruptPageInfo {
+                page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                table_name: None,
+                description: format!("unknown page type: {other}"),
+            });
+        }
+    }
+}
+
 pub(crate) struct UntypedBtreeMut {
     mem: Arc<TransactionalMemory>,
     root: Option<BtreeHeader>,

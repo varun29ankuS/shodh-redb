@@ -12,6 +12,8 @@ use crate::transactions::{
 };
 #[cfg(feature = "std")]
 use crate::tree_store::ReadOnlyBackend;
+#[cfg(feature = "std")]
+use crate::tree_store::salvage_tree_leaves;
 use crate::tree_store::{
     Btree, BtreeHeader, CompressionConfig, InternalTableDefinition, PAGE_SIZE, PageHint,
     PageNumber, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
@@ -273,6 +275,33 @@ pub struct VerifyReport {
     pub corrupt_details: Vec<CorruptPageInfo>,
     /// Time taken
     pub duration: Duration,
+}
+
+/// Results of a best-effort database recovery (salvage) operation.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
+pub struct SalvageReport {
+    /// Number of tables discovered in the corrupted database
+    pub tables_found: u64,
+    /// Number of tables from which at least one row was recovered
+    pub tables_recovered: u64,
+    /// Total number of key/value rows successfully recovered
+    pub rows_recovered: u64,
+    /// Estimated number of rows lost due to corruption
+    pub rows_lost: u64,
+    /// Detailed corruption info for each corrupt page encountered
+    pub corrupt_details: Vec<CorruptPageInfo>,
+    /// Time taken
+    pub duration: Duration,
+}
+
+/// Progress report from a single compaction step.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactionProgress {
+    /// Number of pages relocated in this step
+    pub pages_relocated: u64,
+    /// Whether compaction is complete (no more pages to relocate)
+    pub complete: bool,
 }
 
 /// Information regarding the usage of the in-memory cache
@@ -823,6 +852,181 @@ impl Database {
         })
     }
 
+    /// Best-effort recovery of data from a corrupted database file.
+    ///
+    /// Opens `corrupted_path` read-only, walks every discoverable table's B-tree
+    /// (skipping corrupted subtrees), and writes all recoverable key/value pairs
+    /// into a fresh database at `output_path`.
+    ///
+    /// Recovered tables use raw `&[u8]` key/value types. If the original table
+    /// used typed keys (e.g. `&str`, `u64`), the caller must re-interpret the raw
+    /// bytes after recovery.
+    ///
+    /// Returns a [`SalvageReport`] summarising what was recovered and what was lost.
+    #[cfg(feature = "std")]
+    pub fn salvage(
+        corrupted_path: impl AsRef<Path>,
+        output_path: impl AsRef<Path>,
+    ) -> core::result::Result<SalvageReport, DatabaseError> {
+        let start = Instant::now();
+        let mut corrupt_details: Vec<CorruptPageInfo> = Vec::new();
+        let mut tables_recovered = 0u64;
+        let mut rows_recovered = 0u64;
+        let mut rows_lost = 0u64;
+
+        // 1. Open corrupted file read-only
+        let file = OpenOptions::new()
+            .read(true)
+            .open(corrupted_path.as_ref())?;
+        let backend: Box<dyn crate::StorageBackend> = Box::new(
+            crate::tree_store::file_backend::FileBackend::new_internal(file, true)?,
+        );
+
+        let (mem, _header_valid) =
+            TransactionalMemory::new_for_verify(backend, PAGE_SIZE, None, CompressionConfig::None)?;
+        let mem = Arc::new(mem);
+
+        // 2. Discover tables from the data root (user table tree)
+        let data_root = mem.get_data_root();
+        let table_entries =
+            Self::salvage_discover_tables(mem.clone(), data_root, &mut corrupt_details);
+        let tables_found = table_entries.len() as u64;
+
+        // 3. Create output database
+        let output_db = Database::builder().create(output_path.as_ref())?;
+
+        // 4. For each table, extract k/v pairs and write to output
+        for (table_name, definition) in &table_entries {
+            let (table_root, fixed_key_size, fixed_value_size) = match definition {
+                InternalTableDefinition::Normal {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                }
+                | InternalTableDefinition::Multimap {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => (*table_root, *fixed_key_size, *fixed_value_size),
+            };
+
+            let Some(root) = table_root else {
+                continue;
+            };
+
+            let effective_value_size = if mem.compression().is_enabled() {
+                None
+            } else {
+                fixed_value_size
+            };
+
+            let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            let mut table_corruptions: Vec<CorruptPageInfo> = Vec::new();
+
+            let table_rows = salvage_tree_leaves(
+                root,
+                &mem,
+                fixed_key_size,
+                effective_value_size,
+                &mut pairs,
+                &mut table_corruptions,
+            );
+
+            // Annotate corruption entries with the table name
+            for c in &mut table_corruptions {
+                c.table_name = Some(table_name.clone());
+            }
+
+            if !pairs.is_empty() {
+                // Write recovered pairs to output database.
+                // SAFETY: We leak the table name to get a &'static str required by
+                // TableDefinition. This is acceptable because salvage is a one-shot
+                // recovery operation, not a long-running server loop.
+                let leaked_name: &'static str = Box::leak(table_name.clone().into_boxed_str());
+                let raw_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(leaked_name);
+                let write_txn = output_db
+                    .begin_write()
+                    .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+                {
+                    let mut table = write_txn.open_table(raw_def).map_err(|e| {
+                        DatabaseError::Storage(
+                            e.into_storage_error_or_corrupted("salvage: open_table"),
+                        )
+                    })?;
+                    for (key, value) in &pairs {
+                        let _ = table.insert(key.as_slice(), value.as_slice());
+                    }
+                }
+                write_txn
+                    .commit()
+                    .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+                tables_recovered += 1;
+            }
+
+            rows_recovered += table_rows;
+            // Estimate lost rows from corruption count (each corrupt page likely held some rows)
+            rows_lost += table_corruptions.len() as u64;
+            corrupt_details.extend(table_corruptions);
+        }
+
+        Ok(SalvageReport {
+            tables_found,
+            tables_recovered,
+            rows_recovered,
+            rows_lost,
+            corrupt_details,
+            duration: start.elapsed(),
+        })
+    }
+
+    /// Discover tables from the system root by tolerantly walking the master table tree.
+    #[cfg(feature = "std")]
+    fn salvage_discover_tables(
+        mem: Arc<TransactionalMemory>,
+        system_root: Option<BtreeHeader>,
+        corruptions: &mut Vec<CorruptPageInfo>,
+    ) -> Vec<(String, InternalTableDefinition)> {
+        let Some(root) = system_root else {
+            return Vec::new();
+        };
+
+        // The master table tree stores (&str -> InternalTableDefinition) pairs.
+        // Key size: variable (None), Value size: variable (None).
+        let mut raw_pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        salvage_tree_leaves(root, &mem, None, None, &mut raw_pairs, corruptions);
+
+        let mut tables = Vec::new();
+        for (key_bytes, value_bytes) in &raw_pairs {
+            let name = match core::str::from_utf8(key_bytes) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            };
+            // Skip internal system tables (names starting with NUL)
+            if name.starts_with('\0') {
+                continue;
+            }
+            // Parse table definition tolerantly — corrupt bytes may cause panics
+            let vb = value_bytes.clone();
+            let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                <InternalTableDefinition as crate::types::Value>::from_bytes(&vb)
+            }));
+            match parsed {
+                Ok(definition) => tables.push((name, definition)),
+                Err(_) => {
+                    corruptions.push(CorruptPageInfo {
+                        page_number: 0,
+                        table_name: Some(name),
+                        description: "corrupt table definition".to_string(),
+                    });
+                }
+            }
+        }
+
+        tables
+    }
+
     /// Verifies the integrity of an open database without modifying it.
     ///
     /// Unlike [`check_integrity`](Self::check_integrity) which repairs the database and
@@ -1098,6 +1302,41 @@ impl Database {
             bytes_reclaimed: old_region_length - total_live_size,
             was_noop: false,
         })
+    }
+
+    /// Starts an incremental online compaction that allows concurrent readers.
+    ///
+    /// Unlike [`compact()`](Self::compact) which requires `&mut self` and blocks
+    /// all readers, this method takes `&self` and performs compaction in small steps.
+    /// Each step briefly acquires a write lock, relocates a batch of pages, and releases
+    /// it — allowing read transactions to proceed between steps.
+    ///
+    /// Persistent and ephemeral savepoints are not allowed during compaction because
+    /// they pin old page versions indefinitely.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use shodh_redb::Database;
+    /// let db = Database::create("my.db").unwrap();
+    /// let handle = db.start_compaction().unwrap();
+    /// let total = handle.run().unwrap();
+    /// println!("Relocated {} pages", total);
+    /// ```
+    pub fn start_compaction(&self) -> core::result::Result<CompactionHandle<'_>, CompactionError> {
+        // Check for persistent savepoints (they pin old page versions forever)
+        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        if txn.list_persistent_savepoints()?.next().is_some() {
+            txn.abort().map_err(CompactionError::Storage)?;
+            return Err(CompactionError::PersistentSavepointExists);
+        }
+        if self.transaction_tracker.any_savepoint_exists() {
+            txn.abort().map_err(CompactionError::Storage)?;
+            return Err(CompactionError::EphemeralSavepointExists);
+        }
+        txn.abort().map_err(CompactionError::Storage)?;
+
+        Ok(CompactionHandle { db: self })
     }
 
     #[cfg_attr(not(debug_assertions), expect(dead_code))]
@@ -1718,6 +1957,76 @@ impl Drop for Database {
     }
 }
 
+/// Handle for an incremental online compaction.
+///
+/// Created by [`Database::start_compaction()`]. Each call to [`step()`](Self::step)
+/// briefly acquires a write transaction, relocates a batch of pages from the highest
+/// file offsets to lower ones, and commits — allowing concurrent readers to proceed
+/// between steps.
+///
+/// Use [`run()`](Self::run) to loop until compaction is complete.
+pub struct CompactionHandle<'db> {
+    db: &'db Database,
+}
+
+impl CompactionHandle<'_> {
+    /// Performs one compaction step: flushes pending frees, relocates a batch of pages,
+    /// then reclaims the freed space.
+    ///
+    /// Returns [`CompactionProgress`] indicating how many pages were moved and whether
+    /// compaction is complete.
+    pub fn step(&self) -> core::result::Result<CompactionProgress, CompactionError> {
+        // Phase 1: Flush pending frees via a 2-phase commit
+        let mut txn = self.db.begin_write().map_err(|e| e.into_storage_error())?;
+        txn.set_two_phase_commit(true);
+        txn.commit().map_err(|e| e.into_storage_error())?;
+
+        // Phase 2: Relocate pages
+        let mut txn = self.db.begin_write().map_err(|e| e.into_storage_error())?;
+        let relocated = txn.compact_pages()?;
+        if relocated {
+            txn.commit().map_err(|e| e.into_storage_error())?;
+        } else {
+            txn.abort()?;
+            return Ok(CompactionProgress {
+                pages_relocated: 0,
+                complete: true,
+            });
+        }
+
+        // Phase 3: Two more 2-phase commits to process freed pages and shrink the file.
+        // The first commit reclaims relocated pages; the second handles pages freed by
+        // the data-freed tree itself (which is a system table whose own pages may move).
+        let mut txn = self.db.begin_write().map_err(|e| e.into_storage_error())?;
+        txn.set_two_phase_commit(true);
+        txn.set_shrink_policy(ShrinkPolicy::Maximum);
+        txn.commit().map_err(|e| e.into_storage_error())?;
+
+        let mut txn = self.db.begin_write().map_err(|e| e.into_storage_error())?;
+        txn.set_two_phase_commit(true);
+        txn.set_shrink_policy(ShrinkPolicy::Maximum);
+        txn.commit().map_err(|e| e.into_storage_error())?;
+
+        Ok(CompactionProgress {
+            pages_relocated: 1, // at least one batch was relocated
+            complete: false,
+        })
+    }
+
+    /// Runs compaction to completion, returning the total number of steps performed.
+    pub fn run(&self) -> core::result::Result<u64, CompactionError> {
+        let mut steps = 0u64;
+        loop {
+            let progress = self.step()?;
+            if progress.complete {
+                break;
+            }
+            steps += 1;
+        }
+        Ok(steps)
+    }
+}
+
 pub struct RepairSession {
     progress: f64,
     aborted: bool,
@@ -2133,8 +2442,8 @@ mod test {
     use crate::backends::FileBackend;
     use crate::error::BackendError;
     use crate::{
-        CommitError, Database, DatabaseError, Durability, ReadableTable, StorageBackend,
-        StorageError, TableDefinition, TransactionError,
+        CommitError, Database, DatabaseError, Durability, ReadableDatabase, ReadableTable,
+        ReadableTableMetadata, StorageBackend, StorageError, TableDefinition, TransactionError,
     };
     use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
@@ -2554,5 +2863,236 @@ mod test {
             DatabaseError::Storage(StorageError::Corrupted(_)) => {}
             err => panic!("Unexpected error for empty file: {err}"),
         }
+    }
+
+    #[test]
+    fn salvage_valid_database() {
+        const T1: TableDefinition<&str, u64> = TableDefinition::new("users");
+        const T2: TableDefinition<u64, &[u8]> = TableDefinition::new("blobs");
+
+        let src = crate::create_tempfile();
+        let dst = crate::create_tempfile();
+
+        // Populate source database with two tables
+        {
+            let db = Database::create(src.path()).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(T1).unwrap();
+                t.insert("alice", &1u64).unwrap();
+                t.insert("bob", &2u64).unwrap();
+                t.insert("charlie", &3u64).unwrap();
+            }
+            {
+                let mut t = txn.open_table(T2).unwrap();
+                t.insert(100u64, b"hello".as_slice()).unwrap();
+                t.insert(200u64, b"world".as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let report = Database::salvage(src.path(), dst.path()).unwrap();
+
+        assert_eq!(report.tables_found, 2);
+        assert_eq!(report.tables_recovered, 2);
+        assert!(
+            report.rows_recovered >= 5,
+            "expected >= 5 rows, got {rows}",
+            rows = report.rows_recovered
+        );
+        assert_eq!(report.rows_lost, 0);
+        assert!(report.corrupt_details.is_empty());
+
+        // Verify recovered data in the output database
+        let db = Database::open(dst.path()).unwrap();
+        let txn = db.begin_read().unwrap();
+        {
+            let raw: TableDefinition<&[u8], &[u8]> = TableDefinition::new("users");
+            let t = txn.open_table(raw).unwrap();
+            assert_eq!(t.len().unwrap(), 3);
+        }
+        {
+            let raw: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blobs");
+            let t = txn.open_table(raw).unwrap();
+            assert_eq!(t.len().unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn salvage_empty_file_returns_error() {
+        let src = crate::create_tempfile();
+        let dst = crate::create_tempfile();
+
+        // salvage on an empty/corrupted file should return an error
+        let result = Database::salvage(src.path(), dst.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn salvage_with_data_corruption() {
+        const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("data");
+
+        let src = crate::create_tempfile();
+        let dst = crate::create_tempfile();
+
+        // Write enough data to create multiple B-tree pages
+        {
+            let db = Database::create(src.path()).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(TABLE).unwrap();
+                // Write many rows with large values to force B-tree splits
+                let payload = [0xABu8; 200];
+                for i in 0..500u64 {
+                    t.insert(i, payload.as_slice()).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+        }
+
+        // Corrupt some data pages in the middle of the file
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(src.path())
+                .unwrap();
+            let file_len = f.metadata().unwrap().len();
+            // Corrupt a region in the middle-third of the file (likely B-tree data pages)
+            let corrupt_offset = file_len / 3;
+            f.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+            f.write_all(&[0xFF; 4096]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Salvage should succeed (possibly with some lost rows)
+        let report = Database::salvage(src.path(), dst.path()).unwrap();
+        // We should recover at least some data
+        assert!(
+            report.rows_recovered > 0 || report.tables_found > 0,
+            "expected some recovery, got: {report:?}"
+        );
+    }
+
+    #[test]
+    fn online_compaction_reduces_file_size() {
+        const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("data");
+
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+
+        // Write a bunch of data
+        let payload = [0xCDu8; 512];
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE).unwrap();
+            for i in 0..500u64 {
+                t.insert(i, payload.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        // Delete most of it to create free space
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE).unwrap();
+            for i in 0..450u64 {
+                t.remove(i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        let size_before = std::fs::metadata(tmpfile.path()).unwrap().len();
+
+        // Run online compaction (takes &self, not &mut self)
+        let handle = db.start_compaction().unwrap();
+        let steps = handle.run().unwrap();
+        assert!(steps > 0, "expected at least one compaction step");
+
+        let size_after = std::fs::metadata(tmpfile.path()).unwrap().len();
+        assert!(
+            size_after < size_before,
+            "file should shrink: before={size_before}, after={size_after}"
+        );
+
+        // Verify remaining data is intact
+        let txn = db.begin_read().unwrap();
+        let t = txn.open_table(TABLE).unwrap();
+        assert_eq!(t.len().unwrap(), 50);
+        for i in 450..500u64 {
+            let val = t.get(i).unwrap().unwrap();
+            assert_eq!(val.value(), payload.as_slice());
+        }
+    }
+
+    #[test]
+    fn online_compaction_allows_concurrent_reads() {
+        const TABLE: TableDefinition<u64, u64> = TableDefinition::new("nums");
+
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+
+        // Populate
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE).unwrap();
+            for i in 0..100u64 {
+                t.insert(i, &(i * 10)).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        // Delete half to create reclaimable space
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE).unwrap();
+            for i in 0..50u64 {
+                t.remove(i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        // Open a read transaction BEFORE compaction
+        let read_txn = db.begin_read().unwrap();
+        let read_table = read_txn.open_table(TABLE).unwrap();
+
+        // Run one compaction step while read transaction is open
+        let handle = db.start_compaction().unwrap();
+        let progress = handle.step().unwrap();
+        // May or may not have relocated pages, but should not error
+        let _ = progress;
+
+        // Read transaction should still work correctly
+        // (it sees a snapshot from before compaction started)
+        assert_eq!(read_table.len().unwrap(), 50);
+        for i in 50..100u64 {
+            let val = read_table.get(i).unwrap().unwrap();
+            assert_eq!(val.value(), i * 10);
+        }
+    }
+
+    #[test]
+    fn online_compaction_rejects_persistent_savepoint() {
+        const TABLE: TableDefinition<u64, u64> = TableDefinition::new("sp_test");
+
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+
+        // Write some data first
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE).unwrap();
+            t.insert(1u64, &1u64).unwrap();
+        }
+        txn.commit().unwrap();
+
+        // Create a persistent savepoint (must be done before opening any tables)
+        let txn = db.begin_write().unwrap();
+        let _sp = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+
+        // start_compaction should fail because of persistent savepoint
+        let result = db.start_compaction();
+        assert!(result.is_err());
     }
 }

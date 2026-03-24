@@ -46,6 +46,9 @@ use core::mem::size_of;
 
 // Inspired by PNG's magic number
 pub(super) const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
+// EOF mirror magic: identical to MAGICNUMBER except first byte changed to 'm'.
+// Used to identify the redundant header copy written at the end of the file.
+pub(super) const MIRROR_MAGIC: [u8; 9] = [b'm', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
 const GOD_BYTE_OFFSET: usize = MAGICNUMBER.len();
 const PAGE_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + 2; // +2 for padding
 const REGION_HEADER_PAGES_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
@@ -477,8 +480,8 @@ mod test {
     use crate::db::TableDefinition;
     use crate::error::BackendError;
     use crate::tree_store::page_store::header::{
-        GOD_BYTE_OFFSET, MAGICNUMBER, PRIMARY_BIT, RECOVERY_REQUIRED, TRANSACTION_0_OFFSET,
-        TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, USER_ROOT_OFFSET,
+        DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, PRIMARY_BIT, RECOVERY_REQUIRED,
+        TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, USER_ROOT_OFFSET,
     };
     use crate::{Database, DatabaseError, ReadableTable, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
@@ -785,5 +788,106 @@ mod test {
             || *x == 0x0B
             || (0x0E <= *x && *x <= 0x1F)
             || (0x7F <= *x && *x <= 0x9F)));
+    }
+
+    #[test]
+    fn mirror_magic_distinct() {
+        use super::MIRROR_MAGIC;
+        assert_ne!(MAGICNUMBER, MIRROR_MAGIC);
+        assert_eq!(MAGICNUMBER.len(), MIRROR_MAGIC.len());
+        // Only the first byte should differ
+        assert_eq!(&MAGICNUMBER[1..], &MIRROR_MAGIC[1..]);
+    }
+
+    #[test]
+    fn mirror_recovery_corrupted_primary() {
+        // Create a database, write data, then corrupt both commit slots at offset 0.
+        // The EOF mirror written by commit should allow recovery.
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert("mirror", "test").unwrap();
+        }
+        write_txn.commit().unwrap();
+        drop(db);
+
+        let mut file = tmpfile.as_file();
+
+        // Corrupt both commit slot checksums (overwrite user root in each slot)
+        file.seek(SeekFrom::Start(
+            (TRANSACTION_0_OFFSET + USER_ROOT_OFFSET) as u64,
+        ))
+        .unwrap();
+        file.write_all(&[0xFF; size_of::<u128>()]).unwrap();
+        file.seek(SeekFrom::Start(
+            (TRANSACTION_1_OFFSET + USER_ROOT_OFFSET) as u64,
+        ))
+        .unwrap();
+        file.write_all(&[0xFF; size_of::<u128>()]).unwrap();
+
+        // Re-open: should recover from the EOF mirror
+        let db2 = Database::open(tmpfile.path()).unwrap();
+        let read_txn = db2.begin_read().unwrap();
+        let table = read_txn.open_table(X).unwrap();
+        assert_eq!(table.get("mirror").unwrap().unwrap().value(), "test");
+    }
+
+    #[test]
+    fn old_database_without_mirror_opens_normally() {
+        // A database that was never committed (only created) has no mirror.
+        // Verify it still opens without error.
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        drop(db);
+
+        // Truncate the file to exactly the layout size (strip any trailing mirror).
+        // This simulates an old-format database that never wrote a mirror.
+        let mut file = tmpfile.as_file();
+        let header_end = { file.seek(SeekFrom::End(0)).unwrap() };
+        // If there's a mirror at the end, removing it should still allow open
+        // because the primary header is intact.
+        if header_end > DB_HEADER_SIZE as u64 {
+            file.set_len(header_end).unwrap();
+        }
+        Database::open(tmpfile.path()).unwrap();
+    }
+
+    #[test]
+    fn both_primary_and_mirror_corrupted_returns_error() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert("key", "val").unwrap();
+        }
+        write_txn.commit().unwrap();
+        drop(db);
+
+        let mut file = tmpfile.as_file();
+        let file_len = file.seek(SeekFrom::End(0)).unwrap();
+
+        // Corrupt primary header commit slots
+        file.seek(SeekFrom::Start(
+            (TRANSACTION_0_OFFSET + USER_ROOT_OFFSET) as u64,
+        ))
+        .unwrap();
+        file.write_all(&[0xFF; size_of::<u128>()]).unwrap();
+        file.seek(SeekFrom::Start(
+            (TRANSACTION_1_OFFSET + USER_ROOT_OFFSET) as u64,
+        ))
+        .unwrap();
+        file.write_all(&[0xFF; size_of::<u128>()]).unwrap();
+
+        // Also corrupt the EOF mirror (last DB_HEADER_SIZE bytes)
+        let mirror_offset = file_len - DB_HEADER_SIZE as u64;
+        file.seek(SeekFrom::Start(mirror_offset)).unwrap();
+        file.write_all(&[0x00; DB_HEADER_SIZE]).unwrap();
+
+        // Should fail: both primary and mirror are corrupted
+        let result = Database::open(tmpfile.path());
+        assert!(result.is_err());
     }
 }

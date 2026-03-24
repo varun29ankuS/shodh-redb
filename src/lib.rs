@@ -92,6 +92,8 @@ pub use error::{
 };
 #[cfg(feature = "std")]
 pub use group_commit::{GroupCommitError, WriteBatch};
+#[cfg(feature = "std")]
+pub use integrity_scanner::{IntegrityScannerConfig, IntegrityScannerHandle, ScanCycleResult};
 pub use legacy_tuple_types::Legacy;
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable,
@@ -151,6 +153,8 @@ pub mod error;
 pub mod fractal;
 #[cfg(feature = "std")]
 pub mod group_commit;
+#[cfg(feature = "std")]
+pub mod integrity_scanner;
 pub mod ivfpq;
 mod legacy_tuple_types;
 pub mod merge;

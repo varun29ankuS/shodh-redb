@@ -769,7 +769,10 @@ impl TransactionalMemory {
     }
 
     /// Write a redundant copy of the database header at the end of the data region.
-    /// Best-effort: callers should ignore errors since the mirror is a fallback only.
+    ///
+    /// Called during the commit path, before the final header swap and flush.
+    /// If this write fails, the commit fails cleanly (the old commit slot is still
+    /// primary), so errors propagate normally through the commit.
     fn write_mirror_header(&self, header: &DatabaseHeader, data_end: u64) -> Result {
         let required_len = data_end + DB_HEADER_SIZE as u64;
         let current_len = self.storage.raw_file_len()?;
@@ -779,7 +782,7 @@ impl TransactionalMemory {
         let mut mirror_bytes = header.to_bytes(true);
         mirror_bytes[..MIRROR_MAGIC.len()].copy_from_slice(&MIRROR_MAGIC);
         self.storage.write_direct(data_end, &mirror_bytes)?;
-        self.storage.flush()?;
+        // No separate flush -- the caller's flush persists the mirror data.
         self.eof_mirror_size
             .store(DB_HEADER_SIZE as u64, Ordering::Release);
         Ok(())
@@ -1024,20 +1027,27 @@ impl TransactionalMemory {
         header.swap_primary_slot();
         header.two_phase_commit = two_phase;
 
-        // Write the new header to disk
-        self.write_header(&header)?;
-        self.storage.flush()?;
-
+        // Compute the data region end for the mirror and shrink logic
         let btree_len = header.layout().len();
         let blob_end = blob_state
             .region_offset
             .saturating_add(blob_state.region_length);
         let data_end = btree_len.max(blob_end);
 
+        // Write the new header to disk
+        self.write_header(&header)?;
+        // Write redundant header mirror at the end of the data region.
+        // This is part of the commit I/O sequence: if it fails, the commit fails
+        // cleanly before the flush, so the old primary slot remains valid.
+        self.write_mirror_header(&header, data_end)?;
+        self.storage.flush()?;
+
         if shrunk {
             // When a blob region exists past the B-tree layout, the file must be
             // at least large enough to hold both. Never truncate into the blob region.
-            let result = self.storage.resize(data_end);
+            // The mirror occupies space beyond data_end, so resize to include it.
+            let target_len = data_end + DB_HEADER_SIZE as u64;
+            let result = self.storage.resize(target_len);
             if result.is_err() {
                 // TODO: it would be nice to have a more cohesive approach to setting this.
                 // we do it in commit() & rollback() on failure, but there are probably other places that need it
@@ -1045,10 +1055,6 @@ impl TransactionalMemory {
                 return result;
             }
         }
-
-        // Best-effort: write a redundant header copy at the end of the data region.
-        // This mirror allows recovery when the primary header at offset 0 is corrupted.
-        let _ = self.write_mirror_header(&header, data_end);
 
         let mut allocated_since_commit = self.allocated_since_commit.lock();
         allocated_since_commit.clear();

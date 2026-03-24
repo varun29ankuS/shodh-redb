@@ -1,6 +1,7 @@
 use crate::compat::Mutex;
 #[cfg(debug_assertions)]
 use crate::compat::{HashMap, HashSet};
+use crate::db::{ReadVerification, ReadVerificationAction, ReadVerificationCallback};
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
@@ -13,6 +14,7 @@ use crate::tree_store::page_store::header::{DB_HEADER_SIZE, DatabaseHeader, MAGI
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
+use crate::tree_store::read_verify::SamplingRng;
 use crate::tree_store::{Page, PageNumber, PageTrackerPolicy};
 use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
@@ -20,7 +22,6 @@ use alloc::boxed::Box;
 #[cfg(feature = "std")]
 use alloc::format;
 use alloc::string::ToString;
-#[cfg(debug_assertions)]
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -147,6 +148,10 @@ pub(crate) struct TransactionalMemory {
     compression: CompressionConfig,
     // Pending blob region state, applied to the commit slot during commit
     pending_blob_state: Mutex<BlobCommitState>,
+    // Read integrity verification
+    read_verification: ReadVerification,
+    sampling_rng: SamplingRng,
+    read_verification_callback: Option<Arc<ReadVerificationCallback>>,
 }
 
 impl TransactionalMemory {
@@ -162,6 +167,8 @@ impl TransactionalMemory {
         read_only: bool,
         compression: CompressionConfig,
         memory_budget: Option<usize>,
+        read_verification: ReadVerification,
+        read_verification_callback: Option<Arc<ReadVerificationCallback>>,
     ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -325,6 +332,9 @@ impl TransactionalMemory {
             region_header_with_padding_size: region_header_size,
             compression,
             pending_blob_state: Mutex::new(BlobCommitState::default()),
+            read_verification,
+            sampling_rng: SamplingRng::new(0xDEAD_BEEF_CAFE_1337),
+            read_verification_callback,
         })
     }
 
@@ -425,6 +435,9 @@ impl TransactionalMemory {
             region_header_with_padding_size: region_header_size,
             compression,
             pending_blob_state: Mutex::new(BlobCommitState::default()),
+            read_verification: ReadVerification::None,
+            sampling_rng: SamplingRng::new(0xDEAD_BEEF_CAFE_1337),
+            read_verification_callback: None,
         };
 
         Ok((mem, header_valid))
@@ -432,6 +445,39 @@ impl TransactionalMemory {
 
     pub(crate) fn compression(&self) -> CompressionConfig {
         self.compression
+    }
+
+    /// Returns `true` if the next page read should be verified.
+    ///
+    /// Cost: None -> 0 (branch on enum discriminant), Sampled -> xorshift64,
+    /// Full -> 0 (always true).
+    pub(crate) fn should_verify_read(&self) -> bool {
+        match self.read_verification {
+            ReadVerification::None => false,
+            ReadVerification::Sampled { rate } => self.sampling_rng.should_verify(rate),
+            ReadVerification::Full => true,
+        }
+    }
+
+    /// Handle a read verification failure. Returns `Ok(())` if the callback
+    /// chose `Continue`, otherwise returns a `StorageError::Corrupted`.
+    pub(crate) fn on_verification_failure(&self, page_number: PageNumber) -> Result {
+        let page_num_raw =
+            u64::from(page_number.page_index) | (u64::from(page_number.region) << 32);
+        if let Some(ref cb) = self.read_verification_callback {
+            match cb(page_num_raw) {
+                ReadVerificationAction::ReturnError => {
+                    Err(StorageError::Corrupted(alloc::format!(
+                        "Read verification failed: page {page_number:?} checksum mismatch"
+                    )))
+                }
+                ReadVerificationAction::Continue => Ok(()),
+            }
+        } else {
+            Err(StorageError::Corrupted(alloc::format!(
+                "Read verification failed: page {page_number:?} checksum mismatch"
+            )))
+        }
     }
 
     /// Get the blob state for a write transaction.

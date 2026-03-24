@@ -1,7 +1,8 @@
 use crate::Result;
 use crate::compat::Mutex;
-use crate::tree_store::btree_base::{BRANCH, LEAF};
-use crate::tree_store::btree_base::{BranchAccessor, LeafAccessor};
+use crate::tree_store::btree_base::{
+    BRANCH, BranchAccessor, Checksum, DEFERRED, LEAF, LeafAccessor, branch_checksum, leaf_checksum,
+};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::compression::{CompressionConfig, decompress_value};
@@ -10,6 +11,7 @@ use crate::tree_store::{BtreeHeader, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, Value};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -75,8 +77,26 @@ impl RangeIterState {
                 mut parent,
             } => {
                 let accessor = BranchAccessor::new(&page, fixed_key_size);
-                let child_page = accessor.child_page(child).unwrap();
-                let child_page = manager.get_page(child_page)?;
+                let child_page_num = accessor.child_page(child).unwrap();
+                let child_page = manager.get_page(child_page_num)?;
+                // Inline read verification for the child page
+                if manager.should_verify_read()
+                    && let Some(expected) = accessor.child_checksum(child)
+                    && expected != DEFERRED
+                {
+                    let computed = match child_page.memory()[0] {
+                        LEAF => leaf_checksum(&child_page, fixed_key_size, fixed_value_size)?,
+                        BRANCH => branch_checksum(&child_page, fixed_key_size)?,
+                        _ => {
+                            return Err(crate::StorageError::Corrupted(String::from(
+                                "Read verification: unknown page type in iterator",
+                            )));
+                        }
+                    };
+                    if computed != expected {
+                        manager.on_verification_failure(child_page_num)?;
+                    }
+                }
                 let direction = if reverse { -1 } else { 1 };
                 let next_child = isize::try_from(child).unwrap() + direction;
                 if 0 <= next_child && next_child < accessor.count_children().try_into().unwrap() {
@@ -433,9 +453,11 @@ fn range_is_empty<'a, K: Key + 'static, KR: Borrow<K::SelfType<'a>>, T: RangeBou
 }
 
 impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new<'a, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a>>>(
         query_range: &'_ T,
         table_root: Option<PageNumber>,
+        root_checksum: Option<Checksum>,
         fixed_value_size: Option<usize>,
         manager: Arc<TransactionalMemory>,
         compression_enabled: bool,
@@ -461,6 +483,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                     true,
                     fixed_value_size,
                     &manager,
+                    root_checksum,
                 )?,
                 Excluded(k) => find_iter_left::<K, V>(
                     manager.get_page(root)?,
@@ -469,6 +492,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                     false,
                     fixed_value_size,
                     &manager,
+                    root_checksum,
                 )?,
                 Unbounded => {
                     let state = find_iter_unbounded::<K, V>(
@@ -477,6 +501,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                         false,
                         fixed_value_size,
                         &manager,
+                        root_checksum,
                     )?;
                     (true, state)
                 }
@@ -489,6 +514,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                     true,
                     fixed_value_size,
                     &manager,
+                    root_checksum,
                 )?,
                 Excluded(k) => find_iter_right::<K, V>(
                     manager.get_page(root)?,
@@ -497,6 +523,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                     false,
                     fixed_value_size,
                     &manager,
+                    root_checksum,
                 )?,
                 Unbounded => {
                     let state = find_iter_unbounded::<K, V>(
@@ -505,6 +532,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                         true,
                         fixed_value_size,
                         &manager,
+                        root_checksum,
                     )?;
                     (true, state)
                 }
@@ -669,13 +697,49 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
     }
 }
 
+/// Verify a page's checksum during iterator initialization, if verification is enabled.
+fn maybe_verify_iter_page(
+    page: &PageImpl,
+    expected: Option<Checksum>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    manager: &TransactionalMemory,
+) -> Result {
+    if let Some(expected) = expected
+        && expected != DEFERRED
+        && manager.should_verify_read()
+    {
+        let computed = match page.memory()[0] {
+            LEAF => leaf_checksum(page, fixed_key_size, fixed_value_size)?,
+            BRANCH => branch_checksum(page, fixed_key_size)?,
+            _ => {
+                return Err(crate::StorageError::Corrupted(String::from(
+                    "Read verification: unknown page type in iterator init",
+                )));
+            }
+        };
+        if computed != expected {
+            manager.on_verification_failure(page.get_page_number())?;
+        }
+    }
+    Ok(())
+}
+
 fn find_iter_unbounded<K: Key, V: Value>(
     page: PageImpl,
     mut parent: Option<Box<RangeIterState>>,
     reverse: bool,
     fixed_value_size: Option<usize>,
     manager: &TransactionalMemory,
+    expected_checksum: Option<Checksum>,
 ) -> Result<Option<RangeIterState>> {
+    maybe_verify_iter_page(
+        &page,
+        expected_checksum,
+        K::fixed_width(),
+        fixed_value_size,
+        manager,
+    )?;
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -697,6 +761,7 @@ fn find_iter_unbounded<K: Key, V: Value>(
                 0
             };
             let child_page_number = accessor.child_page(child_index).unwrap();
+            let child_checksum = accessor.child_checksum(child_index);
             let child_page = manager.get_page(child_page_number)?;
             let direction = if reverse { -1isize } else { 1 };
             parent = Some(Box::new(Internal {
@@ -708,7 +773,14 @@ fn find_iter_unbounded<K: Key, V: Value>(
                     .unwrap(),
                 parent,
             }));
-            find_iter_unbounded::<K, V>(child_page, parent, reverse, fixed_value_size, manager)
+            find_iter_unbounded::<K, V>(
+                child_page,
+                parent,
+                reverse,
+                fixed_value_size,
+                manager,
+                child_checksum,
+            )
         }
         _ => unreachable!(),
     }
@@ -723,7 +795,15 @@ fn find_iter_left<K: Key, V: Value>(
     include_query: bool,
     fixed_value_size: Option<usize>,
     manager: &TransactionalMemory,
+    expected_checksum: Option<Checksum>,
 ) -> Result<(bool, Option<RangeIterState>)> {
+    maybe_verify_iter_page(
+        &page,
+        expected_checksum,
+        K::fixed_width(),
+        fixed_value_size,
+        manager,
+    )?;
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -749,6 +829,7 @@ fn find_iter_left<K: Key, V: Value>(
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
+            let child_checksum = accessor.child_checksum(child_index);
             let child_page = manager.get_page(child_page_number)?;
             if child_index < accessor.count_children() - 1 {
                 parent = Some(Box::new(Internal {
@@ -766,6 +847,7 @@ fn find_iter_left<K: Key, V: Value>(
                 include_query,
                 fixed_value_size,
                 manager,
+                child_checksum,
             )
         }
         _ => unreachable!(),
@@ -779,7 +861,15 @@ fn find_iter_right<K: Key, V: Value>(
     include_query: bool,
     fixed_value_size: Option<usize>,
     manager: &TransactionalMemory,
+    expected_checksum: Option<Checksum>,
 ) -> Result<(bool, Option<RangeIterState>)> {
+    maybe_verify_iter_page(
+        &page,
+        expected_checksum,
+        K::fixed_width(),
+        fixed_value_size,
+        manager,
+    )?;
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -805,6 +895,7 @@ fn find_iter_right<K: Key, V: Value>(
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
+            let child_checksum = accessor.child_checksum(child_index);
             let child_page = manager.get_page(child_page_number)?;
             if child_index > 0 && accessor.child_page(child_index - 1).is_some() {
                 parent = Some(Box::new(Internal {
@@ -822,6 +913,7 @@ fn find_iter_right<K: Key, V: Value>(
                 include_query,
                 fixed_value_size,
                 manager,
+                child_checksum,
             )
         }
         _ => unreachable!(),
@@ -838,7 +930,15 @@ fn find_iter_unbounded_raw(
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     manager: &TransactionalMemory,
+    expected_checksum: Option<Checksum>,
 ) -> Result<Option<RangeIterState>> {
+    maybe_verify_iter_page(
+        &page,
+        expected_checksum,
+        fixed_key_size,
+        fixed_value_size,
+        manager,
+    )?;
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => Ok(Some(Leaf {
@@ -851,6 +951,7 @@ fn find_iter_unbounded_raw(
         BRANCH => {
             let accessor = BranchAccessor::new(&page, fixed_key_size);
             let child_page_number = accessor.child_page(0).unwrap();
+            let child_checksum = accessor.child_checksum(0);
             let child_page = manager.get_page(child_page_number)?;
             parent = Some(Box::new(Internal {
                 page,
@@ -865,6 +966,7 @@ fn find_iter_unbounded_raw(
                 fixed_key_size,
                 fixed_value_size,
                 manager,
+                child_checksum,
             )
         }
         _ => unreachable!(),
@@ -907,7 +1009,7 @@ impl RawEntryIter {
     ) -> Result<Self> {
         let state = if let Some(root_page) = root {
             let page = manager.get_page(root_page)?;
-            find_iter_unbounded_raw(page, None, fixed_key_size, fixed_value_size, &manager)?
+            find_iter_unbounded_raw(page, None, fixed_key_size, fixed_value_size, &manager, None)?
         } else {
             None
         };

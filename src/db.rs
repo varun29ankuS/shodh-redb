@@ -486,6 +486,7 @@ impl ReadOnlyDatabase {
         Builder::new().open_read_only(path)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[cfg(feature = "std")]
     fn new(
         file: Box<dyn StorageBackend>,
@@ -494,6 +495,8 @@ impl ReadOnlyDatabase {
         read_cache_size_bytes: usize,
         compression: CompressionConfig,
         memory_budget: Option<usize>,
+        read_verification: ReadVerification,
+        read_verification_callback: Option<Arc<ReadVerificationCallback>>,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -509,6 +512,8 @@ impl ReadOnlyDatabase {
             true,
             compression,
             memory_budget,
+            read_verification,
+            read_verification_callback,
         )?;
         let mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -1323,6 +1328,8 @@ impl Database {
         memory_budget: Option<usize>,
         cdc_config: CdcConfig,
         history_retention: u64,
+        read_verification: ReadVerification,
+        read_verification_callback: Option<Arc<ReadVerificationCallback>>,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -1338,6 +1345,8 @@ impl Database {
             false,
             compression,
             memory_budget,
+            read_verification,
+            read_verification_callback,
         )?;
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -1737,6 +1746,51 @@ impl RepairSession {
     }
 }
 
+/// Controls inline checksum verification during B-tree reads.
+///
+/// shodh-redb stores XXH3-128 checksums in a merkle-tree structure -- each
+/// parent branch contains the expected checksum for every child page, and
+/// the root page checksum lives in `BtreeHeader`. This enum controls
+/// whether (and how often) those checksums are verified on the read path.
+///
+/// # Modes
+///
+/// | Mode | Overhead | Use case |
+/// |------|----------|----------|
+/// | `None` | 0 | Trusted storage, maximum throughput |
+/// | `Sampled { rate }` | ~rate x 5 % | Edge devices, cheap flash |
+/// | `Full` | ~5 % | Safety-critical, after detected corruption |
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ReadVerification {
+    /// No verification on reads (current default behavior).
+    None,
+    /// Verify a random fraction of page reads. `rate` is clamped to `[0.0, 1.0]`.
+    Sampled { rate: f32 },
+    /// Verify every page read.
+    Full,
+}
+
+impl Default for ReadVerification {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// Action to take when a read verification failure is detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadVerificationAction {
+    /// Return a `StorageError::Corrupted` to the caller.
+    ReturnError,
+    /// Log/record the corruption but allow the read to proceed.
+    Continue,
+}
+
+/// Callback signature for read verification failures.
+///
+/// Receives the internal page number (as `u64`) that failed checksum verification.
+/// Returns the action the database should take.
+pub type ReadVerificationCallback = dyn Fn(u64) -> ReadVerificationAction + Send + Sync + 'static;
+
 /// Configuration builder of a redb [Database].
 pub struct Builder {
     page_size: usize,
@@ -1749,6 +1803,8 @@ pub struct Builder {
     memory_budget: Option<usize>,
     cdc_config: CdcConfig,
     history_retention: u64,
+    read_verification: ReadVerification,
+    read_verification_callback: Option<Arc<ReadVerificationCallback>>,
 }
 
 impl Builder {
@@ -1775,6 +1831,8 @@ impl Builder {
             memory_budget: None,
             cdc_config: CdcConfig::default(),
             history_retention: 0,
+            read_verification: ReadVerification::None,
+            read_verification_callback: None,
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
@@ -1912,6 +1970,33 @@ impl Builder {
         self
     }
 
+    /// Set the read verification mode.
+    ///
+    /// Controls whether B-tree page checksums are verified during reads.
+    /// See [`ReadVerification`] for details on each mode.
+    ///
+    /// Default: [`ReadVerification::None`].
+    pub fn set_read_verification(&mut self, mode: ReadVerification) -> &mut Self {
+        self.read_verification = mode;
+        self
+    }
+
+    /// Set a callback invoked when read verification detects a corrupted page.
+    ///
+    /// The callback receives the internal page number (as `u64`) that failed
+    /// and returns a [`ReadVerificationAction`] controlling whether the read
+    /// returns an error or continues.
+    ///
+    /// Without a callback, corrupted pages always return
+    /// [`StorageError::Corrupted`].
+    pub fn set_read_verification_callback(
+        &mut self,
+        callback: impl Fn(u64) -> ReadVerificationAction + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.read_verification_callback = Some(Arc::new(callback));
+        self
+    }
+
     /// Opens the specified file as a redb database.
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
@@ -1938,6 +2023,8 @@ impl Builder {
             self.memory_budget,
             self.cdc_config.clone(),
             self.history_retention,
+            self.read_verification,
+            self.read_verification_callback.clone(),
         )
     }
 
@@ -1959,6 +2046,8 @@ impl Builder {
             self.memory_budget,
             self.cdc_config.clone(),
             self.history_retention,
+            self.read_verification,
+            self.read_verification_callback.clone(),
         )
     }
 
@@ -1981,6 +2070,8 @@ impl Builder {
             self.read_cache_size_bytes,
             self.compression,
             self.memory_budget,
+            self.read_verification,
+            self.read_verification_callback.clone(),
         )
     }
 
@@ -2002,6 +2093,8 @@ impl Builder {
             self.memory_budget,
             self.cdc_config.clone(),
             self.history_retention,
+            self.read_verification,
+            self.read_verification_callback.clone(),
         )
     }
 
@@ -2023,6 +2116,8 @@ impl Builder {
             self.memory_budget,
             self.cdc_config.clone(),
             self.history_retention,
+            self.read_verification,
+            self.read_verification_callback.clone(),
         )
     }
 }

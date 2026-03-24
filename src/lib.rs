@@ -126,6 +126,7 @@ pub use merge::{
     BitwiseOr, BytesAppend, FnMergeOperator, MergeOperator, NumericAdd, NumericMax, NumericMin,
     merge_fn,
 };
+pub use probe_select::DiversityConfig;
 pub use temporal::HybridLogicalClock;
 #[cfg(feature = "std")]
 pub use ttl_table::{ReadOnlyTtlTable, TtlAccessGuard, TtlRange, TtlTable, TtlTableDefinition};
@@ -154,6 +155,7 @@ pub mod ivfpq;
 mod legacy_tuple_types;
 pub mod merge;
 mod multimap_table;
+pub mod probe_select;
 mod sealed;
 mod table;
 pub mod temporal;

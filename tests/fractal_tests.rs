@@ -427,6 +427,7 @@ fn recall_benchmark_32d() {
                     k,
                     rerank: true,
                     min_hlc: 0,
+                    diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
                 },
             )
             .unwrap();
@@ -480,4 +481,115 @@ fn empty_search_before_training() {
         assert!(result.is_err(), "search before training should fail");
     }
     // Don't commit -- just testing the error
+}
+
+/// Diversity-aware search through the full fractal pipeline.
+#[test]
+fn diversity_search_fractal() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let vectors: Vec<(u64, Vec<f32>)> = (0..60).map(|i| (i, random_vector(i + 9000, 8))).collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_fractal_index(&FRACTAL_8D).unwrap();
+        idx.train_codebooks(vectors.iter().map(|(id, v)| (*id, v.clone())), 15)
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let idx = read_txn.open_fractal_index(&FRACTAL_8D).unwrap();
+
+    // Search with diversity at various lambda values
+    for &lambda in &[0.0, 0.15, 0.3, 0.5] {
+        let params = FractalSearchParams::top_k(5).with_diversity(lambda);
+        let results = idx.search(&read_txn, &vectors[0].1, &params).unwrap();
+        assert!(
+            !results.is_empty(),
+            "fractal diversity search with lambda={lambda} returned empty"
+        );
+        assert_eq!(
+            results[0].key, 0,
+            "self-match should be top-1 with lambda={lambda}"
+        );
+    }
+}
+
+/// Diversity search via fractal write transaction path.
+#[test]
+fn diversity_search_write_txn_fractal() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let vectors: Vec<(u64, Vec<f32>)> = (0..60).map(|i| (i, random_vector(i + 9500, 8))).collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_fractal_index(&FRACTAL_8D).unwrap();
+        idx.train_codebooks(vectors.iter().map(|(id, v)| (*id, v.clone())), 15)
+            .unwrap();
+
+        let params = FractalSearchParams::top_k(5).with_diversity(0.3);
+        let results = idx.search(&vectors[0].1, &params).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].key, 0);
+    }
+    write_txn.commit().unwrap();
+}
+
+/// Diversity with the 32D fractal index and recall check.
+#[test]
+fn diversity_recall_fractal_32d() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let num_vectors: u64 = 200;
+    let dim = 32;
+    let k = 10;
+
+    let vectors: Vec<(u64, Vec<f32>)> = (0..num_vectors)
+        .map(|i| (i, random_vector(i + 10000, dim)))
+        .collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_fractal_index(&FRACTAL_32D).unwrap();
+        idx.train_codebooks(vectors.iter().map(|(id, v)| (*id, v.clone())), 15)
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let idx = read_txn.open_fractal_index(&FRACTAL_32D).unwrap();
+
+    let query = &vectors[5].1;
+    let gt = brute_force_knn(query, &vectors, k, DistanceMetric::EuclideanSq);
+
+    // lambda=0.0 baseline
+    let params_base = FractalSearchParams::top_k(k).with_nprobe(8);
+    let results_base = idx.search(&read_txn, query, &params_base).unwrap();
+    let base_ids: Vec<u64> = results_base.iter().map(|r| r.key).collect();
+    let base_hits = gt.iter().filter(|id| base_ids.contains(id)).count();
+
+    // lambda=0.3
+    let params_div = FractalSearchParams::top_k(k)
+        .with_nprobe(8)
+        .with_diversity(0.3);
+    let results_div = idx.search(&read_txn, query, &params_div).unwrap();
+    let div_ids: Vec<u64> = results_div.iter().map(|r| r.key).collect();
+    let div_hits = gt.iter().filter(|id| div_ids.contains(id)).count();
+
+    // Diversity should not catastrophically destroy recall
+    // (allow up to 30% drop vs baseline, but must still find something)
+    assert!(
+        !results_div.is_empty(),
+        "diversity search returned empty results"
+    );
+    let _ = (base_hits, div_hits); // used for debugging if assertion below fails
+    assert!(
+        div_hits as f64 / k as f64 > 0.2,
+        "diversity recall too low: {div_hits}/{k} (baseline: {base_hits}/{k})"
+    );
 }

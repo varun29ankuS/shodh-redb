@@ -272,6 +272,7 @@ fn reranking_improves_accuracy() {
         candidates: 50,
         k: 5,
         rerank: true,
+        diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
     };
     let reranked = idx.search(&read_txn, query, &params_rerank).unwrap();
 
@@ -281,6 +282,7 @@ fn reranking_improves_accuracy() {
         candidates: 50,
         k: 5,
         rerank: false,
+        diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
     };
     let approx = idx.search(&read_txn, query, &params_no_rerank).unwrap();
 
@@ -656,6 +658,7 @@ fn recall_benchmark_128d() {
             candidates: 200,
             k,
             rerank: true,
+            diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
         };
         let results = idx.search(&read_txn, query, &params).unwrap();
         let result_ids: Vec<u64> = results.iter().map(|r| r.key).collect();
@@ -704,6 +707,7 @@ fn index_without_raw_vectors() {
         candidates: 20,
         k: 3,
         rerank: true,
+        diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
     };
     let results = idx.search(&read_txn, &vectors[0].1, &params).unwrap();
     assert!(!results.is_empty());
@@ -910,6 +914,104 @@ fn nan_inf_vectors_rejected() {
         // Valid vectors should still work.
         idx.insert(0, &training[0].1).unwrap();
         assert_eq!(idx.config().num_vectors, 1);
+    }
+    write_txn.commit().unwrap();
+}
+
+/// Diversity-aware search through the full IVF-PQ pipeline.
+/// Verifies that lambda > 0 produces valid results (no panics, correct count)
+/// and that the top-1 self-match is preserved.
+#[test]
+fn diversity_search_ivfpq() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let num_vectors = 200;
+    let dim = 128;
+    let k = 10;
+
+    let vectors: Vec<(u64, Vec<f32>)> = (0..num_vectors)
+        .map(|i| (i, random_vector(i + 7000, dim)))
+        .collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_ivfpq_index(&INDEX_128D).unwrap();
+        idx.train(vectors.iter().map(|(id, v)| (*id, v.clone())), 25)
+            .unwrap();
+        idx.insert_batch(vectors.iter().map(|(id, v)| (*id, v.clone())))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let idx = read_txn.open_ivfpq_index(&INDEX_128D).unwrap();
+
+    // Search with diversity enabled at various lambda values
+    for &lambda in &[0.0, 0.15, 0.3, 0.5] {
+        let params = SearchParams {
+            nprobe: 8,
+            candidates: 100,
+            k,
+            rerank: true,
+            diversity: shodh_redb::DiversityConfig { lambda },
+        };
+        let results = idx.search(&read_txn, &vectors[0].1, &params).unwrap();
+        assert!(
+            !results.is_empty(),
+            "diversity search with lambda={lambda} returned empty"
+        );
+        assert!(results.len() <= k);
+        // Self-match should still be closest regardless of probe diversity
+        assert_eq!(
+            results[0].key, 0,
+            "self-match should be top-1 with lambda={lambda}, got key={}",
+            results[0].key
+        );
+    }
+
+    // Verify diversity doesn't destroy recall: lambda=0.3 should still have
+    // reasonable overlap with brute-force ground truth
+    let query = &vectors[10].1;
+    let gt = brute_force_knn(query, &vectors, k, DistanceMetric::EuclideanSq);
+    let params = SearchParams {
+        nprobe: 12,
+        candidates: 150,
+        k,
+        rerank: true,
+        diversity: shodh_redb::DiversityConfig { lambda: 0.3 },
+    };
+    let results = idx.search(&read_txn, query, &params).unwrap();
+    let result_ids: Vec<u64> = results.iter().map(|r| r.key).collect();
+    let hits = gt.iter().filter(|id| result_ids.contains(id)).count();
+    let recall = hits as f64 / k as f64;
+    assert!(
+        recall > 0.3,
+        "diversity search recall@{k} = {recall:.3} -- too low, expected > 0.3"
+    );
+}
+
+/// Diversity search via write transaction path.
+#[test]
+fn diversity_search_write_txn_ivfpq() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let vectors: Vec<(u64, Vec<f32>)> = (0..50).map(|i| (i, random_vector(i + 8000, 8))).collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+        idx.train(vectors.iter().map(|(id, v)| (*id, v.clone())), 25)
+            .unwrap();
+        for (id, vec) in &vectors {
+            idx.insert(*id, vec).unwrap();
+        }
+
+        let params = SearchParams::top_k(5).with_diversity(0.3);
+        let results = idx.search(&vectors[0].1, &params).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].key, 0);
     }
     write_txn.commit().unwrap();
 }

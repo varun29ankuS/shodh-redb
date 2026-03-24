@@ -311,6 +311,9 @@ pub fn nearest_clusters(
     metric: DistanceMetric,
     diversity: crate::probe_select::DiversityConfig,
 ) -> Vec<(u32, f32)> {
+    if num_clusters == 0 {
+        return Vec::new();
+    }
     let nprobe = nprobe.min(num_clusters).max(1);
 
     #[allow(clippy::cast_possible_truncation)]

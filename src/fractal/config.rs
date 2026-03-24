@@ -211,7 +211,9 @@ impl FractalSearchParams {
     /// `lambda` in [0.0, 1.0]: 0.0 = pure distance (default), higher = more diversity.
     #[must_use]
     pub fn with_diversity(mut self, lambda: f32) -> Self {
-        self.diversity = DiversityConfig { lambda };
+        self.diversity = DiversityConfig {
+            lambda: lambda.clamp(0.0, 1.0),
+        };
         self
     }
 }

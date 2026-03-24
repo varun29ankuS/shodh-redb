@@ -70,6 +70,16 @@ pub fn select_diverse_probes(
         return candidates[..n].to_vec();
     }
 
+    debug_assert_eq!(
+        candidate_centroids.len(),
+        candidates.len() * dim,
+        "candidate_centroids length mismatch: expected {} ({}*{}), got {}",
+        candidates.len() * dim,
+        candidates.len(),
+        dim,
+        candidate_centroids.len(),
+    );
+
     // Shortlist: top 2*nprobe by distance (already sorted)
     let shortlist_len = candidates.len().min(nprobe.saturating_mul(2));
     let shortlist = &candidates[..shortlist_len];
@@ -95,8 +105,8 @@ pub fn select_diverse_probes(
     is_selected[0] = true;
     result.push(shortlist[0]);
 
-    // Track max inter-centroid distance for normalization
-    let mut max_inter_dist: f32 = f32::EPSILON;
+    // Scratch buffer for per-candidate min-inter-distances
+    let mut min_inter_dists = vec![0.0f32; shortlist_len];
 
     // Greedy MMR selection for remaining slots
     for _ in 1..nprobe {
@@ -104,38 +114,51 @@ pub fn select_diverse_probes(
             break;
         }
 
-        let mut best_idx = usize::MAX;
-        let mut best_score = f32::INFINITY;
-
+        // Pass 1: compute min inter-centroid distance for each unselected
+        // candidate and find the min/max for normalization.
+        let mut inter_min: f32 = f32::INFINITY;
+        let mut inter_max: f32 = f32::NEG_INFINITY;
         for j in 0..shortlist_len {
             if is_selected[j] {
                 continue;
             }
-
-            // Relevance: normalized distance to query [0, 1]
-            let relevance = (shortlist[j].1 - d_min) / d_range;
-
-            // Diversity: minimum distance to any already-selected centroid
             let centroid_j = &shortlist_centroids[j * dim..(j + 1) * dim];
-            let mut min_inter_dist = f32::INFINITY;
+            let mut min_d = f32::INFINITY;
             for &s in &selected {
                 let centroid_s = &shortlist_centroids[s * dim..(s + 1) * dim];
                 let d = metric.compute(centroid_j, centroid_s);
-                if d < min_inter_dist {
-                    min_inter_dist = d;
+                if d < min_d {
+                    min_d = d;
                 }
             }
-
-            if min_inter_dist > max_inter_dist {
-                max_inter_dist = min_inter_dist;
+            min_inter_dists[j] = min_d;
+            if min_d < inter_min {
+                inter_min = min_d;
             }
+            if min_d > inter_max {
+                inter_max = min_d;
+            }
+        }
 
-            // Normalize diversity to [0, 1]
-            let diversity_score = min_inter_dist / max_inter_dist;
+        // Shift-and-scale normalization: maps to [0, 1] regardless of sign.
+        // Works correctly for all metrics including DotProduct (negative distances).
+        let inter_range = if (inter_max - inter_min).abs() > f32::EPSILON {
+            inter_max - inter_min
+        } else {
+            1.0
+        };
 
+        // Pass 2: score candidates with consistent normalization
+        let mut best_idx = usize::MAX;
+        let mut best_score = f32::INFINITY;
+        for j in 0..shortlist_len {
+            if is_selected[j] {
+                continue;
+            }
+            let relevance = (shortlist[j].1 - d_min) / d_range;
+            let diversity_score = (min_inter_dists[j] - inter_min) / inter_range;
             // MMR: lower = better (relevance low = close, diversity high = spread)
             let score = (1.0 - lambda) * relevance - lambda * diversity_score;
-
             if score < best_score {
                 best_score = score;
                 best_idx = j;
@@ -332,5 +355,124 @@ mod tests {
             DistanceMetric::EuclideanSq,
         );
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn dot_product_diversity_selects_spread() {
+        // DotProduct metric returns -dot_product(a,b), so distances can be negative.
+        // Group A: unit-ish vectors near (1,0) -- all very similar to each other
+        // Group B: unit-ish vectors near (0,1) -- orthogonal to group A
+        // Query: (0.9, 0.1) normalized-ish -- closest to group A
+        let dim = 2;
+        let centroids_raw: Vec<(f32, f32)> = vec![
+            (0.99, 0.0), // A0
+            (0.98, 0.0), // A1
+            (0.97, 0.0), // A2
+            (0.96, 0.0), // A3
+            (0.0, 0.99), // B0
+            (0.0, 0.98), // B1
+        ];
+        let query = (0.9, 0.1);
+
+        // Compute DotProduct distances (= -dot(q, c))
+        let mut candidates: Vec<(u32, f32)> = centroids_raw
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| {
+                let dist = -(query.0 * x + query.1 * y);
+                #[allow(clippy::cast_possible_truncation)]
+                (i as u32, dist)
+            })
+            .collect();
+        candidates
+            .sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
+
+        let mut centroids_flat = Vec::with_capacity(candidates.len() * dim);
+        for &(id, _) in &candidates {
+            let (x, y) = centroids_raw[id as usize];
+            centroids_flat.push(x);
+            centroids_flat.push(y);
+        }
+
+        // Without diversity: all from group A (closest by dot product)
+        let greedy = select_diverse_probes(
+            &candidates,
+            &centroids_flat,
+            dim,
+            3,
+            DiversityConfig { lambda: 0.0 },
+            DistanceMetric::DotProduct,
+        );
+        let greedy_ids: Vec<u32> = greedy.iter().map(|x| x.0).collect();
+        assert!(
+            greedy_ids.iter().all(|&id| id <= 3),
+            "greedy should pick all from group A, got {greedy_ids:?}"
+        );
+
+        // With diversity: should include at least one from group B
+        let diverse = select_diverse_probes(
+            &candidates,
+            &centroids_flat,
+            dim,
+            3,
+            DiversityConfig { lambda: 0.5 },
+            DistanceMetric::DotProduct,
+        );
+        let diverse_ids: Vec<u32> = diverse.iter().map(|x| x.0).collect();
+        let has_group_b = diverse_ids.iter().any(|&id| id >= 4);
+        assert!(
+            has_group_b,
+            "diversity should select from group B with DotProduct, got IDs: {diverse_ids:?}"
+        );
+    }
+
+    #[test]
+    fn cosine_diversity_selects_spread() {
+        // Cosine distance is in [0, 2]. Test that diversity works with this range.
+        let dim = 2;
+        // Group A: vectors pointing right, Group B: vectors pointing up
+        let centroids_raw: Vec<(f32, f32)> = vec![
+            (1.0, 0.1),
+            (1.0, 0.15),
+            (1.0, 0.2),
+            (1.0, 0.25),
+            (0.1, 1.0),
+            (0.15, 1.0),
+        ];
+        let query = (1.0, 0.05);
+
+        let mut candidates: Vec<(u32, f32)> = centroids_raw
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| {
+                let dist = DistanceMetric::Cosine.compute(&[query.0, query.1], &[x, y]);
+                #[allow(clippy::cast_possible_truncation)]
+                (i as u32, dist)
+            })
+            .collect();
+        candidates
+            .sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
+
+        let mut centroids_flat = Vec::with_capacity(candidates.len() * dim);
+        for &(id, _) in &candidates {
+            let (x, y) = centroids_raw[id as usize];
+            centroids_flat.push(x);
+            centroids_flat.push(y);
+        }
+
+        let diverse = select_diverse_probes(
+            &candidates,
+            &centroids_flat,
+            dim,
+            3,
+            DiversityConfig { lambda: 0.5 },
+            DistanceMetric::Cosine,
+        );
+        let diverse_ids: Vec<u32> = diverse.iter().map(|x| x.0).collect();
+        let has_group_b = diverse_ids.iter().any(|&id| id >= 4);
+        assert!(
+            has_group_b,
+            "diversity should select from group B with Cosine, got IDs: {diverse_ids:?}"
+        );
     }
 }

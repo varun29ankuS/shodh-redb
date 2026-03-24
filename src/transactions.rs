@@ -3214,6 +3214,7 @@ impl ReadTransaction {
         })
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn table_tree(&self) -> &TableTree {
         &self.tree
     }

@@ -1748,7 +1748,7 @@ impl RepairSession {
 
 /// Controls inline checksum verification during B-tree reads.
 ///
-/// shodh-redb stores XXH3-128 checksums in a merkle-tree structure — each
+/// shodh-redb stores XXH3-128 checksums in a merkle-tree structure -- each
 /// parent branch contains the expected checksum for every child page, and
 /// the root page checksum lives in `BtreeHeader`. This enum controls
 /// whether (and how often) those checksums are verified on the read path.
@@ -1758,7 +1758,7 @@ impl RepairSession {
 /// | Mode | Overhead | Use case |
 /// |------|----------|----------|
 /// | `None` | 0 | Trusted storage, maximum throughput |
-/// | `Sampled { rate }` | ~rate × 5 % | Edge devices, cheap flash |
+/// | `Sampled { rate }` | ~rate x 5 % | Edge devices, cheap flash |
 /// | `Full` | ~5 % | Safety-critical, after detected corruption |
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ReadVerification {

@@ -34,7 +34,7 @@ fn populate_db(n: u64, verification: ReadVerification) -> (tempfile::NamedTempFi
 }
 
 // -------------------------------------------------------------------------
-// 1. None mode works like before — zero verification overhead
+// 1. None mode works like before -- zero verification overhead
 // -------------------------------------------------------------------------
 
 #[test]
@@ -126,7 +126,7 @@ fn verify_full_detects_corruption() {
         f.sync_all().unwrap();
     }
 
-    // Try to reopen with Full verification — this may fail at open time
+    // Try to reopen with Full verification -- this may fail at open time
     // (the ReadOnlyDatabase::new verifies checksums on open) or during reads.
     // Either way, corruption should be detected somewhere.
     let mut builder = Database::builder();
@@ -172,7 +172,7 @@ fn verify_full_detects_corruption() {
 fn verify_sampled_probabilistic() {
     let (_tmpfile, db) = populate_db(500, ReadVerification::Sampled { rate: 0.5 });
 
-    // Just verify reads work — sampling is internal, we can't directly observe it
+    // Just verify reads work -- sampling is internal, we can't directly observe it
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(TABLE).unwrap();
     for i in 0..500u64 {
@@ -182,7 +182,7 @@ fn verify_sampled_probabilistic() {
 }
 
 // -------------------------------------------------------------------------
-// 6. Callback with Continue — reads succeed even when "corrupt"
+// 6. Callback with Continue -- reads succeed even when "corrupt"
 // -------------------------------------------------------------------------
 
 #[test]

@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Lock-free xorshift64 PRNG for sampling read verification.
 ///
-/// Uses `AtomicU64` with relaxed ordering — we only need statistical
+/// Uses `AtomicU64` with relaxed ordering -- we only need statistical
 /// uniformity, not cryptographic security or strict ordering.
 pub(crate) struct SamplingRng {
     state: AtomicU64,
@@ -29,7 +29,7 @@ impl SamplingRng {
         if rate >= 1.0 {
             return true;
         }
-        // xorshift64: load, compute, store. Relaxed is fine — occasional
+        // xorshift64: load, compute, store. Relaxed is fine -- occasional
         // repeated values just slightly skew the distribution.
         let mut s = self.state.load(Ordering::Relaxed);
         s ^= s << 13;
@@ -77,7 +77,7 @@ mod tests {
             }
         }
         let actual = f64::from(hits) / f64::from(n);
-        // Allow ±2% tolerance
+        // Allow +/-2% tolerance
         assert!(
             (actual - f64::from(rate)).abs() < 0.02,
             "expected ~{rate}, got {actual}"

@@ -449,8 +449,8 @@ impl TransactionalMemory {
 
     /// Returns `true` if the next page read should be verified.
     ///
-    /// Cost: None → 0 (branch on enum discriminant), Sampled → xorshift64,
-    /// Full → 0 (always true).
+    /// Cost: None -> 0 (branch on enum discriminant), Sampled -> xorshift64,
+    /// Full -> 0 (always true).
     pub(crate) fn should_verify_read(&self) -> bool {
         match self.read_verification {
             ReadVerification::None => false,

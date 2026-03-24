@@ -1339,6 +1339,21 @@ impl Database {
         Ok(CompactionHandle { db: self })
     }
 
+    /// Starts a background integrity scanner that periodically walks all
+    /// B-tree pages and checks xxh3-128 checksums.
+    ///
+    /// The scanner runs on a dedicated thread and never blocks normal
+    /// read/write traffic. Results are available via the returned handle.
+    ///
+    /// The thread is automatically stopped when the handle is dropped.
+    #[cfg(feature = "std")]
+    pub fn start_integrity_scanner(
+        &self,
+        config: crate::integrity_scanner::IntegrityScannerConfig,
+    ) -> crate::integrity_scanner::IntegrityScannerHandle {
+        crate::integrity_scanner::IntegrityScannerHandle::start(self.mem.clone(), config)
+    }
+
     #[cfg_attr(not(debug_assertions), expect(dead_code))]
     fn check_repaired_allocated_pages_table(
         system_root: Option<BtreeHeader>,

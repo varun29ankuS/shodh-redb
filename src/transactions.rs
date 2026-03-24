@@ -3214,6 +3214,10 @@ impl ReadTransaction {
         })
     }
 
+    pub(crate) fn table_tree(&self) -> &TableTree {
+        &self.tree
+    }
+
     /// Open the given table
     pub fn open_table<K: Key + 'static, V: Value + 'static>(
         &self,

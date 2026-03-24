@@ -1354,6 +1354,57 @@ impl Database {
         crate::integrity_scanner::IntegrityScannerHandle::start(self.mem.clone(), config)
     }
 
+    /// Export a logical incremental snapshot of all key/value changes since
+    /// `since_txn`.
+    ///
+    /// Requires [`Builder::set_history_retention()`] > 0 and `since_txn` must
+    /// still be within the retention window.
+    #[cfg(feature = "std")]
+    pub fn export_incremental(
+        &self,
+        since_txn: u64,
+    ) -> core::result::Result<crate::incremental::IncrementalSnapshot, StorageError> {
+        crate::incremental::export_incremental(self, since_txn)
+    }
+
+    /// Apply an incremental snapshot to this database.
+    ///
+    /// Performs a logical replay: upserted entries are inserted, deleted
+    /// entries are removed, and dropped tables are deleted. Executes as a
+    /// single atomic write transaction.
+    #[cfg(feature = "std")]
+    pub fn import_incremental(
+        &self,
+        snapshot: &crate::incremental::IncrementalSnapshot,
+    ) -> core::result::Result<crate::incremental::IncrementalImportReport, StorageError> {
+        crate::incremental::import_incremental(self, snapshot)
+    }
+
+    /// Write an incremental delta file containing only changes since `since_txn`.
+    ///
+    /// The destination file is a portable delta (not a valid database file)
+    /// that can be applied with [`apply_incremental_backup()`](Self::apply_incremental_backup).
+    #[cfg(feature = "std")]
+    pub fn backup_incremental(
+        &self,
+        dest: impl AsRef<std::path::Path>,
+        since_txn: u64,
+    ) -> core::result::Result<crate::incremental::IncrementalBackupReport, StorageError> {
+        crate::incremental::backup_incremental(self, dest.as_ref(), since_txn)
+    }
+
+    /// Apply an incremental delta file produced by [`backup_incremental()`](Self::backup_incremental).
+    ///
+    /// Reads the file, verifies its SHA-256 integrity, and performs a logical
+    /// import identical to [`import_incremental()`](Self::import_incremental).
+    #[cfg(feature = "std")]
+    pub fn apply_incremental_backup(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> core::result::Result<crate::incremental::IncrementalImportReport, StorageError> {
+        crate::incremental::apply_incremental_backup(self, path.as_ref())
+    }
+
     #[cfg_attr(not(debug_assertions), expect(dead_code))]
     fn check_repaired_allocated_pages_table(
         system_root: Option<BtreeHeader>,

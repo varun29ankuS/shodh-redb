@@ -752,6 +752,7 @@ impl<V: Key> DynamicCollection<V> {
                     BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                         &(..),
                         Some(root),
+                        None,
                         if mem.compression().is_enabled() {
                             None
                         } else {
@@ -787,6 +788,7 @@ impl<V: Key> DynamicCollection<V> {
                 let inner = BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     Some(root),
+                    None,
                     if mem.compression().is_enabled() {
                         None
                     } else {
@@ -1536,6 +1538,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
+                    None,
                     if self.mem.compression().is_enabled() {
                         None
                     } else {
@@ -1587,6 +1590,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
             MultimapValue::new_subtree(
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
+                    None,
                     None,
                     if self.mem.compression().is_enabled() {
                         None
@@ -1737,6 +1741,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
+                    None,
                     if self.mem.compression().is_enabled() {
                         None
                     } else {
@@ -1803,6 +1808,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
             MultimapValue::new_subtree(
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
+                    None,
                     None,
                     if self.mem.compression().is_enabled() {
                         None

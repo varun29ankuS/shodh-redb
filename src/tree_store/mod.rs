@@ -3,6 +3,7 @@ mod btree_base;
 mod btree_iters;
 mod btree_mutator;
 mod page_store;
+pub(crate) mod read_verify;
 mod table_tree;
 mod table_tree_base;
 

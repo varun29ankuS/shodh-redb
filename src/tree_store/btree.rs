@@ -1141,6 +1141,28 @@ impl<K: Key, V: Value> Btree<K, V> {
         }
     }
 
+    /// Conditionally verify a page's checksum against the expected value from its parent.
+    /// Only computes the checksum when `should_verify_read()` returns true.
+    fn maybe_verify_page(&self, page: &PageImpl, expected_checksum: Checksum) -> Result {
+        if expected_checksum == DEFERRED || !self.mem.should_verify_read() {
+            return Ok(());
+        }
+        let node_mem = page.memory();
+        let computed = match node_mem[0] {
+            LEAF => leaf_checksum(page, K::fixed_width(), self.value_width())?,
+            BRANCH => branch_checksum(page, K::fixed_width())?,
+            _ => {
+                return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+                    "Read verification: unknown page type",
+                )));
+            }
+        };
+        if computed != expected_checksum {
+            self.mem.on_verification_failure(page.get_page_number())?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn transaction_guard(&self) -> &Arc<TransactionGuard> {
         &self.transaction_guard
     }
@@ -1196,17 +1218,24 @@ impl<K: Key, V: Value> Btree<K, V> {
 
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'static, V>>> {
         if let Some(ref root_page) = self.cached_root {
-            self.get_helper(root_page.clone(), K::as_bytes(key).as_ref())
+            let expected = self.root.unwrap().checksum;
+            self.get_helper(root_page.clone(), K::as_bytes(key).as_ref(), expected)
         } else {
             Ok(None)
         }
     }
 
     // Returns the value for the queried key, if present
-    fn get_helper(&self, page: PageImpl, query: &[u8]) -> Result<Option<AccessGuard<'static, V>>> {
+    fn get_helper(
+        &self,
+        page: PageImpl,
+        query: &[u8],
+        expected_checksum: Checksum,
+    ) -> Result<Option<AccessGuard<'static, V>>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
+                self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor =
                     LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
@@ -1222,9 +1251,15 @@ impl<K: Key, V: Value> Btree<K, V> {
                 }
             }
             BRANCH => {
+                self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
-                let (_, child_page) = accessor.child_for_key::<K>(query);
-                self.get_helper(self.mem.get_page_extended(child_page, self.hint)?, query)
+                let (child_index, child_page_num) = accessor.child_for_key::<K>(query);
+                let child_checksum = accessor.child_checksum(child_index).unwrap();
+                self.get_helper(
+                    self.mem.get_page_extended(child_page_num, self.hint)?,
+                    query,
+                    child_checksum,
+                )
             }
             _ => unreachable!(),
         }
@@ -1234,7 +1269,8 @@ impl<K: Key, V: Value> Btree<K, V> {
         &self,
     ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
         if let Some(ref root) = self.cached_root {
-            self.first_helper(root.clone())
+            let expected = self.root.unwrap().checksum;
+            self.first_helper(root.clone(), expected)
         } else {
             Ok(None)
         }
@@ -1243,10 +1279,12 @@ impl<K: Key, V: Value> Btree<K, V> {
     fn first_helper(
         &self,
         page: PageImpl,
+        expected_checksum: Checksum,
     ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
+                self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor =
                     LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 let (key_range, value_range) = accessor.entry_ranges(0).unwrap();
@@ -1259,9 +1297,14 @@ impl<K: Key, V: Value> Btree<K, V> {
                 Ok(Some((key_guard, value_guard)))
             }
             BRANCH => {
+                self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let child_page = accessor.child_page(0).unwrap();
-                self.first_helper(self.mem.get_page_extended(child_page, self.hint)?)
+                let child_checksum = accessor.child_checksum(0).unwrap();
+                self.first_helper(
+                    self.mem.get_page_extended(child_page, self.hint)?,
+                    child_checksum,
+                )
             }
             _ => unreachable!(),
         }
@@ -1271,7 +1314,8 @@ impl<K: Key, V: Value> Btree<K, V> {
         &self,
     ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
         if let Some(ref root) = self.cached_root {
-            self.last_helper(root.clone())
+            let expected = self.root.unwrap().checksum;
+            self.last_helper(root.clone(), expected)
         } else {
             Ok(None)
         }
@@ -1280,10 +1324,12 @@ impl<K: Key, V: Value> Btree<K, V> {
     fn last_helper(
         &self,
         page: PageImpl,
+        expected_checksum: Checksum,
     ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
+                self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor =
                     LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 let (key_range, value_range) =
@@ -1297,9 +1343,15 @@ impl<K: Key, V: Value> Btree<K, V> {
                 Ok(Some((key_guard, value_guard)))
             }
             BRANCH => {
+                self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
-                let child_page = accessor.child_page(accessor.count_children() - 1).unwrap();
-                self.last_helper(self.mem.get_page_extended(child_page, self.hint)?)
+                let last_child = accessor.count_children() - 1;
+                let child_page = accessor.child_page(last_child).unwrap();
+                let child_checksum = accessor.child_checksum(last_child).unwrap();
+                self.last_helper(
+                    self.mem.get_page_extended(child_page, self.hint)?,
+                    child_checksum,
+                )
             }
             _ => unreachable!(),
         }
@@ -1312,6 +1364,7 @@ impl<K: Key, V: Value> Btree<K, V> {
         BtreeRangeIter::new(
             range,
             self.root.map(|x| x.root),
+            self.root.map(|x| x.checksum),
             self.value_width(),
             self.mem.clone(),
             self.compression().is_enabled(),

@@ -60,11 +60,13 @@ impl FractalIndexConfig {
         }
     }
 
-    /// Allocate a new cluster ID, advancing the counter.
+    /// Allocate a new cluster ID, advancing the ID counter only.
+    ///
+    /// Callers are responsible for updating `num_clusters` to reflect the
+    /// net change in live clusters (splits add, merges subtract).
     pub fn alloc_cluster_id(&mut self) -> u32 {
         let id = self.next_cluster_id;
         self.next_cluster_id += 1;
-        self.num_clusters += 1;
         id
     }
 }

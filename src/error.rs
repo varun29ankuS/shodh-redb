@@ -749,6 +749,7 @@ impl From<GroupCommitError> for Error {
             GroupCommitError::PeerFailed => Error::GroupCommitPeerFailed,
             GroupCommitError::TransactionFailed(e) | GroupCommitError::CommitFailed(e) => e.into(),
             GroupCommitError::Shutdown => Error::GroupCommitShutdown,
+            GroupCommitError::LockPoisoned => Error::LockPoisoned(panic::Location::caller()),
         }
     }
 }

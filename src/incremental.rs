@@ -304,6 +304,21 @@ impl IncrementalSnapshot {
 // Binary serialization
 // ---------------------------------------------------------------------------
 
+/// Verify that `payload[pos..pos+need]` is in bounds, returning a descriptive
+/// error when the payload is truncated.
+#[cfg(feature = "std")]
+fn check_bounds(payload: &[u8], pos: usize, need: usize) -> Result<(), StorageError> {
+    if pos.checked_add(need).is_none_or(|end| end > payload.len()) {
+        return Err(StorageError::Corrupted(alloc::format!(
+            "incremental snapshot truncated: need {} bytes at offset {}, have {}",
+            need,
+            pos,
+            payload.len()
+        )));
+    }
+    Ok(())
+}
+
 impl IncrementalSnapshot {
     /// Encode this snapshot into a portable byte buffer.
     ///
@@ -388,6 +403,7 @@ impl IncrementalSnapshot {
         let mut pos = 0;
 
         // Header
+        check_bounds(payload, pos, 8)?;
         let magic = &payload[pos..pos + 8];
         if magic != DELTA_MAGIC {
             return Err(StorageError::Corrupted(
@@ -396,6 +412,7 @@ impl IncrementalSnapshot {
         }
         pos += 8;
 
+        check_bounds(payload, pos, 4)?;
         let version = payload[pos];
         if version != DELTA_VERSION {
             return Err(StorageError::Corrupted(
@@ -404,43 +421,55 @@ impl IncrementalSnapshot {
         }
         pos += 1 + 3; // version + padding
 
+        check_bounds(payload, pos, 8)?;
         let base_txn = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
         pos += 8;
+        check_bounds(payload, pos, 8)?;
         let current_txn = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
         pos += 8;
+        check_bounds(payload, pos, 8)?;
         let table_count = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
         pos += 8;
 
         let mut tables = Vec::new();
         for _ in 0..table_count {
+            check_bounds(payload, pos, 2)?;
             let name_len = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
             pos += 2;
+            check_bounds(payload, pos, name_len)?;
             let name = core::str::from_utf8(&payload[pos..pos + name_len]).map_err(|_| {
                 StorageError::Corrupted("incremental delta invalid table name".into())
             })?;
             pos += name_len;
 
+            check_bounds(payload, pos, 8)?;
             let upsert_count =
                 u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()) as usize;
             pos += 8;
+            check_bounds(payload, pos, 8)?;
             let delete_count =
                 u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()) as usize;
             pos += 8;
 
             let mut upserts = Vec::with_capacity(upsert_count);
             for _ in 0..upsert_count {
+                check_bounds(payload, pos, 4)?;
                 let key_len =
                     u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
+                check_bounds(payload, pos, key_len)?;
                 let key = payload[pos..pos + key_len].to_vec();
                 pos += key_len;
 
+                check_bounds(payload, pos, 4)?;
                 let val_len =
                     u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
+                check_bounds(payload, pos, val_len)?;
                 let value = payload[pos..pos + val_len].to_vec();
                 pos += val_len;
 
+                check_bounds(payload, pos, 16)?;
                 let stored_checksum =
                     u128::from_le_bytes(payload[pos..pos + 16].try_into().unwrap());
                 pos += 16;
@@ -460,9 +489,11 @@ impl IncrementalSnapshot {
 
             let mut deletes = Vec::with_capacity(delete_count);
             for _ in 0..delete_count {
+                check_bounds(payload, pos, 4)?;
                 let key_len =
                     u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
+                check_bounds(payload, pos, key_len)?;
                 let key = payload[pos..pos + key_len].to_vec();
                 pos += key_len;
                 deletes.push(key);
@@ -476,12 +507,15 @@ impl IncrementalSnapshot {
         }
 
         // Dropped tables
+        check_bounds(payload, pos, 8)?;
         let dropped_count = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()) as usize;
         pos += 8;
         let mut dropped_tables = Vec::with_capacity(dropped_count);
         for _ in 0..dropped_count {
+            check_bounds(payload, pos, 2)?;
             let name_len = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
             pos += 2;
+            check_bounds(payload, pos, name_len)?;
             let name = core::str::from_utf8(&payload[pos..pos + name_len]).map_err(|_| {
                 StorageError::Corrupted("incremental delta invalid dropped table name".into())
             })?;
@@ -991,6 +1025,68 @@ mod tests {
         // Verify TABLE_B no longer exists
         let rtxn = dst_db.begin_read().unwrap();
         let result = rtxn.open_untyped_table(UntypedTableHandle::new("table_b".into()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn incremental_from_bytes_truncated_payload() {
+        let (_file, db) = create_db_with_history(10);
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE_A).unwrap();
+            t.insert("k1", &1u64).unwrap();
+        }
+        txn.commit().unwrap();
+        let base_id = get_txn_id(&db);
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE_A).unwrap();
+            t.insert("k2", &2u64).unwrap();
+        }
+        txn.commit().unwrap();
+
+        let snapshot = export_incremental(&db, base_id).unwrap();
+        let bytes = snapshot.to_bytes();
+
+        // Truncate at various points within the payload (before the SHA-256
+        // footer) and re-append a valid SHA-256 so the footer check passes but
+        // the structural parse hits the bounds check.
+        let payload_len = bytes.len() - SHA256_SIZE;
+        let truncation_points = [
+            HEADER_SIZE + 1,  // inside table section header
+            HEADER_SIZE + 10, // inside upsert data
+            HEADER_SIZE + 20, // deeper inside upsert data
+            payload_len / 2,  // midpoint
+        ];
+
+        for &trunc in &truncation_points {
+            if trunc >= payload_len {
+                continue;
+            }
+            let truncated_payload = &bytes[..trunc];
+            let hash = Sha256::digest(truncated_payload);
+            let mut tampered = truncated_payload.to_vec();
+            tampered.extend_from_slice(&hash);
+
+            let result = IncrementalSnapshot::from_bytes(&tampered);
+            assert!(
+                result.is_err(),
+                "expected error for truncation at byte {trunc}, got Ok"
+            );
+            let err_msg = alloc::format!("{}", result.unwrap_err());
+            assert!(
+                err_msg.contains("truncated"),
+                "expected 'truncated' in error message for truncation at byte {trunc}, got: {err_msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_from_bytes_too_short() {
+        // A payload shorter than HEADER_SIZE + SHA256_SIZE should fail immediately
+        let result = IncrementalSnapshot::from_bytes(&[0u8; HEADER_SIZE + SHA256_SIZE - 1]);
         assert!(result.is_err());
     }
 }

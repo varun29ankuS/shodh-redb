@@ -26,10 +26,8 @@ pub trait MergeOperator: Send + Sync {
 /// Supports 1, 2, 4, and 8-byte widths (u8/i8 through u64/i64, f32, f64).
 /// If the key does not exist, the operand is used as the initial value.
 ///
-/// # Panics
-///
-/// Panics if `existing` and `operand` have different lengths, or if the length
-/// is not 1, 2, 4, or 8.
+/// If `existing` and `operand` have different byte widths, the existing value
+/// is preserved unchanged (no panic).
 #[derive(Clone, Copy)]
 pub struct NumericAdd;
 
@@ -44,13 +42,9 @@ impl MergeOperator for NumericAdd {
         let Some(existing) = existing else {
             return Some(operand.to_vec());
         };
-        assert_eq!(
-            existing.len(),
-            operand.len(),
-            "NumericAdd: existing ({}) and operand ({}) byte widths must match",
-            existing.len(),
-            operand.len()
-        );
+        if existing.len() != operand.len() {
+            return Some(existing.to_vec());
+        }
         let result = match operand.len() {
             1 => {
                 let a = existing[0];
@@ -83,9 +77,8 @@ impl MergeOperator for NumericAdd {
 /// Supports 1, 2, 4, and 8-byte widths. Comparison is unsigned.
 /// If the key does not exist, the operand is used as the initial value.
 ///
-/// # Panics
-///
-/// Panics if byte widths don't match or width is not 1, 2, 4, or 8.
+/// If `existing` and `operand` have different byte widths, the existing value
+/// is preserved unchanged (no panic).
 #[derive(Clone, Copy)]
 pub struct NumericMax;
 
@@ -100,13 +93,9 @@ impl MergeOperator for NumericMax {
         let Some(existing) = existing else {
             return Some(operand.to_vec());
         };
-        assert_eq!(
-            existing.len(),
-            operand.len(),
-            "NumericMax: existing ({}) and operand ({}) byte widths must match",
-            existing.len(),
-            operand.len()
-        );
+        if existing.len() != operand.len() {
+            return Some(existing.to_vec());
+        }
         let use_operand = match operand.len() {
             1 => operand[0] > existing[0],
             2 => {
@@ -139,9 +128,8 @@ impl MergeOperator for NumericMax {
 /// Supports 1, 2, 4, and 8-byte widths. Comparison is unsigned.
 /// If the key does not exist, the operand is used as the initial value.
 ///
-/// # Panics
-///
-/// Panics if byte widths don't match or width is not 1, 2, 4, or 8.
+/// If `existing` and `operand` have different byte widths, the existing value
+/// is preserved unchanged (no panic).
 #[derive(Clone, Copy)]
 pub struct NumericMin;
 
@@ -156,13 +144,9 @@ impl MergeOperator for NumericMin {
         let Some(existing) = existing else {
             return Some(operand.to_vec());
         };
-        assert_eq!(
-            existing.len(),
-            operand.len(),
-            "NumericMin: existing ({}) and operand ({}) byte widths must match",
-            existing.len(),
-            operand.len()
-        );
+        if existing.len() != operand.len() {
+            return Some(existing.to_vec());
+        }
         let use_operand = match operand.len() {
             1 => operand[0] < existing[0],
             2 => {
@@ -195,9 +179,8 @@ impl MergeOperator for NumericMin {
 /// Both existing and operand must have the same length.
 /// If the key does not exist, the operand is used as the initial value.
 ///
-/// # Panics
-///
-/// Panics if existing and operand have different lengths.
+/// If `existing` and `operand` have different lengths, the existing value
+/// is preserved unchanged (no panic).
 #[derive(Clone, Copy)]
 pub struct BitwiseOr;
 
@@ -212,13 +195,9 @@ impl MergeOperator for BitwiseOr {
         let Some(existing) = existing else {
             return Some(operand.to_vec());
         };
-        assert_eq!(
-            existing.len(),
-            operand.len(),
-            "BitwiseOr: existing ({}) and operand ({}) byte lengths must match",
-            existing.len(),
-            operand.len()
-        );
+        if existing.len() != operand.len() {
+            return Some(existing.to_vec());
+        }
         let result: Vec<u8> = existing
             .iter()
             .zip(operand.iter())

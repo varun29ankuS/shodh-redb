@@ -65,7 +65,10 @@ pub struct IntegrityScannerHandle {
 }
 
 impl IntegrityScannerHandle {
-    pub(crate) fn start(mem: Arc<TransactionalMemory>, config: IntegrityScannerConfig) -> Self {
+    pub(crate) fn start(
+        mem: Arc<TransactionalMemory>,
+        config: IntegrityScannerConfig,
+    ) -> Result<Self, std::io::Error> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let wake = Arc::new((Mutex::new(()), Condvar::new()));
         let last_result: Arc<Mutex<Option<ScanCycleResult>>> = Arc::new(Mutex::new(None));
@@ -80,23 +83,22 @@ impl IntegrityScannerHandle {
                 .name("shodh-integrity-scanner".into())
                 .spawn(move || {
                     run_scanner(mem, config, shutdown, wake, last_result, total_cycles);
-                })
-                .expect("failed to spawn integrity scanner thread")
+                })?
         };
 
-        Self {
+        Ok(Self {
             shutdown,
             wake,
             thread: Some(thread),
             last_result,
             total_cycles,
-        }
+        })
     }
 
     /// Returns a clone of the most recent scan cycle result, or `None` if
     /// no cycle has completed yet.
     pub fn last_result(&self) -> Option<ScanCycleResult> {
-        self.last_result.lock().unwrap().clone()
+        self.last_result.lock().ok().and_then(|guard| guard.clone())
     }
 
     /// Returns the total number of completed scan cycles.
@@ -149,14 +151,17 @@ fn run_scanner(
             if let Some(ref cb) = config.on_cycle_complete {
                 cb(&result);
             }
-            *last_result.lock().unwrap() = Some(result);
+            if let Ok(mut guard) = last_result.lock() {
+                *guard = Some(result);
+            }
             total_cycles.store(cycle, Ordering::Relaxed);
         }
 
         // Sleep with early wake on shutdown signal.
         let (lock, cvar) = &*wake;
-        let guard = lock.lock().unwrap();
-        let _ = cvar.wait_timeout(guard, interval);
+        if let Ok(guard) = lock.lock() {
+            let _ = cvar.wait_timeout(guard, interval);
+        }
     }
 }
 
@@ -185,10 +190,12 @@ mod tests {
     #[test]
     fn scanner_start_and_stop() {
         let (_file, db) = create_populated_db();
-        let mut handle = db.start_integrity_scanner(IntegrityScannerConfig {
-            scan_interval_secs: 1,
-            on_cycle_complete: None,
-        });
+        let mut handle = db
+            .start_integrity_scanner(IntegrityScannerConfig {
+                scan_interval_secs: 1,
+                on_cycle_complete: None,
+            })
+            .unwrap();
 
         // Wait for at least one cycle
         for _ in 0..50 {
@@ -215,12 +222,14 @@ mod tests {
         let callback_fired = Arc::new(AtomicBool::new(false));
         let flag = callback_fired.clone();
 
-        let mut handle = db.start_integrity_scanner(IntegrityScannerConfig {
-            scan_interval_secs: 1,
-            on_cycle_complete: Some(Box::new(move |_result| {
-                flag.store(true, Ordering::Relaxed);
-            })),
-        });
+        let mut handle = db
+            .start_integrity_scanner(IntegrityScannerConfig {
+                scan_interval_secs: 1,
+                on_cycle_complete: Some(Box::new(move |_result| {
+                    flag.store(true, Ordering::Relaxed);
+                })),
+            })
+            .unwrap();
 
         for _ in 0..50 {
             if callback_fired.load(Ordering::Relaxed) {
@@ -239,10 +248,12 @@ mod tests {
     #[test]
     fn scanner_drop_triggers_shutdown() {
         let (_file, db) = create_populated_db();
-        let handle = db.start_integrity_scanner(IntegrityScannerConfig {
-            scan_interval_secs: 3600, // long interval -- drop should wake it
-            on_cycle_complete: None,
-        });
+        let handle = db
+            .start_integrity_scanner(IntegrityScannerConfig {
+                scan_interval_secs: 3600, // long interval -- drop should wake it
+                on_cycle_complete: None,
+            })
+            .unwrap();
         // Dropping the handle should join the thread without hanging.
         drop(handle);
     }
@@ -250,10 +261,12 @@ mod tests {
     #[test]
     fn scanner_concurrent_with_writes() {
         let (_file, db) = create_populated_db();
-        let mut handle = db.start_integrity_scanner(IntegrityScannerConfig {
-            scan_interval_secs: 1,
-            on_cycle_complete: None,
-        });
+        let mut handle = db
+            .start_integrity_scanner(IntegrityScannerConfig {
+                scan_interval_secs: 1,
+                on_cycle_complete: None,
+            })
+            .unwrap();
 
         // Perform writes while the scanner is running
         for batch in 0..5 {
@@ -322,14 +335,16 @@ mod tests {
         let corruption_found = Arc::new(AtomicBool::new(false));
         let flag = corruption_found.clone();
 
-        let mut handle = db.start_integrity_scanner(IntegrityScannerConfig {
-            scan_interval_secs: 1,
-            on_cycle_complete: Some(Box::new(move |result| {
-                if result.pages_corrupt > 0 {
-                    flag.store(true, Ordering::Relaxed);
-                }
-            })),
-        });
+        let mut handle = db
+            .start_integrity_scanner(IntegrityScannerConfig {
+                scan_interval_secs: 1,
+                on_cycle_complete: Some(Box::new(move |result| {
+                    if result.pages_corrupt > 0 {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                })),
+            })
+            .unwrap();
 
         // Wait for at least one cycle
         for _ in 0..50 {

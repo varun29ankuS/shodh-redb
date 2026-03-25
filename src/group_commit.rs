@@ -20,6 +20,8 @@ pub enum GroupCommitError {
     CommitFailed(StorageError),
     /// The database is shutting down.
     Shutdown,
+    /// An internal mutex was poisoned (a thread panicked while holding the lock).
+    LockPoisoned,
 }
 
 impl Display for GroupCommitError {
@@ -30,6 +32,7 @@ impl Display for GroupCommitError {
             Self::TransactionFailed(e) => write!(f, "Transaction acquisition failed: {e}"),
             Self::CommitFailed(e) => write!(f, "Commit failed: {e}"),
             Self::Shutdown => write!(f, "Database is shutting down"),
+            Self::LockPoisoned => write!(f, "Internal mutex poisoned"),
         }
     }
 }
@@ -117,7 +120,10 @@ impl GroupCommitter {
         batch: WriteBatch,
     ) -> Result<(bool, mpsc::Receiver<Result<(), GroupCommitError>>), GroupCommitError> {
         let (result_tx, result_rx) = mpsc::sync_channel(1);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| GroupCommitError::LockPoisoned)?;
         if state.shutdown {
             return Err(GroupCommitError::Shutdown);
         }
@@ -130,27 +136,35 @@ impl GroupCommitter {
     }
 
     /// Drain all pending batches. Called by the leader.
-    pub fn drain_pending(&self) -> Vec<PendingBatch> {
-        let mut state = self.state.lock().unwrap();
-        std::mem::take(&mut state.pending)
+    pub fn drain_pending(&self) -> Result<Vec<PendingBatch>, GroupCommitError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| GroupCommitError::LockPoisoned)?;
+        Ok(std::mem::take(&mut state.pending))
     }
 
     /// Signal that the leader has finished. Wakes any threads waiting
     /// for the next leader election.
-    pub fn finish_leader(&self) {
-        let mut state = self.state.lock().unwrap();
+    pub fn finish_leader(&self) -> Result<(), GroupCommitError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| GroupCommitError::LockPoisoned)?;
         state.active_leader = false;
         self.leader_done.notify_all();
+        Ok(())
     }
 
     /// Shut down the group committer, failing all pending batches.
     pub fn shutdown(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.shutdown = true;
-        let pending = std::mem::take(&mut state.pending);
-        drop(state);
-        for p in pending {
-            let _ = p.result_tx.send(Err(GroupCommitError::Shutdown));
+        if let Ok(mut state) = self.state.lock() {
+            state.shutdown = true;
+            let pending = std::mem::take(&mut state.pending);
+            drop(state);
+            for p in pending {
+                let _ = p.result_tx.send(Err(GroupCommitError::Shutdown));
+            }
         }
         self.leader_done.notify_all();
     }

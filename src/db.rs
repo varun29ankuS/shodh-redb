@@ -1350,8 +1350,9 @@ impl Database {
     pub fn start_integrity_scanner(
         &self,
         config: crate::integrity_scanner::IntegrityScannerConfig,
-    ) -> crate::integrity_scanner::IntegrityScannerHandle {
+    ) -> Result<crate::integrity_scanner::IntegrityScannerHandle, DatabaseError> {
         crate::integrity_scanner::IntegrityScannerHandle::start(self.mem.clone(), config)
+            .map_err(DatabaseError::from)
     }
 
     /// Export a logical incremental snapshot of all key/value changes since
@@ -1914,9 +1915,12 @@ impl Database {
     #[cfg(feature = "std")]
     fn run_group_commit(&self) {
         loop {
-            let batches = self.group_committer.drain_pending();
+            let Ok(batches) = self.group_committer.drain_pending() else {
+                let _ = self.group_committer.finish_leader();
+                return;
+            };
             if batches.is_empty() {
-                self.group_committer.finish_leader();
+                let _ = self.group_committer.finish_leader();
                 return;
             }
 
@@ -1929,7 +1933,7 @@ impl Database {
                             StorageError::Corrupted(storage_err.to_string()),
                         )));
                     }
-                    self.group_committer.finish_leader();
+                    let _ = self.group_committer.finish_leader();
                     return;
                 }
             };

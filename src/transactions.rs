@@ -3990,7 +3990,8 @@ impl ReadTransaction {
         let mut results = Vec::new();
         for entry in range {
             let entry = entry?;
-            results.push(ChangeStream::from_key_record(entry.key(), entry.value()));
+            let record = CdcRecord::deserialize(entry.value_data())?;
+            results.push(ChangeStream::from_key_record(entry.key(), record));
         }
         Ok(results)
     }
@@ -4014,7 +4015,8 @@ impl ReadTransaction {
         let mut results = Vec::new();
         for entry in range {
             let entry = entry?;
-            results.push(ChangeStream::from_key_record(entry.key(), entry.value()));
+            let record = CdcRecord::deserialize(entry.value_data())?;
+            results.push(ChangeStream::from_key_record(entry.key(), record));
         }
         Ok(results)
     }

@@ -1,4 +1,6 @@
+use crate::error::StorageError;
 use crate::types::{Key, TypeName, Value};
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
@@ -38,12 +40,14 @@ pub enum ChangeOp {
 }
 
 impl ChangeOp {
-    fn from_u8(v: u8) -> Self {
+    fn from_u8(v: u8) -> Result<Self, StorageError> {
         match v {
-            0 => Self::Insert,
-            1 => Self::Update,
-            2 => Self::Delete,
-            other => unreachable!("invalid ChangeOp discriminant: {other}"),
+            0 => Ok(Self::Insert),
+            1 => Ok(Self::Update),
+            2 => Ok(Self::Delete),
+            other => Err(StorageError::Corrupted(format!(
+                "invalid ChangeOp discriminant byte: {other}"
+            ))),
         }
     }
 }
@@ -253,51 +257,94 @@ impl CdcRecord {
         buf
     }
 
-    fn deserialize(data: &[u8]) -> Self {
+    pub(crate) fn deserialize(data: &[u8]) -> Result<Self, StorageError> {
         let mut pos = 0;
 
-        let op = ChangeOp::from_u8(data[pos]);
+        if data.is_empty() {
+            return Err(StorageError::Corrupted("CDC record is empty".into()));
+        }
+
+        let op = ChangeOp::from_u8(data[pos])?;
         pos += 1;
 
+        if pos + 2 > data.len() {
+            return Err(StorageError::Corrupted(
+                "CDC record truncated at table name length".into(),
+            ));
+        }
         let name_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap());
         pos += 2;
+        if pos + usize::from(name_len) > data.len() {
+            return Err(StorageError::Corrupted(
+                "CDC record truncated at table name".into(),
+            ));
+        }
         let table_name =
             String::from_utf8_lossy(&data[pos..pos + usize::from(name_len)]).into_owned();
         pos += usize::from(name_len);
 
+        if pos + 4 > data.len() {
+            return Err(StorageError::Corrupted(
+                "CDC record truncated at key length".into(),
+            ));
+        }
         let key_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
         pos += 4;
+        if pos + key_len as usize > data.len() {
+            return Err(StorageError::Corrupted(
+                "CDC record truncated at key data".into(),
+            ));
+        }
         let key = data[pos..pos + key_len as usize].to_vec();
         pos += key_len as usize;
 
+        if pos + 4 > data.len() {
+            return Err(StorageError::Corrupted(
+                "CDC record truncated at new value length".into(),
+            ));
+        }
         let new_val_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
         pos += 4;
         let new_value = if new_val_len == NONE_SENTINEL {
             None
         } else {
+            if pos + new_val_len as usize > data.len() {
+                return Err(StorageError::Corrupted(
+                    "CDC record truncated at new value data".into(),
+                ));
+            }
             let v = data[pos..pos + new_val_len as usize].to_vec();
             pos += new_val_len as usize;
             Some(v)
         };
 
+        if pos + 4 > data.len() {
+            return Err(StorageError::Corrupted(
+                "CDC record truncated at old value length".into(),
+            ));
+        }
         let old_val_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
         pos += 4;
         let old_value = if old_val_len == NONE_SENTINEL {
             None
         } else {
+            if pos + old_val_len as usize > data.len() {
+                return Err(StorageError::Corrupted(
+                    "CDC record truncated at old value data".into(),
+                ));
+            }
             let v = data[pos..pos + old_val_len as usize].to_vec();
-            // pos += old_val_len as usize; // not needed, last field
-            let _ = v.len(); // suppress unused assignment warning
+            let _ = pos + old_val_len as usize; // last field
             Some(v)
         };
 
-        Self {
+        Ok(Self {
             op,
             table_name,
             key,
             new_value,
             old_value,
-        }
+        })
     }
 }
 
@@ -319,7 +366,10 @@ impl Value for CdcRecord {
     where
         Self: 'a,
     {
-        Self::deserialize(data)
+        match Self::deserialize(data) {
+            Ok(record) => record,
+            Err(e) => panic!("corrupted CDC record in Value::from_bytes: {e}"),
+        }
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -410,7 +460,7 @@ mod tests {
             old_value: None,
         };
         let bytes = record.serialize();
-        let decoded = CdcRecord::deserialize(&bytes);
+        let decoded = CdcRecord::deserialize(&bytes).unwrap();
         assert_eq!(decoded.op, ChangeOp::Insert);
         assert_eq!(decoded.table_name, "my_table");
         assert_eq!(decoded.key, vec![1, 2, 3]);
@@ -428,7 +478,7 @@ mod tests {
             old_value: Some(vec![30]),
         };
         let bytes = record.serialize();
-        let decoded = CdcRecord::deserialize(&bytes);
+        let decoded = CdcRecord::deserialize(&bytes).unwrap();
         assert_eq!(decoded.op, ChangeOp::Update);
         assert_eq!(decoded.new_value, Some(vec![20]));
         assert_eq!(decoded.old_value, Some(vec![30]));
@@ -444,7 +494,7 @@ mod tests {
             old_value: Some(vec![100]),
         };
         let bytes = record.serialize();
-        let decoded = CdcRecord::deserialize(&bytes);
+        let decoded = CdcRecord::deserialize(&bytes).unwrap();
         assert_eq!(decoded.op, ChangeOp::Delete);
         assert!(decoded.new_value.is_none());
         assert_eq!(decoded.old_value, Some(vec![100]));
@@ -460,9 +510,52 @@ mod tests {
             old_value: None,
         };
         let bytes = record.serialize();
-        let decoded = CdcRecord::deserialize(&bytes);
+        let decoded = CdcRecord::deserialize(&bytes).unwrap();
         assert_eq!(decoded.table_name, "");
         assert!(decoded.key.is_empty());
         assert_eq!(decoded.new_value, Some(vec![]));
+    }
+
+    #[test]
+    fn cdc_change_op_invalid_discriminant() {
+        let err = ChangeOp::from_u8(255).unwrap_err();
+        match err {
+            crate::error::StorageError::Corrupted(msg) => {
+                assert!(msg.contains("invalid ChangeOp discriminant"));
+            }
+            other => panic!("expected StorageError::Corrupted, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cdc_record_deserialize_empty_data() {
+        let err = CdcRecord::deserialize(&[]).unwrap_err();
+        match err {
+            crate::error::StorageError::Corrupted(msg) => {
+                assert!(msg.contains("empty"));
+            }
+            other => panic!("expected StorageError::Corrupted, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cdc_record_deserialize_invalid_op() {
+        let record = CdcRecord {
+            op: ChangeOp::Insert,
+            table_name: String::from("t"),
+            key: vec![1],
+            new_value: None,
+            old_value: None,
+        };
+        let mut bytes = record.serialize();
+        // Corrupt the op byte
+        bytes[0] = 99;
+        let err = CdcRecord::deserialize(&bytes).unwrap_err();
+        match err {
+            crate::error::StorageError::Corrupted(msg) => {
+                assert!(msg.contains("invalid ChangeOp discriminant"));
+            }
+            other => panic!("expected StorageError::Corrupted, got: {other:?}"),
+        }
     }
 }

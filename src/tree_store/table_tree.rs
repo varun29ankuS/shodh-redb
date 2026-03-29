@@ -547,9 +547,9 @@ impl TableTreeMut<'_> {
         f: impl FnOnce(&mut BtreeMut<K, V>) -> Result,
     ) -> Result {
         if !self.pending_table_updates.is_empty() {
-            return Err(crate::StorageError::Corrupted(
-                alloc::string::String::from("open_table_and_flush_table_root called with pending updates"),
-            ));
+            return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+                "open_table_and_flush_table_root called with pending updates",
+            )));
         }
 
         // Reserve space in the table tree
@@ -568,9 +568,9 @@ impl TableTreeMut<'_> {
         let table_root = match self.tree.get(&name)?.unwrap().value() {
             InternalTableDefinition::Normal { table_root, .. } => table_root,
             InternalTableDefinition::Multimap { .. } => {
-                return Err(crate::StorageError::Corrupted(
-                    alloc::string::String::from("expected Normal table but found Multimap"),
-                ));
+                return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+                    "expected Normal table but found Multimap",
+                )));
             }
         };
 
@@ -608,14 +608,15 @@ impl TableTreeMut<'_> {
         f: impl FnOnce(&mut Self, &mut BtreeMut<K, V>) -> Result,
     ) -> Result {
         if !self.pending_table_updates.is_empty() {
-            return Err(crate::StorageError::Corrupted(
-                alloc::string::String::from("create_table_and_flush_table_root called with pending updates"),
-            ));
+            return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+                "create_table_and_flush_table_root called with pending updates",
+            )));
         }
         if self.tree.get(&name)?.is_some() {
-            return Err(crate::StorageError::Corrupted(
-                alloc::format!("create_table_and_flush_table_root: table '{}' already exists", name),
-            ));
+            return Err(crate::StorageError::Corrupted(alloc::format!(
+                "create_table_and_flush_table_root: table '{}' already exists",
+                name
+            )));
         }
 
         // Reserve space in the table tree
@@ -724,14 +725,18 @@ impl TableTreeMut<'_> {
                     .insert(new_name.to_string(), update);
             }
             if self.tree.remove(&name)?.is_none() {
-                return Err(StorageError::Corrupted(
-                    alloc::format!("rename_table: table '{}' disappeared during rename", name),
-                ).into());
+                return Err(StorageError::Corrupted(alloc::format!(
+                    "rename_table: table '{}' disappeared during rename",
+                    name
+                ))
+                .into());
             }
             if self.tree.insert(&new_name, &definition)?.is_some() {
-                return Err(StorageError::Corrupted(
-                    alloc::format!("rename_table: destination '{}' appeared during rename", new_name),
-                ).into());
+                return Err(StorageError::Corrupted(alloc::format!(
+                    "rename_table: destination '{}' appeared during rename",
+                    new_name
+                ))
+                .into());
             }
         } else {
             return Err(TableError::TableDoesNotExist(name.to_string()));

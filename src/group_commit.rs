@@ -2,8 +2,8 @@ use crate::Error;
 use crate::error::StorageError;
 use crate::transactions::WriteTransaction;
 use std::fmt::{Display, Formatter};
-use std::sync::mpsc;
 use std::sync::Mutex;
+use std::sync::mpsc;
 
 /// Error from a group commit operation.
 #[derive(Debug)]

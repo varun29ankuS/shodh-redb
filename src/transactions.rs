@@ -1245,7 +1245,9 @@ impl WriteTransaction {
 
     fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionId)> {
         let transaction_id = self.allocate_read_transaction()?.leak();
-        let id = self.transaction_tracker.allocate_savepoint(transaction_id)?;
+        let id = self
+            .transaction_tracker
+            .allocate_savepoint(transaction_id)?;
         Ok((id, transaction_id))
     }
 

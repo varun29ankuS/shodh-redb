@@ -79,8 +79,8 @@ impl TypeName {
     }
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
-        let classification = TypeClassification::from_byte(bytes[0])
-            .unwrap_or(TypeClassification::UserDefined);
+        let classification =
+            TypeClassification::from_byte(bytes[0]).unwrap_or(TypeClassification::UserDefined);
         let name = core::str::from_utf8(&bytes[1..])
             .unwrap_or("<corrupted>")
             .to_string();
@@ -579,8 +579,7 @@ impl Value for char {
         Self: 'a,
     {
         // Use replacement character on corrupted data instead of panicking
-        char::from_u32(u32::from_le_bytes([data[0], data[1], data[2], 0]))
-            .unwrap_or('\u{FFFD}')
+        char::from_u32(u32::from_le_bytes([data[0], data[1], data[2], 0])).unwrap_or('\u{FFFD}')
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 3]

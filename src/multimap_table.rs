@@ -1,4 +1,3 @@
-use alloc::format;
 use crate::cdc::types::{CdcEvent, ChangeOp};
 use crate::compat::{HashMap, Mutex};
 #[cfg(feature = "std")]
@@ -15,6 +14,7 @@ use crate::tree_store::{
 };
 use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
@@ -440,9 +440,7 @@ fn parse_subtree_roots<T: Page>(
     fixed_value_size: Option<usize>,
 ) -> crate::Result<Vec<BtreeHeader>> {
     match page.memory()[0] {
-        BRANCH => {
-            Ok(vec![])
-        }
+        BRANCH => Ok(vec![]),
         LEAF => {
             let mut result = vec![];
             let accessor = LeafAccessor::new(

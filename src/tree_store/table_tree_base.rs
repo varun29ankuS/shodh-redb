@@ -1,10 +1,10 @@
-use alloc::format;
 use crate::compat::{HashMap, Mutex};
 use crate::multimap_table::{UntypedMultiBtree, relocate_subtrees};
 use crate::tree_store::{
     BtreeHeader, PageNumber, PagePath, TransactionalMemory, UntypedBtree, UntypedBtreeMut,
 };
 use crate::{Key, Result, TableError, TypeName, Value};
+use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;

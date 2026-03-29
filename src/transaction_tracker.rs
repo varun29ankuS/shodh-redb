@@ -27,10 +27,9 @@ impl TransactionId {
     }
 
     pub(crate) fn next(self) -> Result<TransactionId> {
-        let value = self
-            .0
-            .checked_add(1)
-            .ok_or_else(|| StorageError::Corrupted(format!("TransactionId overflow at {}", self.0)))?;
+        let value = self.0.checked_add(1).ok_or_else(|| {
+            StorageError::Corrupted(format!("TransactionId overflow at {}", self.0))
+        })?;
         Ok(TransactionId(value))
     }
 
@@ -46,10 +45,9 @@ pub(crate) struct SavepointId(pub u64);
 
 impl SavepointId {
     pub(crate) fn next(self) -> Result<SavepointId> {
-        let value = self
-            .0
-            .checked_add(1)
-            .ok_or_else(|| StorageError::Corrupted(format!("SavepointId overflow at {}", self.0)))?;
+        let value = self.0.checked_add(1).ok_or_else(|| {
+            StorageError::Corrupted(format!("SavepointId overflow at {}", self.0))
+        })?;
         Ok(SavepointId(value))
     }
 }
@@ -166,7 +164,8 @@ impl TransactionTracker {
             retries += 1;
             if retries >= MAX_SPIN_RETRIES {
                 return Err(StorageError::Corrupted(
-                    "Timed out waiting for write transaction lock after 1000 spin iterations".into(),
+                    "Timed out waiting for write transaction lock after 1000 spin iterations"
+                        .into(),
                 ));
             }
 

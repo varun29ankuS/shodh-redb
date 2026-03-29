@@ -23,12 +23,10 @@ impl WritablePage {
         &self.data
     }
 
-    pub(super) fn mem_mut(&mut self) -> std::result::Result<&mut [u8], StorageError> {
-        Arc::get_mut(&mut self.data).ok_or_else(|| {
-            StorageError::Corrupted(
-                "WritablePage::mem_mut() called while other Arc references exist".to_string(),
-            )
-        })
+    pub(super) fn mem_mut(&mut self) -> core::result::Result<&mut [u8], StorageError> {
+        Arc::get_mut(&mut self.data).ok_or(StorageError::Corrupted(alloc::string::String::from(
+            "WritablePage::mem_mut() called while other Arc references exist",
+        )))
     }
 }
 

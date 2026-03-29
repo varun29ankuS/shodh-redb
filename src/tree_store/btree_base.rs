@@ -334,8 +334,7 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
             } => {
                 if let EitherPage::Mutable(ref mut mut_page) = self.page {
                     if let Ok(mem) = mut_page.memory_mut() {
-                        let mut mutator =
-                            LeafMutator::new(mem, fixed_key_size, fixed_value_size);
+                        let mut mutator = LeafMutator::new(mem, fixed_key_size, fixed_value_size);
                         mutator.remove(position);
                     }
                 } else {
@@ -549,7 +548,9 @@ impl<V: Value + 'static> AccessGuardMutInPlace<'_, V> {
 
 impl<V: MutInPlaceValue + 'static> AsMut<V::BaseRefType> for AccessGuardMutInPlace<'_, V> {
     fn as_mut(&mut self) -> &mut V::BaseRefType {
-        let mem = self.page.memory_mut()
+        let mem = self
+            .page
+            .memory_mut()
             .expect("AccessGuardMutInPlace requires exclusive page access");
         V::from_bytes_mut(&mut mem[self.offset..(self.offset + self.len)])
     }

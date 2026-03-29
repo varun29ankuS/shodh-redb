@@ -415,7 +415,8 @@ impl Drop for TransactionGuard {
         }
         if let Some(transaction_id) = self.transaction_id {
             if self.write_transaction {
-                let _ = self.transaction_tracker
+                let _ = self
+                    .transaction_tracker
                     .as_ref()
                     .unwrap()
                     .end_write_transaction(transaction_id);

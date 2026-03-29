@@ -28,7 +28,12 @@ impl StorageBackend for FileBackend {
         Ok(self
             .file
             .lock()
-            .unwrap()
+            .map_err(|_| {
+                BackendError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "mutex poisoned",
+                ))
+            })?
             .metadata()
             .map_err(BackendError::Io)?
             .len())
@@ -50,7 +55,12 @@ impl StorageBackend for FileBackend {
     fn set_len(&self, len: u64) -> core::result::Result<(), BackendError> {
         self.file
             .lock()
-            .unwrap()
+            .map_err(|_| {
+                BackendError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "mutex poisoned",
+                ))
+            })?
             .set_len(len)
             .map_err(BackendError::Io)
     }
@@ -58,7 +68,12 @@ impl StorageBackend for FileBackend {
     fn sync_data(&self) -> core::result::Result<(), BackendError> {
         self.file
             .lock()
-            .unwrap()
+            .map_err(|_| {
+                BackendError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "mutex poisoned",
+                ))
+            })?
             .sync_data()
             .map_err(BackendError::Io)
     }

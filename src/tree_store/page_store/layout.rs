@@ -18,6 +18,7 @@ pub(super) struct RegionLayout {
     page_size: u32,
 }
 
+#[allow(clippy::cast_possible_truncation)]
 impl RegionLayout {
     pub(super) fn new(num_pages: u32, header_pages: u32, page_size: u32) -> Self {
         assert!(num_pages > 0);
@@ -39,7 +40,7 @@ impl RegionLayout {
             round_up_to_multiple_of(desired_usable_bytes, page_size.into()) / u64::from(page_size);
 
         Self {
-            num_pages: num_pages.try_into().unwrap(),
+            num_pages: num_pages as u32,
             header_pages: region_header_pages,
             page_size,
         }
@@ -78,6 +79,7 @@ pub(crate) struct DatabaseLayout {
     trailing_partial_region: Option<RegionLayout>,
 }
 
+#[allow(clippy::cast_possible_truncation)]
 impl DatabaseLayout {
     pub(super) fn new(
         full_regions: u32,
@@ -127,7 +129,7 @@ impl DatabaseLayout {
         remaining -= full_regions * full_region_size;
         let trailing = if remaining >= (region_header_pages + 1) * page_size {
             remaining -= region_header_pages * page_size;
-            let remaining: u32 = remaining.try_into().unwrap();
+            let remaining: u32 = remaining as u32;
             let data_pages = remaining / page_size_u32;
             assert!(data_pages < region_max_data_pages_u32);
             Some(RegionLayout::new(
@@ -146,7 +148,7 @@ impl DatabaseLayout {
 
         Self {
             full_region_layout: full_layout,
-            num_full_regions: full_regions.try_into().unwrap(),
+            num_full_regions: full_regions as u32,
             trailing_partial_region: trailing,
         }
     }
@@ -193,7 +195,7 @@ impl DatabaseLayout {
             }
             DatabaseLayout {
                 full_region_layout,
-                num_full_regions: full_regions.try_into().unwrap(),
+                num_full_regions: full_regions as u32,
                 trailing_partial_region: trailing_region,
             }
         }
@@ -242,7 +244,12 @@ impl DatabaseLayout {
     pub(super) fn region_layout(&self, region: u32) -> RegionLayout {
         assert!(region < self.num_regions());
         if region == self.num_full_regions {
-            self.trailing_partial_region.unwrap()
+            // Safety: if region == num_full_regions and region < num_regions(),
+            // then num_regions() > num_full_regions, which implies trailing exists.
+            match self.trailing_partial_region {
+                Some(layout) => layout,
+                None => self.full_region_layout,
+            }
         } else {
             self.full_region_layout
         }

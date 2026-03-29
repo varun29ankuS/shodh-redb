@@ -350,7 +350,11 @@ impl TableTree {
             let definition = self
                 .get_table_untyped(&entry, TableType::Normal)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
-                .unwrap();
+                .ok_or_else(|| {
+                    StorageError::Corrupted(alloc::string::String::from(
+                        "listed table not found during page visit",
+                    ))
+                })?;
             definition.visit_all_pages(self.mem.clone(), |path| visitor(path))?;
         }
 
@@ -358,7 +362,11 @@ impl TableTree {
             let definition = self
                 .get_table_untyped(&entry, TableType::Multimap)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
-                .unwrap();
+                .ok_or_else(|| {
+                    StorageError::Corrupted(alloc::string::String::from(
+                        "listed multimap not found during page visit",
+                    ))
+                })?;
             definition.visit_all_pages(self.mem.clone(), |path| visitor(path))?;
         }
 
@@ -418,7 +426,11 @@ impl TableTreeMut<'_> {
             let definition = self
                 .get_table_untyped(&entry, TableType::Normal)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
-                .unwrap();
+                .ok_or_else(|| {
+                    StorageError::Corrupted(alloc::string::String::from(
+                        "listed table not found during page visit",
+                    ))
+                })?;
             definition.visit_all_pages(self.mem.clone(), |path| visitor(path))?;
         }
 
@@ -426,7 +438,11 @@ impl TableTreeMut<'_> {
             let definition = self
                 .get_table_untyped(&entry, TableType::Multimap)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
-                .unwrap();
+                .ok_or_else(|| {
+                    StorageError::Corrupted(alloc::string::String::from(
+                        "listed multimap not found during page visit",
+                    ))
+                })?;
             definition.visit_all_pages(self.mem.clone(), |path| visitor(path))?;
         }
 
@@ -476,7 +492,15 @@ impl TableTreeMut<'_> {
     pub(crate) fn flush_table_root_updates(&mut self) -> Result<&mut Self> {
         for (name, (new_root, new_length)) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
-            let mut definition = self.tree.get(&name.as_str())?.unwrap().value();
+            let mut definition = self
+                .tree
+                .get(&name.as_str())?
+                .ok_or_else(|| {
+                    StorageError::Corrupted(alloc::format!(
+                        "pending table '{name}' not found in table tree"
+                    ))
+                })?
+                .value();
             // No-op if the root has not changed
             match definition {
                 InternalTableDefinition::Normal { table_root, .. }
@@ -565,7 +589,14 @@ impl TableTreeMut<'_> {
             self.tree.insert(&name, &existing)?;
         }
 
-        let table_root = match self.tree.get(&name)?.unwrap().value() {
+        let table_root = match self
+            .tree
+            .get(&name)?
+            .ok_or_else(|| {
+                StorageError::Corrupted(alloc::format!("table '{name}' missing after insert"))
+            })?
+            .value()
+        {
             InternalTableDefinition::Normal { table_root, .. } => table_root,
             InternalTableDefinition::Multimap { .. } => {
                 return Err(crate::StorageError::Corrupted(alloc::string::String::from(

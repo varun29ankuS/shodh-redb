@@ -31,15 +31,39 @@ impl StorageBackend for ReadOnlyBackend {
     }
 
     fn set_len(&self, _len: u64) -> Result<(), BackendError> {
-        unreachable!()
+        #[cfg(feature = "std")]
+        {
+            Err(BackendError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "write operation on read-only backend",
+            )))
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            Err(BackendError::Message(alloc::string::String::from(
+                "write operation on read-only backend",
+            )))
+        }
     }
 
     fn sync_data(&self) -> Result<(), BackendError> {
-        unreachable!()
+        Ok(())
     }
 
     fn write(&self, _offset: u64, _data: &[u8]) -> Result<(), BackendError> {
-        unreachable!()
+        #[cfg(feature = "std")]
+        {
+            Err(BackendError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "write operation on read-only backend",
+            )))
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            Err(BackendError::Message(alloc::string::String::from(
+                "write operation on read-only backend",
+            )))
+        }
     }
 
     fn close(&self) -> Result<(), BackendError> {

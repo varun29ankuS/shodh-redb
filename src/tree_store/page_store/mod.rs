@@ -7,6 +7,7 @@ pub(crate) mod compression;
 mod fast_hash;
 #[cfg(feature = "std")]
 pub mod file_backend;
+pub mod flash_backend;
 mod header;
 mod layout;
 mod lru_cache;

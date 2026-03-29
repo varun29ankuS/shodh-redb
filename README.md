@@ -140,15 +140,6 @@ The flash translation layer provides:
 - **Power-loss safety** -- double-buffered metadata journal with xxh3-128 checksums
 - **Copy-on-write** -- all writes go to fresh blocks; old blocks are erased and recycled
 
-### Tested targets
-
-| Board | Price | RAM | Flash |
-|-------|-------|-----|-------|
-| Raspberry Pi Pico 2 (RP2350) | $5 | 520KB | 4MB QSPI |
-| ESP32-S3 (N8R8) | $3-5 | 512KB + 8MB PSRAM | 8MB QSPI |
-| WeAct STM32H750 | $4 | 1MB | 8MB W25Q64 |
-| Orange Pi 5 (RK3588S) | $24 | 4-8GB | eMMC + SD |
-
 ---
 
 ## Feature flags
@@ -214,4 +205,4 @@ Built on [redb](https://github.com/cberner/redb) by Christopher Berner. The core
 
 [Apache License, Version 2.0](LICENSE)
 
-Copyright 2025-2026 Varun Sharma / Roshera
+Copyright 2025-2026 Varun Sharma

@@ -35,7 +35,7 @@ pub(crate) fn centroid_add(
     vector: &[f32],
     old_population: u32,
 ) -> crate::Result<u32> {
-    let new_pop = old_population + 1;
+    let new_pop = old_population.saturating_add(1);
 
     let sums_def = TableDefinition::<u32, &[u8]>::new(centroid_sums_table);
     let mut sums_tbl = txn.open_table(sums_def).map_err(te)?;
@@ -457,7 +457,7 @@ pub(crate) fn merge_cluster(
         }
     };
 
-    let combined_pop = meta.population() + sibling_meta.population();
+    let combined_pop = meta.population().saturating_add(sibling_meta.population());
     if combined_pop > config.max_leaf_population {
         return Ok(None);
     }
@@ -484,6 +484,28 @@ pub(crate) fn merge_cluster(
             ptbl.remove(PostingKey::new(cluster_id, *vid))?;
             ptbl.insert(PostingKey::new(best_sibling, *vid), pq_codes.as_slice())?;
             atbl.insert(*vid, best_sibling)?;
+        }
+    }
+
+    // Move buffer entries from the merged cluster to the sibling so they are
+    // not orphaned. Without this, any vectors in the merged cluster's unflushed
+    // buffer would be silently lost.
+    let buffer_def = TableDefinition::<PostingKey, &[u8]>::new(&table_names.buffer);
+    {
+        let mut btbl = txn.open_table(buffer_def).map_err(te)?;
+        let mut buf_entries: Vec<(u64, Vec<u8>)> = Vec::new();
+        {
+            let range = btbl.range(
+                PostingKey::cluster_start(cluster_id)..=PostingKey::cluster_end(cluster_id),
+            )?;
+            for entry in range {
+                let (key, val) = entry?;
+                buf_entries.push((key.value().vector_id, val.value().to_vec()));
+            }
+        }
+        for (vid, raw_vec) in &buf_entries {
+            btbl.remove(PostingKey::new(cluster_id, *vid))?;
+            btbl.insert(PostingKey::new(best_sibling, *vid), raw_vec.as_slice())?;
         }
     }
 
@@ -588,7 +610,7 @@ pub(crate) fn merge_cluster(
         }
     }
 
-    config.num_clusters -= 1;
+    config.num_clusters = config.num_clusters.saturating_sub(1);
     Ok(Some(best_sibling))
 }
 

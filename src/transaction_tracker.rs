@@ -1,9 +1,11 @@
 use crate::compat::HashMap;
 #[cfg(not(feature = "std"))]
 use crate::compat::Mutex;
+use crate::error::StorageError;
 use crate::tree_store::TransactionalMemory;
 use crate::{Key, Result, Savepoint, TypeName, Value};
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
 use core::cmp::Ordering;
 use core::mem;
 use core::mem::size_of;
@@ -24,14 +26,18 @@ impl TransactionId {
         self.0
     }
 
-    pub(crate) fn next(self) -> TransactionId {
-        TransactionId(self.0 + 1)
+    pub(crate) fn next(self) -> Result<TransactionId> {
+        let value = self
+            .0
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Corrupted(format!("TransactionId overflow at {}", self.0)))?;
+        Ok(TransactionId(value))
     }
 
-    pub(crate) fn increment(&mut self) -> TransactionId {
-        let next = self.next();
+    pub(crate) fn increment(&mut self) -> Result<TransactionId> {
+        let next = self.next()?;
         *self = next;
-        next
+        Ok(next)
     }
 }
 
@@ -39,8 +45,12 @@ impl TransactionId {
 pub(crate) struct SavepointId(pub u64);
 
 impl SavepointId {
-    pub(crate) fn next(self) -> SavepointId {
-        SavepointId(self.0 + 1)
+    pub(crate) fn next(self) -> Result<SavepointId> {
+        let value = self
+            .0
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Corrupted(format!("SavepointId overflow at {}", self.0)))?;
+        Ok(SavepointId(value))
     }
 }
 
@@ -118,49 +128,92 @@ impl TransactionTracker {
     }
 
     #[cfg(feature = "std")]
-    pub(crate) fn start_write_transaction(&self) -> TransactionId {
-        let mut state = self.state.lock().unwrap();
+    pub(crate) fn start_write_transaction(&self) -> Result<TransactionId> {
+        let mut state = self.state.lock()?;
         while state.live_write_transaction.is_some() {
-            state = self.live_write_transaction_available.wait(state).unwrap();
+            state = self.live_write_transaction_available.wait(state)?;
         }
-        assert!(state.live_write_transaction.is_none());
-        let transaction_id = state.next_transaction_id.increment();
+        if state.live_write_transaction.is_some() {
+            return Err(StorageError::Corrupted(
+                "Write transaction still active after condvar wait".into(),
+            ));
+        }
+        let transaction_id = state.next_transaction_id.increment()?;
         #[cfg(feature = "logging")]
         debug!("Beginning write transaction id={transaction_id:?}");
         state.live_write_transaction = Some(transaction_id);
 
-        transaction_id
+        Ok(transaction_id)
     }
 
     #[cfg(not(feature = "std"))]
-    pub(crate) fn start_write_transaction(&self) -> TransactionId {
+    pub(crate) fn start_write_transaction(&self) -> Result<TransactionId> {
+        const MAX_SPIN_RETRIES: u32 = 1000;
+        let mut retries: u32 = 0;
+        let mut backoff: u32 = 1;
+
         loop {
             let mut state = self.state.lock();
             if state.live_write_transaction.is_none() {
-                let transaction_id = state.next_transaction_id.increment();
+                let transaction_id = state.next_transaction_id.increment()?;
                 #[cfg(feature = "logging")]
                 debug!("Beginning write transaction id={transaction_id:?}");
                 state.live_write_transaction = Some(transaction_id);
-                return transaction_id;
+                return Ok(transaction_id);
             }
             drop(state);
-            core::hint::spin_loop();
+
+            retries += 1;
+            if retries >= MAX_SPIN_RETRIES {
+                return Err(StorageError::Corrupted(
+                    "Timed out waiting for write transaction lock after 1000 spin iterations".into(),
+                ));
+            }
+
+            for _ in 0..backoff {
+                core::hint::spin_loop();
+            }
+            backoff = backoff.saturating_mul(2).min(64);
         }
     }
 
     #[cfg(feature = "std")]
-    pub(crate) fn end_write_transaction(&self, id: TransactionId) {
-        let mut state = self.state.lock().unwrap();
-        assert_eq!(state.live_write_transaction.unwrap(), id);
-        state.live_write_transaction = None;
-        self.live_write_transaction_available.notify_one();
+    pub(crate) fn end_write_transaction(&self, id: TransactionId) -> Result {
+        let mut state = self.state.lock()?;
+        match state.live_write_transaction {
+            Some(active_id) if active_id == id => {
+                state.live_write_transaction = None;
+                self.live_write_transaction_available.notify_one();
+                Ok(())
+            }
+            Some(active_id) => Err(StorageError::Corrupted(format!(
+                "end_write_transaction called with id {:?}, but active transaction is {:?}",
+                id, active_id
+            ))),
+            None => Err(StorageError::Corrupted(format!(
+                "end_write_transaction called with id {:?}, but no write transaction is active",
+                id
+            ))),
+        }
     }
 
     #[cfg(not(feature = "std"))]
-    pub(crate) fn end_write_transaction(&self, id: TransactionId) {
+    pub(crate) fn end_write_transaction(&self, id: TransactionId) -> Result {
         let mut state = self.state.lock();
-        assert_eq!(state.live_write_transaction.unwrap(), id);
-        state.live_write_transaction = None;
+        match state.live_write_transaction {
+            Some(active_id) if active_id == id => {
+                state.live_write_transaction = None;
+                Ok(())
+            }
+            Some(active_id) => Err(StorageError::Corrupted(format!(
+                "end_write_transaction called with id {:?}, but active transaction is {:?}",
+                id, active_id
+            ))),
+            None => Err(StorageError::Corrupted(format!(
+                "end_write_transaction called with id {:?}, but no write transaction is active",
+                id
+            ))),
+        }
     }
 
     pub(crate) fn clear_pending_non_durable_commits(&self) {
@@ -291,15 +344,15 @@ impl TransactionTracker {
         !state.valid_savepoints.is_empty()
     }
 
-    pub(crate) fn allocate_savepoint(&self, transaction_id: TransactionId) -> SavepointId {
+    pub(crate) fn allocate_savepoint(&self, transaction_id: TransactionId) -> Result<SavepointId> {
         #[cfg(feature = "std")]
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
-        let id = state.next_savepoint_id.next();
+        let id = state.next_savepoint_id.next()?;
         state.next_savepoint_id = id;
         state.valid_savepoints.insert(id, transaction_id);
-        id
+        Ok(id)
     }
 
     // Deallocates the given savepoint and its matching reference count on the transcation

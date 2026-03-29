@@ -29,12 +29,14 @@ impl TypeClassification {
         }
     }
 
-    fn from_byte(value: u8) -> Self {
+    fn from_byte(value: u8) -> crate::Result<Self> {
         match value {
-            1 => TypeClassification::Internal,
-            2 => TypeClassification::UserDefined,
-            3 => TypeClassification::Internal2,
-            _ => unreachable!(),
+            1 => Ok(TypeClassification::Internal),
+            2 => Ok(TypeClassification::UserDefined),
+            3 => Ok(TypeClassification::Internal2),
+            _ => Err(crate::StorageError::Corrupted(format!(
+                "invalid TypeClassification byte: {value}"
+            ))),
         }
     }
 }
@@ -77,8 +79,11 @@ impl TypeName {
     }
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
-        let classification = TypeClassification::from_byte(bytes[0]);
-        let name = core::str::from_utf8(&bytes[1..]).unwrap().to_string();
+        let classification = TypeClassification::from_byte(bytes[0])
+            .unwrap_or(TypeClassification::UserDefined);
+        let name = core::str::from_utf8(&bytes[1..])
+            .unwrap_or("<corrupted>")
+            .to_string();
 
         Self {
             classification,
@@ -210,11 +215,8 @@ impl Value for bool {
     where
         Self: 'a,
     {
-        match data[0] {
-            0 => false,
-            1 => true,
-            _ => unreachable!(),
-        }
+        // Treat any non-zero as true (like C) to avoid crashing on corrupted data
+        data[0] != 0
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
@@ -260,8 +262,8 @@ impl<T: Value> Value for Option<T> {
     {
         match data[0] {
             0 => None,
-            1 => Some(T::from_bytes(&data[1..])),
-            _ => unreachable!(),
+            // Treat any non-zero discriminator as Some to avoid crashing on corrupted data
+            _ => Some(T::from_bytes(&data[1..])),
         }
     }
 
@@ -495,7 +497,8 @@ impl Value for &str {
     where
         Self: 'a,
     {
-        core::str::from_utf8(data).unwrap()
+        // Graceful fallback on corrupted UTF-8: return empty string rather than crash
+        core::str::from_utf8(data).unwrap_or("")
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
@@ -512,9 +515,9 @@ impl Value for &str {
 
 impl Key for &str {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let str1 = Self::from_bytes(data1);
-        let str2 = Self::from_bytes(data2);
-        str1.cmp(str2)
+        // Compare raw bytes directly — avoids UTF-8 validation overhead and
+        // produces consistent ordering even on corrupted data
+        data1.cmp(data2)
     }
 }
 
@@ -536,7 +539,8 @@ impl Value for String {
     where
         Self: 'a,
     {
-        core::str::from_utf8(data).unwrap().to_string()
+        // Lossy conversion to avoid crashing on corrupted UTF-8 data
+        String::from_utf8_lossy(data).into_owned()
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
@@ -553,9 +557,9 @@ impl Value for String {
 
 impl Key for String {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let str1 = core::str::from_utf8(data1).unwrap();
-        let str2 = core::str::from_utf8(data2).unwrap();
-        str1.cmp(str2)
+        // Compare raw bytes directly — avoids UTF-8 validation overhead and
+        // produces consistent ordering even on corrupted data
+        data1.cmp(data2)
     }
 }
 
@@ -574,7 +578,9 @@ impl Value for char {
     where
         Self: 'a,
     {
-        char::from_u32(u32::from_le_bytes([data[0], data[1], data[2], 0])).unwrap()
+        // Use replacement character on corrupted data instead of panicking
+        char::from_u32(u32::from_le_bytes([data[0], data[1], data[2], 0]))
+            .unwrap_or('\u{FFFD}')
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 3]

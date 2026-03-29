@@ -1151,7 +1151,7 @@ impl WriteTransaction {
         let mut system_tables = self.system_tables.lock();
 
         let mut next_table = system_tables.open_system_table(self, NEXT_SAVEPOINT_TABLE)?;
-        next_table.insert((), savepoint.get_id().next())?;
+        next_table.insert((), savepoint.get_id().next()?)?;
         drop(next_table);
 
         let mut savepoint_table = system_tables.open_system_table(self, SAVEPOINT_TABLE)?;
@@ -1245,7 +1245,7 @@ impl WriteTransaction {
 
     fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionId)> {
         let transaction_id = self.allocate_read_transaction()?.leak();
-        let id = self.transaction_tracker.allocate_savepoint(transaction_id);
+        let id = self.transaction_tracker.allocate_savepoint(transaction_id)?;
         Ok((id, transaction_id))
     }
 
@@ -1316,7 +1316,7 @@ impl WriteTransaction {
         }
 
         // 1a) purge all transactions that happened after the savepoint from the data freed tree
-        let txn_id = savepoint.get_transaction_id().next().raw_id();
+        let txn_id = savepoint.get_transaction_id().next()?.raw_id();
         {
             let lower = TransactionIdWithPagination {
                 transaction_id: txn_id,
@@ -2427,7 +2427,9 @@ impl WriteTransaction {
             let free_until_transaction = self
                 .transaction_tracker
                 .oldest_live_read_transaction()
-                .map_or(self.transaction_id, |x| x.next());
+                .map(|x| x.next())
+                .transpose()?
+                .unwrap_or(self.transaction_id);
             if let Err(err) = self.process_freed_pages(free_until_transaction) {
                 self.tables.lock().table_tree.clear_root_updates_and_close();
                 return Err(err.into());
@@ -2785,7 +2787,9 @@ impl WriteTransaction {
         let mut free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_nondurable_transaction()
-            .map_or(self.transaction_id, |x| x.next());
+            .map(|x| x.next())
+            .transpose()?
+            .unwrap_or(self.transaction_id);
         if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint() {
             free_until_transaction = TransactionId::min(free_until_transaction, oldest_savepoint);
         }
@@ -2859,7 +2863,7 @@ impl WriteTransaction {
             let new_page_number = new_page.get_page_number();
             // We have to copy at least the page type into the new page.
             // Otherwise its cache priority will be calculated incorrectly
-            new_page.memory_mut()[0] = old_page.memory()[0];
+            new_page.memory_mut()?[0] = old_page.memory()[0];
             drop(new_page);
             // We're able to move this to a lower page, so insert it and rewrite all its parents
             if new_page_number < path.page_number() {
@@ -2873,7 +2877,7 @@ impl WriteTransaction {
                     let new_page_number = new_page.get_page_number();
                     // We have to copy at least the page type into the new page.
                     // Otherwise its cache priority will be calculated incorrectly
-                    new_page.memory_mut()[0] = old_parent.memory()[0];
+                    new_page.memory_mut()?[0] = old_parent.memory()[0];
                     drop(new_page);
                     relocation_map.insert(*parent, new_page_number);
                 }

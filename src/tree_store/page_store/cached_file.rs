@@ -23,8 +23,12 @@ impl WritablePage {
         &self.data
     }
 
-    pub(super) fn mem_mut(&mut self) -> &mut [u8] {
-        Arc::get_mut(&mut self.data).unwrap()
+    pub(super) fn mem_mut(&mut self) -> std::result::Result<&mut [u8], StorageError> {
+        Arc::get_mut(&mut self.data).ok_or_else(|| {
+            StorageError::Corrupted(
+                "WritablePage::mem_mut() called while other Arc references exist".to_string(),
+            )
+        })
     }
 }
 
@@ -46,7 +50,9 @@ impl<I: SliceIndex<[u8]>> Index<I> for WritablePage {
 
 impl<I: SliceIndex<[u8]>> IndexMut<I> for WritablePage {
     fn index_mut(&mut self, index: I) -> &mut Self::Output {
-        self.mem_mut().index_mut(index)
+        Arc::get_mut(&mut self.data)
+            .expect("WritablePage::index_mut() called while other Arc references exist")
+            .index_mut(index)
     }
 }
 

@@ -17,7 +17,7 @@ use crate::tree_store::{
     PageTrackerPolicy, RawBtree, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
-use crate::{DatabaseStats, Result};
+use crate::{DatabaseStats, Result, StorageError};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -546,7 +546,11 @@ impl TableTreeMut<'_> {
         name: &str,
         f: impl FnOnce(&mut BtreeMut<K, V>) -> Result,
     ) -> Result {
-        assert!(self.pending_table_updates.is_empty());
+        if !self.pending_table_updates.is_empty() {
+            return Err(crate::StorageError::Corrupted(
+                alloc::string::String::from("open_table_and_flush_table_root called with pending updates"),
+            ));
+        }
 
         // Reserve space in the table tree
         // TODO: maybe we should have a more explicit method, like "force_uncommitted()"
@@ -564,7 +568,9 @@ impl TableTreeMut<'_> {
         let table_root = match self.tree.get(&name)?.unwrap().value() {
             InternalTableDefinition::Normal { table_root, .. } => table_root,
             InternalTableDefinition::Multimap { .. } => {
-                unreachable!()
+                return Err(crate::StorageError::Corrupted(
+                    alloc::string::String::from("expected Normal table but found Multimap"),
+                ));
             }
         };
 
@@ -601,8 +607,16 @@ impl TableTreeMut<'_> {
         name: &str,
         f: impl FnOnce(&mut Self, &mut BtreeMut<K, V>) -> Result,
     ) -> Result {
-        assert!(self.pending_table_updates.is_empty());
-        assert!(self.tree.get(&name)?.is_none());
+        if !self.pending_table_updates.is_empty() {
+            return Err(crate::StorageError::Corrupted(
+                alloc::string::String::from("create_table_and_flush_table_root called with pending updates"),
+            ));
+        }
+        if self.tree.get(&name)?.is_some() {
+            return Err(crate::StorageError::Corrupted(
+                alloc::format!("create_table_and_flush_table_root: table '{}' already exists", name),
+            ));
+        }
 
         // Reserve space in the table tree
         self.tree.insert(
@@ -709,8 +723,16 @@ impl TableTreeMut<'_> {
                 self.pending_table_updates
                     .insert(new_name.to_string(), update);
             }
-            assert!(self.tree.remove(&name)?.is_some());
-            assert!(self.tree.insert(&new_name, &definition)?.is_none());
+            if self.tree.remove(&name)?.is_none() {
+                return Err(StorageError::Corrupted(
+                    alloc::format!("rename_table: table '{}' disappeared during rename", name),
+                ).into());
+            }
+            if self.tree.insert(&new_name, &definition)?.is_some() {
+                return Err(StorageError::Corrupted(
+                    alloc::format!("rename_table: destination '{}' appeared during rename", new_name),
+                ).into());
+            }
         } else {
             return Err(TableError::TableDoesNotExist(name.to_string()));
         }

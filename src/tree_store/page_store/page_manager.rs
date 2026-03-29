@@ -262,7 +262,7 @@ impl TransactionalMemory {
             header.two_phase_commit = true;
             storage
                 .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
+                .mem_mut()?
                 .copy_from_slice(&header.to_bytes(false));
 
             storage.flush()?;
@@ -270,7 +270,7 @@ impl TransactionalMemory {
             // to ensure that it's crash safe
             storage
                 .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
+                .mem_mut()?
                 .copy_from_slice(&header.to_bytes(true));
             storage.flush()?;
         }
@@ -289,7 +289,7 @@ impl TransactionalMemory {
             if !read_only {
                 storage
                     .write(0, DB_HEADER_SIZE, true)?
-                    .mem_mut()
+                    .mem_mut()?
                     .copy_from_slice(&header.to_bytes(true));
                 storage.flush()?;
             }
@@ -323,7 +323,7 @@ impl TransactionalMemory {
             assert!(!repair_info.invalid_magic_number);
             storage
                 .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
+                .mem_mut()?
                 .copy_from_slice(&header.to_bytes(true));
             storage.flush()?;
         }
@@ -651,7 +651,7 @@ impl TransactionalMemory {
             }
             self.storage
                 .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
+                .mem_mut()?
                 .copy_from_slice(&header.to_bytes(true));
             self.storage.flush()?;
         }
@@ -710,7 +710,7 @@ impl TransactionalMemory {
     fn write_header(&self, header: &DatabaseHeader) -> Result {
         self.storage
             .write(0, DB_HEADER_SIZE, true)?
-            .mem_mut()
+            .mem_mut()?
             .copy_from_slice(&header.to_bytes(true));
 
         Ok(())
@@ -1416,7 +1416,7 @@ impl TransactionalMemory {
             assert!(self.open_dirty_pages.lock().insert(page_number));
 
             // Poison the memory in debug mode to help detect uninitialized reads
-            mem.mem_mut().fill(0xFF);
+            mem.mem_mut()?.fill(0xFF);
         }
 
         Ok(PageMut {

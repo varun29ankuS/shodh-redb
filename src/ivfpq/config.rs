@@ -44,6 +44,9 @@ impl IndexConfig {
 
     /// Returns the dimensionality of each PQ sub-vector.
     pub fn sub_dim(&self) -> usize {
+        if self.num_subvectors == 0 {
+            return 0;
+        }
         self.dim as usize / self.num_subvectors as usize
     }
 

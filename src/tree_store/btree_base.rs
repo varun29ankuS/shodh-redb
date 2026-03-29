@@ -333,9 +333,11 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
                 fixed_value_size,
             } => {
                 if let EitherPage::Mutable(ref mut mut_page) = self.page {
-                    let mut mutator =
-                        LeafMutator::new(mut_page.memory_mut(), fixed_key_size, fixed_value_size);
-                    mutator.remove(position);
+                    if let Ok(mem) = mut_page.memory_mut() {
+                        let mut mutator =
+                            LeafMutator::new(mem, fixed_key_size, fixed_value_size);
+                        mutator.remove(position);
+                    }
                 } else {
                     let is_panicking = {
                         #[cfg(feature = "std")]
@@ -456,7 +458,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             &stored_value,
         ) {
             let mut mutator = LeafMutator::new(
-                self.page.memory_mut(),
+                self.page.memory_mut()?,
                 self.key_width,
                 self.fixed_value_size,
             );
@@ -485,7 +487,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
 
             // Update parent branch page if it exists, otherwise update root
             if let Some((ref mut parent_page, parent_entry_index)) = self.parent {
-                let mut mutator = BranchMutator::new(parent_page.memory_mut());
+                let mut mutator = BranchMutator::new(parent_page.memory_mut()?);
                 mutator.write_child_page(parent_entry_index, new_page.get_page_number(), DEFERRED);
             } else {
                 self.root_ref.root = new_page.get_page_number();
@@ -547,7 +549,9 @@ impl<V: Value + 'static> AccessGuardMutInPlace<'_, V> {
 
 impl<V: MutInPlaceValue + 'static> AsMut<V::BaseRefType> for AccessGuardMutInPlace<'_, V> {
     fn as_mut(&mut self) -> &mut V::BaseRefType {
-        V::from_bytes_mut(&mut self.page.memory_mut()[self.offset..(self.offset + self.len)])
+        let mem = self.page.memory_mut()
+            .expect("AccessGuardMutInPlace requires exclusive page access");
+        V::from_bytes_mut(&mut mem[self.offset..(self.offset + self.len)])
     }
 }
 
@@ -858,7 +862,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         let mut allocated_pages = self.allocated_pages.lock();
         let mut page1 = self.mem.allocate(required_size, &mut allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
-            page1.memory_mut(),
+            page1.memory_mut()?,
             division,
             self.fixed_key_size,
             self.fixed_value_size,
@@ -877,7 +881,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         );
         let mut page2 = self.mem.allocate(required_size, &mut allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
-            page2.memory_mut(),
+            page2.memory_mut()?,
             self.pairs.len() - division,
             self.fixed_key_size,
             self.fixed_value_size,
@@ -899,7 +903,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         let mut allocated_pages = self.allocated_pages.lock();
         let mut page = self.mem.allocate(required_size, &mut allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
-            page.memory_mut(),
+            page.memory_mut()?,
             self.pairs.len(),
             self.fixed_key_size,
             self.fixed_value_size,
@@ -1608,7 +1612,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         let mut allocated_pages = self.allocated_pages.lock();
         let mut page = self.mem.allocate(size, &mut allocated_pages)?;
         let mut builder =
-            RawBranchBuilder::new(page.memory_mut(), self.keys.len(), self.fixed_key_size);
+            RawBranchBuilder::new(page.memory_mut()?, self.keys.len(), self.fixed_key_size);
         builder.write_first_page(self.children[0].0, self.children[0].1);
         for i in 1..self.children.len() {
             let key = &self.keys[i - 1];
@@ -1640,7 +1644,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         let size =
             RawBranchBuilder::required_bytes(division, first_split_key_len, self.fixed_key_size);
         let mut page1 = self.mem.allocate(size, &mut allocated_pages)?;
-        let mut builder = RawBranchBuilder::new(page1.memory_mut(), division, self.fixed_key_size);
+        let mut builder = RawBranchBuilder::new(page1.memory_mut()?, division, self.fixed_key_size);
         builder.write_first_page(self.children[0].0, self.children[0].1);
         for i in 0..division {
             let key = &self.keys[i];
@@ -1660,7 +1664,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         );
         let mut page2 = self.mem.allocate(size, &mut allocated_pages)?;
         let mut builder = RawBranchBuilder::new(
-            page2.memory_mut(),
+            page2.memory_mut()?,
             self.keys.len() - division - 1,
             self.fixed_key_size,
         );

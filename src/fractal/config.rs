@@ -48,6 +48,9 @@ impl FractalIndexConfig {
     }
 
     pub fn sub_dim(&self) -> usize {
+        if self.num_subvectors == 0 {
+            return 0;
+        }
         self.dim as usize / self.num_subvectors as usize
     }
 
@@ -66,7 +69,7 @@ impl FractalIndexConfig {
     /// net change in live clusters (splits add, merges subtract).
     pub fn alloc_cluster_id(&mut self) -> u32 {
         let id = self.next_cluster_id;
-        self.next_cluster_id += 1;
+        self.next_cluster_id = self.next_cluster_id.saturating_add(1);
         id
     }
 }

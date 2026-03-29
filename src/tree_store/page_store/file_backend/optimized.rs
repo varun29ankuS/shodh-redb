@@ -81,6 +81,12 @@ impl StorageBackend for FileBackend {
                 .file
                 .seek_read(&mut out[data_offset..], offset)
                 .map_err(BackendError::Io)?;
+            if read == 0 {
+                return Err(BackendError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to fill whole buffer",
+                )));
+            }
             offset += read as u64;
             data_offset += read;
         }
@@ -115,6 +121,12 @@ impl StorageBackend for FileBackend {
                 .file
                 .seek_write(&data[data_offset..], offset)
                 .map_err(BackendError::Io)?;
+            if written == 0 {
+                return Err(BackendError::Io(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                )));
+            }
             offset += written as u64;
             data_offset += written;
         }

@@ -51,9 +51,11 @@ impl Ord for PageNumber {
         match self.region.cmp(&other.region) {
             Ordering::Less => Ordering::Less,
             Ordering::Equal => {
-                let self_order0 = self.page_index * 2u32.pow(self.page_order.into());
-                let other_order0 = other.page_index * 2u32.pow(other.page_order.into());
-                assert!(
+                let self_order0 =
+                    u64::from(self.page_index).saturating_mul(1u64 << self.page_order);
+                let other_order0 =
+                    u64::from(other.page_index).saturating_mul(1u64 << other.page_order);
+                debug_assert!(
                     self_order0 != other_order0 || self.page_order == other.page_order,
                     "{self:?} overlaps {other:?}, but is not equal"
                 );
@@ -96,6 +98,13 @@ impl PageNumber {
     pub(crate) fn from_le_bytes(bytes: [u8; 8]) -> Self {
         let temp = u64::from_le_bytes(bytes);
         let order = (temp >> 59) as u8;
+        // Clamp order to the maximum valid page order to prevent downstream
+        // overflow when corrupted data contains an out-of-range value.
+        let order = if order > MAX_MAX_PAGE_ORDER {
+            MAX_MAX_PAGE_ORDER
+        } else {
+            order
+        };
         let index = u32::try_from(temp & (0x000F_FFFF >> order)).unwrap();
         let region = ((temp >> 20) & 0x000F_FFFF) as u32;
 
@@ -241,8 +250,8 @@ pub(crate) struct PageMut {
 }
 
 impl PageMut {
-    pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
-        self.mem.mem_mut()
+    pub(crate) fn memory_mut(&mut self) -> crate::Result<&mut [u8]> {
+        self.mem.mem_mut().map_err(Into::into)
     }
 }
 

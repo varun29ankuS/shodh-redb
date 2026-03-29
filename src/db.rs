@@ -415,7 +415,7 @@ impl Drop for TransactionGuard {
         }
         if let Some(transaction_id) = self.transaction_id {
             if self.write_transaction {
-                self.transaction_tracker
+                let _ = self.transaction_tracker
                     .as_ref()
                     .unwrap()
                     .end_write_transaction(transaction_id);
@@ -565,7 +565,7 @@ impl ReadOnlyDatabase {
             )));
         }
 
-        let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
+        let next_transaction_id = mem.get_last_committed_transaction_id()?.next()?;
         let db = Self {
             mem,
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
@@ -1112,7 +1112,7 @@ impl Database {
         }
 
         if !was_clean {
-            let next_transaction_id = self.mem.get_last_committed_transaction_id()?.next();
+            let next_transaction_id = self.mem.get_last_committed_transaction_id()?.next()?;
             let [data_root, system_root] = new_roots;
             self.mem.commit(
                 data_root,
@@ -1672,7 +1672,7 @@ impl Database {
                 return Err(DatabaseError::RepairAborted);
             }
             let [data_root, system_root] = Self::do_repair(&mut mem, repair_callback)?;
-            let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
+            let next_transaction_id = mem.get_last_committed_transaction_id()?.next()?;
             mem.commit(
                 data_root,
                 system_root,
@@ -1683,7 +1683,7 @@ impl Database {
         }
 
         mem.begin_writable()?;
-        let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
+        let next_transaction_id = mem.get_last_committed_transaction_id()?.next()?;
 
         let db = Database {
             mem,
@@ -1803,7 +1803,7 @@ impl Database {
         // Fail early if there has been an I/O error -- nothing can be committed in that case
         self.mem.check_io_errors()?;
         let guard = TransactionGuard::new_write(
-            self.transaction_tracker.start_write_transaction(),
+            self.transaction_tracker.start_write_transaction()?,
             self.transaction_tracker.clone(),
         );
         WriteTransaction::new(
@@ -1914,14 +1914,30 @@ impl Database {
 
     #[cfg(feature = "std")]
     fn run_group_commit(&self) {
+        // Initial drain — the leader's own batch (and any that arrived concurrently)
+        // are already in the pending queue.
+        let mut batches = match self.group_committer.drain_pending() {
+            Ok(b) => b,
+            Err(_) => {
+                // Mutex poisoned — relinquish leadership (best-effort).
+                let _ = self.group_committer.finish_leader();
+                return;
+            }
+        };
+
         loop {
-            let Ok(batches) = self.group_committer.drain_pending() else {
-                let _ = self.group_committer.finish_leader();
-                return;
-            };
             if batches.is_empty() {
-                let _ = self.group_committer.finish_leader();
-                return;
+                // Nothing to process — atomically relinquish leadership.
+                // finish_leader returns any batches that arrived between our
+                // last drain and now, preventing orphaned batches.
+                match self.group_committer.finish_leader() {
+                    Ok(remaining) if remaining.is_empty() => return,
+                    Ok(remaining) => {
+                        batches = remaining;
+                        continue;
+                    }
+                    Err(_) => return,
+                }
             }
 
             let txn = match self.begin_write() {
@@ -1965,6 +1981,14 @@ impl Database {
 
             if failed {
                 let _ = txn.abort();
+                // Re-drain: new batches may have arrived while we were processing.
+                batches = match self.group_committer.drain_pending() {
+                    Ok(b) => b,
+                    Err(_) => {
+                        let _ = self.group_committer.finish_leader();
+                        return;
+                    }
+                };
                 continue;
             }
 
@@ -1983,6 +2007,15 @@ impl Database {
                     }
                 }
             }
+
+            // Check for batches that arrived while we were committing.
+            batches = match self.group_committer.drain_pending() {
+                Ok(b) => b,
+                Err(_) => {
+                    let _ = self.group_committer.finish_leader();
+                    return;
+                }
+            };
         }
     }
 

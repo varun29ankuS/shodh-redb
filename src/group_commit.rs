@@ -3,7 +3,7 @@ use crate::error::StorageError;
 use crate::transactions::WriteTransaction;
 use std::fmt::{Display, Formatter};
 use std::sync::mpsc;
-use std::sync::{Condvar, Mutex};
+use std::sync::Mutex;
 
 /// Error from a group commit operation.
 #[derive(Debug)]
@@ -98,7 +98,6 @@ struct GroupCommitState {
 
 pub(crate) struct GroupCommitter {
     state: Mutex<GroupCommitState>,
-    leader_done: Condvar,
 }
 
 impl GroupCommitter {
@@ -109,7 +108,6 @@ impl GroupCommitter {
                 active_leader: false,
                 shutdown: false,
             }),
-            leader_done: Condvar::new(),
         }
     }
 
@@ -144,16 +142,23 @@ impl GroupCommitter {
         Ok(std::mem::take(&mut state.pending))
     }
 
-    /// Signal that the leader has finished. Wakes any threads waiting
-    /// for the next leader election.
-    pub fn finish_leader(&self) -> Result<(), GroupCommitError> {
+    /// Atomically relinquish leadership, draining any batches that arrived
+    /// while the leader was processing the previous round.
+    ///
+    /// Returns `Ok(batches)` — if non-empty the caller must process them
+    /// before calling `finish_leader` again, preventing orphaned batches.
+    pub fn finish_leader(&self) -> Result<Vec<PendingBatch>, GroupCommitError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| GroupCommitError::LockPoisoned)?;
-        state.active_leader = false;
-        self.leader_done.notify_all();
-        Ok(())
+        let remaining = std::mem::take(&mut state.pending);
+        if remaining.is_empty() {
+            state.active_leader = false;
+        }
+        // If remaining is non-empty we keep active_leader = true so no
+        // other thread tries to become leader while we process the leftovers.
+        Ok(remaining)
     }
 
     /// Shut down the group committer, failing all pending batches.
@@ -166,6 +171,5 @@ impl GroupCommitter {
                 let _ = p.result_tx.send(Err(GroupCommitError::Shutdown));
             }
         }
-        self.leader_done.notify_all();
     }
 }

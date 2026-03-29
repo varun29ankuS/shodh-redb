@@ -1,3 +1,4 @@
+use alloc::format;
 use crate::compat::{HashMap, Mutex};
 use crate::multimap_table::{UntypedMultiBtree, relocate_subtrees};
 use crate::tree_store::{
@@ -39,12 +40,14 @@ impl Into<u8> for TableType {
     }
 }
 
-impl From<u8> for TableType {
-    fn from(value: u8) -> Self {
+impl TableType {
+    fn try_from_byte(value: u8) -> crate::Result<Self> {
         match value {
-            3 => TableType::Normal,
-            4 => TableType::Multimap,
-            _ => panic!("Invalid TableType byte {value}, expected 3 (Normal) or 4 (Multimap)"),
+            3 => Ok(TableType::Normal),
+            4 => Ok(TableType::Multimap),
+            _ => Err(crate::StorageError::Corrupted(format!(
+                "invalid TableType byte: {value}, expected 3 (Normal) or 4 (Multimap)"
+            ))),
         }
     }
 }
@@ -361,8 +364,8 @@ impl Value for InternalTableDefinition {
         debug_assert!(data.len() > 22);
         let mut offset = 0;
         let legacy = TableType::is_legacy(data[offset]);
-        assert!(!legacy);
-        let table_type = TableType::from(data[offset]);
+        debug_assert!(!legacy);
+        let table_type = TableType::try_from_byte(data[offset]).unwrap_or(TableType::Normal);
         offset += 1;
 
         let table_length = u64::from_le_bytes(

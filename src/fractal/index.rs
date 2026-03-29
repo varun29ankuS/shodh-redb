@@ -632,7 +632,7 @@ impl<'txn> FractalIndex<'txn> {
             vtbl.remove(vector_id)?;
         }
 
-        self.config.num_vectors -= 1;
+        self.config.num_vectors = self.config.num_vectors.saturating_sub(1);
         self.config_dirty = true;
 
         // Check merge condition

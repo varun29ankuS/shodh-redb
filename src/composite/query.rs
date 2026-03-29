@@ -364,7 +364,7 @@ impl<'a> CompositeQuery<'a> {
         let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(self.top_k + 1);
 
         for entry in candidates.values() {
-            // Skip candidates without metadata — they cannot be scored
+            // Skip candidates without metadata -- they cannot be scored
             let Some(meta) = entry.meta.clone() else {
                 continue;
             };

@@ -110,7 +110,7 @@ impl FlashHardware for MockFlashHardware {
                 "write past end of flash",
             )));
         }
-        // Flash can only flip bits 1→0 (enforce write-after-erase semantics)
+        // Flash can only flip bits 1->0 (enforce write-after-erase semantics)
         for (i, &byte) in data.iter().enumerate() {
             storage[start + i] &= byte;
         }
@@ -377,7 +377,7 @@ fn flash_backend_with_bad_blocks() {
     let backend = FlashBackend::mount(hw).unwrap();
     backend.set_len(65536).unwrap();
 
-    // Should still work — bad blocks are skipped
+    // Should still work -- bad blocks are skipped
     let data = vec![0xCDu8; 128];
     backend.write(0, &data).unwrap();
 

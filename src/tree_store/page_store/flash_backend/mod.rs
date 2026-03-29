@@ -16,13 +16,13 @@ use ftl::FlashTranslationLayer;
 /// Wraps a user-provided [`FlashHardware`] implementation with a full Flash
 /// Translation Layer (FTL) providing:
 ///
-/// - **Wear leveling** — both dynamic (allocate lowest-wear free blocks) and
+/// - **Wear leveling** -- both dynamic (allocate lowest-wear free blocks) and
 ///   static (periodic cold/hot data swap).
-/// - **Bad block management** — scan on mount, runtime detection, transparent
+/// - **Bad block management** -- scan on mount, runtime detection, transparent
 ///   remapping.
-/// - **Power-loss safety** — double-buffered metadata journal with xxh3-128
+/// - **Power-loss safety** -- double-buffered metadata journal with xxh3-128
 ///   checksums, matching shodh-redb's own double-buffered commit slot pattern.
-/// - **Copy-on-write** — all writes go to fresh physical blocks; old blocks
+/// - **Copy-on-write** -- all writes go to fresh physical blocks; old blocks
 ///   are erased and returned to the free pool.
 ///
 /// # Usage

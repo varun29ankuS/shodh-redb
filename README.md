@@ -2,32 +2,38 @@
 
 [![Crates.io](https://img.shields.io/crates/v/shodh-redb.svg)](https://crates.io/crates/shodh-redb)
 [![Documentation](https://docs.rs/shodh-redb/badge.svg)](https://docs.rs/shodh-redb)
-[![License](https://img.shields.io/crates/l/shodh-redb)](https://crates.io/crates/shodh-redb)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![CI](https://github.com/varun29ankuS/shodh-redb/actions/workflows/ci.yml/badge.svg)](https://github.com/varun29ankuS/shodh-redb/actions)
 
-Multi-modal embedded database for Rust -- vectors, blobs, TTL, merge operators, and causal tracking built on ACID B-trees.
+**Multi-modal embedded database for Rust.** Vectors, blobs, TTL, merge operators, causal tracking, and flash storage -- all on ACID B-trees. Runs on servers, WASM, and $5 microcontrollers.
 
-shodh-redb extends [redb](https://github.com/cberner/redb) with capabilities for AI/ML workloads, edge computing, and multi-modal data storage. Written in pure Rust with `no_std` support.
+```toml
+[dependencies]
+shodh-redb = "0.2"
+```
 
-## What's different from redb?
+---
+
+## Why shodh-redb?
 
 | Capability | redb | shodh-redb |
 |---|---|---|
 | ACID key-value store | Yes | Yes |
-| Vector types & similarity search | No | `FixedVec<N>`, `DynVec`, `BinaryQuantized<N>`, `ScalarQuantized<N>` |
-| Blob store (streaming, dedup, compaction) | No | Append-only with SHA-256 dedup, seekable reads, causal lineage |
-| TTL (per-key expiration) | No | `TtlTable` with lazy filtering and bulk purge |
-| Merge operators (atomic RMW) | No | `NumericAdd`, `NumericMax`, `BitwiseOr`, closures |
-| Group commit (batched fsync) | No | Leader-election batching for concurrent writes |
-| Hybrid Logical Clock | No | 48-bit physical + 16-bit logical for causal ordering |
-| Memory budget | No | Hard RAM cap with adaptive cache sizing |
-| `no_std` support | No | `#![no_std]` with `std` feature flag (default on) |
+| Vector search (IVF-PQ, fractal index) | -- | Native ANN with PQ compression |
+| Blob store (CDC, dedup, streaming) | -- | Append-only with SHA-256 dedup, seekable reads |
+| Composite queries (semantic + temporal + causal) | -- | Multi-signal ranked fusion |
+| TTL (per-key expiration) | -- | Lazy filtering + bulk purge |
+| Merge operators (atomic RMW) | -- | `NumericAdd`, `NumericMax`, `BitwiseOr`, closures |
+| Change data capture (CDC) | -- | Row-level change tracking |
+| Hybrid Logical Clock | -- | Causal ordering across distributed writes |
+| Flash storage backend | -- | Wear leveling, bad block management, power-loss safe |
+| Group commit (batched fsync) | -- | Leader-election batching |
+| Memory budget | -- | Hard RAM cap with adaptive cache |
+| `no_std` / WASM | -- | `#![no_std]` with `alloc` |
+
+---
 
 ## Quick start
-
-```toml
-[dependencies]
-shodh-redb = "0.1"
-```
 
 ### Key-value store
 
@@ -52,7 +58,7 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-### Vector embeddings
+### Vector search
 
 ```rust
 use shodh_redb::{Database, FixedVec, TableDefinition, cosine_distance, nearest_k};
@@ -60,7 +66,7 @@ use shodh_redb::{Database, FixedVec, TableDefinition, cosine_distance, nearest_k
 // Store 384-dim embeddings
 const EMBEDDINGS: TableDefinition<u64, FixedVec<384>> = TableDefinition::new("embeddings");
 
-// Quantized storage (32x smaller)
+// Binary quantized (32x smaller, hardware-accelerated hamming distance)
 use shodh_redb::{BinaryQuantized, quantize_binary, hamming_distance};
 const BINARY: TableDefinition<u64, BinaryQuantized<12>> = TableDefinition::new("binary_vecs");
 ```
@@ -98,35 +104,114 @@ use shodh_redb::{Database, ContentType, StoreOptions};
 // let reader = read_txn.blob_reader(blob_id)?; // Seekable reader
 ```
 
+---
+
+## Flash storage (bare-metal / embedded)
+
+Run shodh-redb on raw flash with no OS. Implement the `FlashHardware` trait for your chip and the FTL handles everything else:
+
+```rust
+use shodh_redb::{Builder, FlashBackend, FlashGeometry, FlashHardware};
+
+// Your chip's flash driver
+struct MySpiFlash { /* SPI peripheral, CS pin */ }
+
+impl FlashHardware for MySpiFlash {
+    fn geometry(&self) -> FlashGeometry {
+        FlashGeometry {
+            erase_block_size: 4096,     // 4KB sectors (NOR)
+            write_page_size: 256,       // page program size
+            total_blocks: 2048,         // 8MB device
+            max_erase_cycles: 100_000,
+        }
+    }
+    // implement read, write_page, erase_block, is_bad_block, mark_bad_block, sync
+    # // ...
+}
+
+let backend = FlashBackend::mount(MySpiFlash::new())?;
+let db = Builder::new().create_with_backend(backend)?;
+// Use exactly like a normal database
+```
+
+The flash translation layer provides:
+- **Wear leveling** -- dynamic (lowest-erase-count allocation) + static (hot/cold swap)
+- **Bad block management** -- scan on mount, runtime detection, transparent remapping
+- **Power-loss safety** -- double-buffered metadata journal with xxh3-128 checksums
+- **Copy-on-write** -- all writes go to fresh blocks; old blocks are erased and recycled
+
+### Tested targets
+
+| Board | Price | RAM | Flash |
+|-------|-------|-----|-------|
+| Raspberry Pi Pico 2 (RP2350) | $5 | 520KB | 4MB QSPI |
+| ESP32-S3 (N8R8) | $3-5 | 512KB + 8MB PSRAM | 8MB QSPI |
+| WeAct STM32H750 | $4 | 1MB | 8MB W25Q64 |
+| Orange Pi 5 (RK3588S) | $24 | 4-8GB | eMMC + SD |
+
+---
+
 ## Feature flags
 
 | Flag | Default | Description |
 |---|---|---|
 | `std` | Yes | File backends, group commit, TTL, full error types |
-| `logging` | No | Enable `log` crate messages |
+| `logging` | No | `log` crate integration |
 | `cache_metrics` | No | Cache hit/miss counters |
 | `compression_lz4` | No | LZ4 page compression |
 | `compression_zstd` | No | Zstandard page compression |
-| `compression` | No | Enable all compression algorithms |
+| `compression` | No | All compression algorithms |
 
 ### `no_std` usage
 
 ```toml
 [dependencies]
-shodh-redb = { version = "0.1", default-features = false }
+shodh-redb = { version = "0.2", default-features = false }
 ```
 
-Requires `alloc`. File backends, group commit, and TTL are unavailable in `no_std` mode. Use `InMemoryBackend` or implement a custom `StorageBackend`.
+Requires `alloc`. Use `InMemoryBackend`, `FlashBackend`, or implement a custom `StorageBackend`.
+
+---
+
+## Architecture
+
+```
+                        +------------------+
+                        |    Database API   |
+                        +--------+---------+
+                                 |
+              +------------------+------------------+
+              |                  |                  |
+        +-----+------+   +------+------+   +-------+------+
+        | Key-Value  |   | Blob Store  |   | Vector Index |
+        | Tables     |   | (CDC, dedup)|   | (IVF-PQ,     |
+        |            |   |             |   |  Fractal)    |
+        +-----+------+   +------+------+   +-------+------+
+              |                  |                  |
+              +------------------+------------------+
+                                 |
+                   +-------------+-------------+
+                   | TransactionalMemory (MVCC) |
+                   +-------------+-------------+
+                                 |
+                   +-------------+-------------+
+                   |    StorageBackend trait    |
+                   +--+--------+--------+------+
+                      |        |        |
+                +-----+--+ +---+----+ +-+----------+
+                |  File  | |InMemory| |FlashBackend|
+                |Backend | |Backend | |(bare-metal) |
+                +--------+ +--------+ +------------+
+```
+
+---
 
 ## Credits
 
-shodh-redb is built on top of [redb](https://github.com/cberner/redb) by Christopher Berner. The core B-tree engine, page cache, MVCC, and crash recovery are inherited from redb. All extended features (vectors, blobs, TTL, merge operators, HLC, group commit, memory budget, `no_std`) are original additions.
+Built on [redb](https://github.com/cberner/redb) by Christopher Berner. The core B-tree engine, page cache, MVCC, and crash recovery are inherited from redb. All extensions (vectors, blobs, TTL, merge operators, HLC, CDC, flash backend, composite queries, group commit, memory budget, `no_std`) are original work.
 
 ## License
 
-Licensed under either of
+[Apache License, Version 2.0](LICENSE)
 
-* [Apache License, Version 2.0](LICENSE-APACHE)
-* [MIT License](LICENSE-MIT)
-
-at your option.
+Copyright 2025-2026 Varun Sharma / Roshera

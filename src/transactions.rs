@@ -765,7 +765,11 @@ impl TableNamespace<'_> {
 
     fn set_dirty(&mut self, transaction: &WriteTransaction) {
         transaction.dirty.store(true, Ordering::Release);
-        if !transaction.transaction_tracker.any_savepoint_exists() {
+        if !transaction
+            .transaction_tracker
+            .any_savepoint_exists()
+            .unwrap_or(true)
+        {
             // No savepoints exist, and we don't allow savepoints to be created in a dirty transaction
             // so we can disable allocation tracking now
             *self.allocated_pages.lock() = PageTrackerPolicy::Ignore;
@@ -1289,7 +1293,7 @@ impl WriteTransaction {
 
         if !self
             .transaction_tracker
-            .is_valid_savepoint(savepoint.get_id())
+            .is_valid_savepoint(savepoint.get_id())?
         {
             return Err(SavepointError::InvalidSavepoint);
         }
@@ -1353,7 +1357,7 @@ impl WriteTransaction {
         // 3) Invalidate all savepoints that are newer than the one being applied to prevent the user
         // from later trying to restore a savepoint "on another timeline"
         self.transaction_tracker
-            .invalidate_savepoints_after(savepoint.get_id());
+            .invalidate_savepoints_after(savepoint.get_id())?;
         for persistent_savepoint in self.list_persistent_savepoints()? {
             if persistent_savepoint > savepoint.get_id().0 {
                 self.delete_persistent_savepoint(persistent_savepoint)?;
@@ -2428,7 +2432,7 @@ impl WriteTransaction {
         if matches!(self.durability, InternalDurability::Immediate) {
             let free_until_transaction = self
                 .transaction_tracker
-                .oldest_live_read_transaction()
+                .oldest_live_read_transaction()?
                 .map(|x| x.next())
                 .transpose()?
                 .unwrap_or(self.transaction_id);
@@ -2457,7 +2461,7 @@ impl WriteTransaction {
 
         for (savepoint, transaction) in self.deleted_persistent_savepoints.lock().iter() {
             self.transaction_tracker
-                .deallocate_savepoint(*savepoint, *transaction);
+                .deallocate_savepoint(*savepoint, *transaction)?;
         }
 
         assert!(
@@ -2542,7 +2546,7 @@ impl WriteTransaction {
         // Purge any transactions that are no longer referenced
         let oldest = self
             .transaction_tracker
-            .oldest_savepoint()
+            .oldest_savepoint()?
             .map_or(u64::MAX, |(_, x)| x.raw_id());
         let key = TransactionIdWithPagination {
             transaction_id: oldest,
@@ -2653,7 +2657,9 @@ impl WriteTransaction {
                 Ok(_) => {}
                 Err(err) => match err {
                     SavepointError::InvalidSavepoint => {
-                        unreachable!();
+                        return Err(StorageError::Corrupted(
+                            "invalid savepoint encountered during transaction abort".to_string(),
+                        ));
                     }
                     SavepointError::Storage(storage_err) => {
                         return Err(storage_err);
@@ -2698,7 +2704,7 @@ impl WriteTransaction {
             let mut history_table = system_tables.open_system_table(self, HISTORY_TABLE)?;
             history_table.insert(&self.transaction_id.raw_id(), &snapshot)?;
             self.transaction_tracker
-                .register_history_hold(self.transaction_id);
+                .register_history_hold(self.transaction_id)?;
 
             // Prune old snapshots beyond retention limit.
             let mut all_keys = Vec::new();
@@ -2712,7 +2718,7 @@ impl WriteTransaction {
                 for key in &all_keys[..to_remove] {
                     history_table.remove(key)?;
                     self.transaction_tracker
-                        .deallocate_history_hold(TransactionId::new(*key));
+                        .deallocate_history_hold(TransactionId::new(*key))?;
                 }
             }
         }
@@ -2773,7 +2779,8 @@ impl WriteTransaction {
         )?;
 
         // Mark any pending non-durable commits as fully committed.
-        self.transaction_tracker.clear_pending_non_durable_commits();
+        self.transaction_tracker
+            .clear_pending_non_durable_commits()?;
 
         // Immediately free the pages that were freed from the system-tree. These are only
         // accessed by write transactions, so it's safe to free them as soon as the commit is done.
@@ -2788,11 +2795,11 @@ impl WriteTransaction {
     pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
         let mut free_until_transaction = self
             .transaction_tracker
-            .oldest_live_read_nondurable_transaction()
+            .oldest_live_read_nondurable_transaction()?
             .map(|x| x.next())
             .transpose()?
             .unwrap_or(self.transaction_id);
-        if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint() {
+        if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint()? {
             free_until_transaction = TransactionId::min(free_until_transaction, oldest_savepoint);
         }
         self.process_freed_pages_nondurable(free_until_transaction)?;
@@ -2831,7 +2838,7 @@ impl WriteTransaction {
         self.transaction_tracker.register_non_durable_commit(
             self.transaction_id,
             self.mem.get_last_durable_transaction_id()?,
-        );
+        )?;
 
         for page in post_commit_frees {
             self.mem.free(page, &mut PageTrackerPolicy::Ignore);
@@ -2956,7 +2963,7 @@ impl WriteTransaction {
         };
         let oldest_unprocessed = self
             .transaction_tracker
-            .oldest_unprocessed_non_durable_commit()
+            .oldest_unprocessed_non_durable_commit()?
             .map_or(free_until.raw_id(), |x| x.raw_id());
         let first_key = TransactionIdWithPagination {
             transaction_id: oldest_unprocessed,
@@ -2970,7 +2977,7 @@ impl WriteTransaction {
             let transaction_id = TransactionId::new(key.value().transaction_id);
             if self
                 .transaction_tracker
-                .is_unprocessed_non_durable_commit(transaction_id)
+                .is_unprocessed_non_durable_commit(transaction_id)?
             {
                 candidate_transactions.push(transaction_id);
             }
@@ -3035,7 +3042,7 @@ impl WriteTransaction {
 
         for transaction_id in processed {
             self.transaction_tracker
-                .mark_unprocessed_non_durable_commit(transaction_id);
+                .mark_unprocessed_non_durable_commit(transaction_id)?;
         }
 
         Ok(())
@@ -3243,7 +3250,11 @@ impl ReadTransaction {
                 self.tree.transaction_guard().clone(),
                 self.mem.clone(),
             )?),
-            InternalTableDefinition::Multimap { .. } => unreachable!(),
+            InternalTableDefinition::Multimap { .. } => {
+                Err(TableError::Storage(StorageError::Corrupted(
+                    "unexpected multimap table type when opening normal table".to_string(),
+                )))
+            }
         }
     }
 
@@ -3299,7 +3310,11 @@ impl ReadTransaction {
                 fixed_value_size,
                 self.mem.clone(),
             )),
-            InternalTableDefinition::Multimap { .. } => unreachable!(),
+            InternalTableDefinition::Multimap { .. } => {
+                Err(TableError::Storage(StorageError::Corrupted(
+                    "unexpected multimap table type when opening untyped normal table".to_string(),
+                )))
+            }
         }
     }
 
@@ -3314,7 +3329,11 @@ impl ReadTransaction {
             .ok_or_else(|| TableError::TableDoesNotExist(definition.name().to_string()))?;
 
         match header {
-            InternalTableDefinition::Normal { .. } => unreachable!(),
+            InternalTableDefinition::Normal { .. } => {
+                Err(TableError::Storage(StorageError::Corrupted(
+                    "unexpected normal table type when opening multimap table".to_string(),
+                )))
+            }
             InternalTableDefinition::Multimap {
                 table_root,
                 table_length,
@@ -3340,7 +3359,11 @@ impl ReadTransaction {
             .ok_or_else(|| TableError::TableDoesNotExist(handle.name().to_string()))?;
 
         match header {
-            InternalTableDefinition::Normal { .. } => unreachable!(),
+            InternalTableDefinition::Normal { .. } => {
+                Err(TableError::Storage(StorageError::Corrupted(
+                    "unexpected normal table type when opening untyped multimap table".to_string(),
+                )))
+            }
             InternalTableDefinition::Multimap {
                 table_root,
                 table_length,
@@ -3397,7 +3420,9 @@ impl ReadTransaction {
                 )?;
                 Ok(Some(btree))
             }
-            Ok(Some(InternalTableDefinition::Multimap { .. })) => unreachable!(),
+            Ok(Some(InternalTableDefinition::Multimap { .. })) => Err(StorageError::Corrupted(
+                "unexpected multimap table type in system table lookup".to_string(),
+            )),
             Ok(None) => Ok(None),
             Err(e) => {
                 Err(e

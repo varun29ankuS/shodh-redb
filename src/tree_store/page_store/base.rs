@@ -298,24 +298,18 @@ impl PageTrackerPolicy {
 
     pub(super) fn remove(&mut self, page: PageNumber) {
         match self {
-            PageTrackerPolicy::Ignore => {}
+            PageTrackerPolicy::Ignore | PageTrackerPolicy::Closed => {}
             PageTrackerPolicy::Track(x) => {
-                assert!(x.remove(&page));
-            }
-            PageTrackerPolicy::Closed => {
-                panic!("Page tracker is closed");
+                x.remove(&page);
             }
         }
     }
 
     pub(super) fn insert(&mut self, page: PageNumber) {
         match self {
-            PageTrackerPolicy::Ignore => {}
+            PageTrackerPolicy::Ignore | PageTrackerPolicy::Closed => {}
             PageTrackerPolicy::Track(x) => {
-                assert!(x.insert(page));
-            }
-            PageTrackerPolicy::Closed => {
-                panic!("Page tracker is closed");
+                x.insert(page);
             }
         }
     }
@@ -323,11 +317,8 @@ impl PageTrackerPolicy {
     pub(crate) fn close(&mut self) -> HashSet<PageNumber> {
         let old = mem::replace(self, PageTrackerPolicy::Closed);
         match old {
-            PageTrackerPolicy::Ignore => HashSet::new(),
+            PageTrackerPolicy::Ignore | PageTrackerPolicy::Closed => HashSet::new(),
             PageTrackerPolicy::Track(x) => x,
-            PageTrackerPolicy::Closed => {
-                panic!("Page tracker is closed");
-            }
         }
     }
 }

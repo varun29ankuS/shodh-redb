@@ -122,7 +122,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         if let Some(owned_key) = first {
             let owned_key = owned_key?;
             let key = K::from_bytes(&owned_key);
-            let value = self.remove(&key)?.unwrap();
+            let value = self.remove(&key)?.ok_or_else(|| {
+                StorageError::Corrupted("key disappeared during pop operation".into())
+            })?;
             drop(key);
             Ok(Some((AccessGuard::with_owned_value(owned_key), value)))
         } else {
@@ -140,7 +142,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         if let Some(owned_key) = last {
             let owned_key = owned_key?;
             let key = K::from_bytes(&owned_key);
-            let value = self.remove(&key)?.unwrap();
+            let value = self.remove(&key)?.ok_or_else(|| {
+                StorageError::Corrupted("key disappeared during pop operation".into())
+            })?;
             drop(key);
             Ok(Some((AccessGuard::with_owned_value(owned_key), value)))
         } else {

@@ -153,7 +153,11 @@ fn multimap_stats_helper(
                 fragmented_bytes,
             })
         }
-        _ => unreachable!(),
+        other => {
+            Err(StorageError::Corrupted(format!(
+                "unexpected page type {other} in multimap stats helper"
+            )))
+        }
     }
 }
 
@@ -359,7 +363,12 @@ pub(crate) fn relocate_subtrees(
                 }
             }
         }
-        _ => unreachable!(),
+        _ => {
+            return Err(StorageError::Corrupted(format!(
+                "unexpected page type {} in multimap subtree relocation",
+                old_page.memory()[0]
+            )));
+        }
     }
 
     let old_page_number = old_page.get_page_number();
@@ -519,7 +528,11 @@ impl UntypedMultiBtree {
                 BRANCH => {
                     // No-op. The tree.visit_pages() call will process this sub-tree
                 }
-                _ => unreachable!(),
+                other => {
+                    return Err(StorageError::Corrupted(format!(
+                        "unexpected page type {other} in multimap page visitor"
+                    )));
+                }
             }
             Ok(())
         })?;
@@ -1417,7 +1430,11 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                             self.tree
                                 .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                         }
-                        _ => unreachable!(),
+                        other => {
+                            return Err(StorageError::Corrupted(format!(
+                                "unexpected page type {other} in multimap remove"
+                            )));
+                        }
                     }
                 } else {
                     self.tree.remove(key.borrow())?;

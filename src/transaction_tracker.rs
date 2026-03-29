@@ -64,7 +64,12 @@ impl Value for SavepointId {
     where
         Self: 'a,
     {
-        SavepointId(u64::from_le_bytes(data.try_into().unwrap()))
+        if data.len() < size_of::<u64>() {
+            return SavepointId(0);
+        }
+        SavepointId(u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -211,59 +216,59 @@ impl TransactionTracker {
         }
     }
 
-    pub(crate) fn clear_pending_non_durable_commits(&self) {
+    pub(crate) fn clear_pending_non_durable_commits(&self) -> Result {
         #[cfg(feature = "std")]
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
         let ids = mem::take(&mut state.pending_non_durable_commits);
         for (_, durable_ancestor) in ids {
-            let ref_count = state
-                .live_read_transactions
-                .get_mut(&durable_ancestor)
-                .unwrap();
-            *ref_count -= 1;
-            if *ref_count == 0 {
-                state.live_read_transactions.remove(&durable_ancestor);
+            if let Some(ref_count) = state.live_read_transactions.get_mut(&durable_ancestor) {
+                *ref_count -= 1;
+                if *ref_count == 0 {
+                    state.live_read_transactions.remove(&durable_ancestor);
+                }
             }
         }
+        Ok(())
     }
 
-    pub(crate) fn is_unprocessed_non_durable_commit(&self, id: TransactionId) -> bool {
+    pub(crate) fn is_unprocessed_non_durable_commit(&self, id: TransactionId) -> Result<bool> {
         #[cfg(feature = "std")]
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let state = self.state.lock();
-        state.unprocessed_freed_non_durable_commits.contains(&id)
+        Ok(state.unprocessed_freed_non_durable_commits.contains(&id))
     }
 
-    pub(crate) fn mark_unprocessed_non_durable_commit(&self, id: TransactionId) {
+    pub(crate) fn mark_unprocessed_non_durable_commit(&self, id: TransactionId) -> Result {
         #[cfg(feature = "std")]
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
         state.unprocessed_freed_non_durable_commits.remove(&id);
+        Ok(())
     }
 
-    pub(crate) fn oldest_unprocessed_non_durable_commit(&self) -> Option<TransactionId> {
+    pub(crate) fn oldest_unprocessed_non_durable_commit(&self) -> Result<Option<TransactionId>> {
         #[cfg(feature = "std")]
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let state = self.state.lock();
-        state
+        Ok(state
             .unprocessed_freed_non_durable_commits
             .iter()
             .next()
-            .copied()
+            .copied())
     }
 
     pub(crate) fn register_non_durable_commit(
         &self,
         id: TransactionId,
         durable_ancestor: TransactionId,
-    ) {
+    ) -> Result {
         #[cfg(feature = "std")]
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
         state
@@ -275,20 +280,26 @@ impl TransactionTracker {
             .pending_non_durable_commits
             .insert(id, durable_ancestor);
         state.unprocessed_freed_non_durable_commits.insert(id);
+        Ok(())
     }
 
-    pub(crate) fn restore_savepoint_counter_state(&self, next_savepoint: SavepointId) {
+    pub(crate) fn restore_savepoint_counter_state(&self, next_savepoint: SavepointId) -> Result {
         #[cfg(feature = "std")]
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
-        assert!(state.valid_savepoints.is_empty());
+        if !state.valid_savepoints.is_empty() {
+            return Err(StorageError::Corrupted(
+                "restore_savepoint_counter_state called with active savepoints".into(),
+            ));
+        }
         state.next_savepoint_id = next_savepoint;
+        Ok(())
     }
 
-    pub(crate) fn register_persistent_savepoint(&self, savepoint: &Savepoint) {
+    pub(crate) fn register_persistent_savepoint(&self, savepoint: &Savepoint) -> Result {
         #[cfg(feature = "std")]
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
         state
@@ -299,6 +310,7 @@ impl TransactionTracker {
         state
             .valid_savepoints
             .insert(savepoint.get_id(), savepoint.get_transaction_id());
+        Ok(())
     }
 
     pub(crate) fn register_read_transaction(
@@ -319,24 +331,26 @@ impl TransactionTracker {
         Ok(id)
     }
 
-    pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
+    pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) -> Result {
         #[cfg(feature = "std")]
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
-        let ref_count = state.live_read_transactions.get_mut(&id).unwrap();
-        *ref_count -= 1;
-        if *ref_count == 0 {
-            state.live_read_transactions.remove(&id);
+        if let Some(ref_count) = state.live_read_transactions.get_mut(&id) {
+            *ref_count -= 1;
+            if *ref_count == 0 {
+                state.live_read_transactions.remove(&id);
+            }
         }
+        Ok(())
     }
 
-    pub(crate) fn any_savepoint_exists(&self) -> bool {
+    pub(crate) fn any_savepoint_exists(&self) -> Result<bool> {
         #[cfg(feature = "std")]
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let state = self.state.lock();
-        !state.valid_savepoints.is_empty()
+        Ok(!state.valid_savepoints.is_empty())
     }
 
     pub(crate) fn allocate_savepoint(&self, transaction_id: TransactionId) -> Result<SavepointId> {
@@ -350,56 +364,61 @@ impl TransactionTracker {
         Ok(id)
     }
 
-    // Deallocates the given savepoint and its matching reference count on the transcation
-    pub(crate) fn deallocate_savepoint(&self, savepoint: SavepointId, transaction: TransactionId) {
+    // Deallocates the given savepoint and its matching reference count on the transaction
+    pub(crate) fn deallocate_savepoint(
+        &self,
+        savepoint: SavepointId,
+        transaction: TransactionId,
+    ) -> Result {
         {
             #[cfg(feature = "std")]
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock()?;
             #[cfg(not(feature = "std"))]
             let mut state = self.state.lock();
             state.valid_savepoints.remove(&savepoint);
         }
-        self.deallocate_read_transaction(transaction);
+        self.deallocate_read_transaction(transaction)
     }
 
-    pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> bool {
+    pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> Result<bool> {
         #[cfg(feature = "std")]
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let state = self.state.lock();
-        state.valid_savepoints.contains_key(&id)
+        Ok(state.valid_savepoints.contains_key(&id))
     }
 
-    pub(crate) fn invalidate_savepoints_after(&self, id: SavepointId) {
+    pub(crate) fn invalidate_savepoints_after(&self, id: SavepointId) -> Result {
         #[cfg(feature = "std")]
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
         state.valid_savepoints.retain(|x, _| *x <= id);
+        Ok(())
     }
 
-    pub(crate) fn oldest_savepoint(&self) -> Option<(SavepointId, TransactionId)> {
+    pub(crate) fn oldest_savepoint(&self) -> Result<Option<(SavepointId, TransactionId)>> {
         #[cfg(feature = "std")]
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let state = self.state.lock();
-        state
+        Ok(state
             .valid_savepoints
             .first_key_value()
-            .map(|x| (*x.0, *x.1))
+            .map(|x| (*x.0, *x.1)))
     }
 
-    pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
+    pub(crate) fn oldest_live_read_transaction(&self) -> Result<Option<TransactionId>> {
         #[cfg(feature = "std")]
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let state = self.state.lock();
-        state.live_read_transactions.keys().next().copied()
+        Ok(state.live_read_transactions.keys().next().copied())
     }
 
-    pub(crate) fn register_history_hold(&self, transaction_id: TransactionId) {
+    pub(crate) fn register_history_hold(&self, transaction_id: TransactionId) -> Result {
         #[cfg(feature = "std")]
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
         state
@@ -407,35 +426,35 @@ impl TransactionTracker {
             .entry(transaction_id)
             .and_modify(|x| *x += 1)
             .or_insert(1);
+        Ok(())
     }
 
-    pub(crate) fn deallocate_history_hold(&self, transaction_id: TransactionId) {
+    pub(crate) fn deallocate_history_hold(&self, transaction_id: TransactionId) -> Result {
         #[cfg(feature = "std")]
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
-        let ref_count = state
-            .live_read_transactions
-            .get_mut(&transaction_id)
-            .unwrap();
-        *ref_count -= 1;
-        if *ref_count == 0 {
-            state.live_read_transactions.remove(&transaction_id);
+        if let Some(ref_count) = state.live_read_transactions.get_mut(&transaction_id) {
+            *ref_count -= 1;
+            if *ref_count == 0 {
+                state.live_read_transactions.remove(&transaction_id);
+            }
         }
+        Ok(())
     }
 
     // Returns the transaction id of the oldest non-durable transaction which has not been processed
     // for freeing, which has live read transactions
-    pub(crate) fn oldest_live_read_nondurable_transaction(&self) -> Option<TransactionId> {
+    pub(crate) fn oldest_live_read_nondurable_transaction(&self) -> Result<Option<TransactionId>> {
         #[cfg(feature = "std")]
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let state = self.state.lock();
         for id in state.live_read_transactions.keys() {
             if state.pending_non_durable_commits.contains_key(id) {
-                return Some(*id);
+                return Ok(Some(*id));
             }
         }
-        None
+        Ok(None)
     }
 }

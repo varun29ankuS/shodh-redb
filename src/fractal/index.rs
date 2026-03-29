@@ -140,6 +140,15 @@ impl<'txn> FractalIndex<'txn> {
         for m in 0..num_sub {
             if let Some(guard) = tbl.get(m as u32)? {
                 let bytes = guard.value();
+                let expected_len = 256 * sub_dim * 4;
+                if bytes.len() < expected_len {
+                    return Err(StorageError::Corrupted(alloc::format!(
+                        "fractal: codebook {} has insufficient bytes: expected {}, got {}",
+                        m,
+                        expected_len,
+                        bytes.len(),
+                    )));
+                }
                 for k in 0..256 {
                     for d in 0..sub_dim {
                         let offset = (k * sub_dim + d) * 4;
@@ -709,6 +718,9 @@ impl<'txn> FractalIndex<'txn> {
 
                 if let Some(cg) = ctbl.get(child_id)? {
                     let bytes = cg.value();
+                    if bytes.len() < dim * 4 {
+                        continue;
+                    }
                     let child_centroid: Vec<f32> = (0..dim)
                         .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                         .collect();
@@ -789,6 +801,9 @@ impl<'txn> FractalIndex<'txn> {
         match vtbl.get(vector_id)? {
             Some(g) => {
                 let bytes = g.value();
+                if bytes.len() < dim * 4 {
+                    return Ok(None);
+                }
                 let vec: Vec<f32> = (0..dim)
                     .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                     .collect();
@@ -814,6 +829,9 @@ impl<'txn> FractalIndex<'txn> {
         let btbl = self.txn.open_table(buffer_def).map_err(te)?;
         if let Some(g) = btbl.get(PostingKey::new(cluster_id, vector_id))? {
             let bytes = g.value();
+            if bytes.len() < dim * 4 {
+                return Ok(None);
+            }
             let vec: Vec<f32> = (0..dim)
                 .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                 .collect();
@@ -877,6 +895,17 @@ impl ReadOnlyFractalIndex {
         for m in 0..num_sub {
             if let Some(guard) = cb_tbl.get(m as u32)? {
                 let bytes = guard.value();
+                let expected_len = 256 * sub_dim * 4;
+                if bytes.len() < expected_len {
+                    return Err(TableError::Storage(StorageError::Corrupted(
+                        alloc::format!(
+                            "fractal: codebook {} has insufficient bytes: expected {}, got {}",
+                            m,
+                            expected_len,
+                            bytes.len(),
+                        ),
+                    )));
+                }
                 for k in 0..256 {
                     for d in 0..sub_dim {
                         let offset = (k * sub_dim + d) * 4;

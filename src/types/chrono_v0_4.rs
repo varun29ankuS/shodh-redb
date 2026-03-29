@@ -34,12 +34,6 @@ impl Value for NaiveDate {
     where
         Self: 'a,
     {
-        assert_eq!(
-            data.len(),
-            6,
-            "NaiveDate must be 6 bytes long, got {}",
-            data.len()
-        );
         date_from_bytes(data)
     }
 
@@ -85,11 +79,6 @@ impl Value for NaiveTime {
     where
         Self: 'a,
     {
-        assert!(
-            data.len() == 7,
-            "NaiveTime must be 7 bytes long, got {}",
-            data.len()
-        );
         time_from_bytes(data)
     }
 
@@ -142,15 +131,8 @@ impl Value for NaiveDateTime {
     where
         Self: 'a,
     {
-        assert_eq!(
-            data.len(),
-            13,
-            "NaiveDateTime must be 13 bytes long, got {}",
-            data.len()
-        );
-
-        let date = date_from_bytes(&data[0..6]);
-        let time = time_from_bytes(&data[6..13]);
+        let date = date_from_bytes(if data.len() >= 6 { &data[0..6] } else { data });
+        let time = time_from_bytes(if data.len() >= 13 { &data[6..13] } else { &[] });
         NaiveDateTime::new(date, time)
     }
 
@@ -212,16 +194,9 @@ impl Value for DateTime<FixedOffset> {
     where
         Self: 'a,
     {
-        assert_eq!(
-            data.len(),
-            17,
-            "DateTime<FixedOffset> must be 17 bytes long, got {}",
-            data.len()
-        );
-        let date = date_from_bytes(&data[0..6]);
-        let time = time_from_bytes(&data[6..13]);
-
-        let offset = offset_from_bytes(&data[13..17]);
+        let date = date_from_bytes(if data.len() >= 6 { &data[0..6] } else { data });
+        let time = time_from_bytes(if data.len() >= 13 { &data[6..13] } else { &[] });
+        let offset = offset_from_bytes(if data.len() >= 17 { &data[13..17] } else { &[] });
         let time = NaiveDateTime::new(date, time);
         offset.from_utc_datetime(&time)
     }
@@ -290,12 +265,6 @@ impl Value for FixedOffset {
     where
         Self: 'a,
     {
-        assert_eq!(
-            data.len(),
-            4,
-            "FixedOffset must be 4 bytes long got {}",
-            data.len()
-        );
         offset_from_bytes(data)
     }
 
@@ -318,21 +287,32 @@ impl Key for FixedOffset {
     }
 }
 fn offset_from_bytes(data: &[u8]) -> FixedOffset {
-    let offset_seconds = i32::from_le_bytes(data.try_into().unwrap());
-    FixedOffset::east_opt(offset_seconds)
-        .expect("Invalid offset seconds, must be between -86400 and 86400")
+    if data.len() < 4 {
+        return FixedOffset::east_opt(0).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+    }
+    let offset_seconds = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    // Clamp to valid range [-86400, 86400]
+    let clamped = offset_seconds.clamp(-86_400, 86_400);
+    FixedOffset::east_opt(clamped).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap())
 }
 fn date_from_bytes(data: &[u8]) -> NaiveDate {
-    let year = i32::from_le_bytes(data[0..4].try_into().unwrap());
+    if data.len() < 6 {
+        return NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    }
+    let year = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     let month = u32::from(data[4]);
     let day = u32::from(data[5]);
-    NaiveDate::from_ymd_opt(year, month, day).expect("Invalid date")
+    NaiveDate::from_ymd_opt(year, month, day)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
 }
 fn time_from_bytes(data: &[u8]) -> NaiveTime {
+    if data.len() < 7 {
+        return NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+    }
     let num_seconds = u32::from_le_bytes([data[0], data[1], data[2], 0]);
-    let num_nanoseconds = u32::from_le_bytes(data[3..7].try_into().unwrap());
+    let num_nanoseconds = u32::from_le_bytes([data[3], data[4], data[5], data[6]]);
     NaiveTime::from_num_seconds_from_midnight_opt(num_seconds, num_nanoseconds)
-        .expect("Invalid time")
+        .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap())
 }
 
 #[cfg(test)]

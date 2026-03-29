@@ -48,6 +48,9 @@ fn parse_lens<const N: usize>(fixed_width: [Option<usize>; N], data: &[u8]) -> (
         if let Some(len) = fixed {
             result[i] = len;
         } else {
+            if offset >= data.len() {
+                break;
+            }
             let (len, bytes_read) = decode_varint_len(&data[offset..]);
             result[i] = len;
             offset += bytes_read;

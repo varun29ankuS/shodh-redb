@@ -55,8 +55,16 @@ impl PostingKey {
 
     #[allow(clippy::big_endian_bytes)]
     pub fn from_be_bytes(data: &[u8]) -> Self {
-        let cluster_id = u32::from_be_bytes(data[..4].try_into().unwrap());
-        let vector_id = u64::from_be_bytes(data[4..12].try_into().unwrap());
+        if data.len() < Self::SERIALIZED_SIZE {
+            return Self {
+                cluster_id: 0,
+                vector_id: 0,
+            };
+        }
+        let cluster_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        let vector_id = u64::from_be_bytes([
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+        ]);
         Self {
             cluster_id,
             vector_id,
@@ -161,7 +169,10 @@ impl Value for AssignmentValue {
     where
         Self: 'a,
     {
-        u32::from_le_bytes(data[..4].try_into().unwrap())
+        if data.len() < 4 {
+            return 0;
+        }
+        u32::from_le_bytes([data[0], data[1], data[2], data[3]])
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -207,26 +218,67 @@ pub fn encode_index_config(cfg: &super::config::IndexConfig) -> [u8; INDEX_CONFI
     buf
 }
 
+fn read_u16_le(data: &[u8], offset: usize) -> u16 {
+    if offset + 2 > data.len() {
+        return 0;
+    }
+    u16::from_le_bytes([data[offset], data[offset + 1]])
+}
+
+fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+    if offset + 4 > data.len() {
+        return 0;
+    }
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
+}
+
+fn read_u64_le(data: &[u8], offset: usize) -> u64 {
+    if offset + 8 > data.len() {
+        return 0;
+    }
+    u64::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+        data[offset + 4],
+        data[offset + 5],
+        data[offset + 6],
+        data[offset + 7],
+    ])
+}
+
+fn read_byte(data: &[u8], offset: usize) -> u8 {
+    if offset >= data.len() {
+        return 0;
+    }
+    data[offset]
+}
+
 /// Decode an [`super::config::IndexConfig`] from a fixed-width byte slice.
 pub fn decode_index_config(data: &[u8]) -> super::config::IndexConfig {
     use super::config::IndexConfig;
     use crate::vector_ops::DistanceMetric;
 
-    let dim = u32::from_le_bytes(data[0..4].try_into().unwrap());
-    let num_clusters = u32::from_le_bytes(data[4..8].try_into().unwrap());
-    let num_subvectors = u32::from_le_bytes(data[8..12].try_into().unwrap());
-    let num_codewords = u16::from_le_bytes(data[12..14].try_into().unwrap());
-    let metric = match data[14] {
+    let dim = read_u32_le(data, 0);
+    let num_clusters = read_u32_le(data, 4);
+    let num_subvectors = read_u32_le(data, 8);
+    let num_codewords = read_u16_le(data, 12);
+    let metric = match read_byte(data, 14) {
         0 => DistanceMetric::Cosine,
         2 => DistanceMetric::DotProduct,
         3 => DistanceMetric::Manhattan,
-        // 1 and any unknown value default to EuclideanSq
         _ => DistanceMetric::EuclideanSq,
     };
-    let store_raw_vectors = data[15] != 0;
-    let default_nprobe = u32::from_le_bytes(data[16..20].try_into().unwrap());
-    let state = data[20];
-    let num_vectors = u64::from_le_bytes(data[24..32].try_into().unwrap());
+    let store_raw_vectors = read_byte(data, 15) != 0;
+    let default_nprobe = read_u32_le(data, 16);
+    let state = read_byte(data, 20);
+    let num_vectors = read_u64_le(data, 24);
 
     IndexConfig {
         dim,

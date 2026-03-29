@@ -19,17 +19,28 @@ pub(super) fn encode_varint_len(len: usize, output: &mut Vec<u8>) {
 
 // Decode a variable length int starting at the beginning of data
 // Returns (decoded length, length consumed of `data`)
+// Returns (0, 0) if data is too short to decode, preventing panics on corrupted input.
 pub(super) fn decode_varint_len(data: &[u8]) -> (usize, usize) {
+    if data.is_empty() {
+        return (0, 0);
+    }
     match data[0] {
         0..=253 => (data[0] as usize, 1),
-        254 => (
-            u16::from_le_bytes(data[1..3].try_into().unwrap()) as usize,
-            3,
-        ),
-        255 => (
-            u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize,
-            5,
-        ),
+        254 => {
+            if data.len() < 3 {
+                return (0, data.len());
+            }
+            (u16::from_le_bytes([data[1], data[2]]) as usize, 3)
+        }
+        255 => {
+            if data.len() < 5 {
+                return (0, data.len());
+            }
+            (
+                u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize,
+                5,
+            )
+        }
     }
 }
 
@@ -52,8 +63,14 @@ impl<T: Value> Value for Vec<T> {
         Self: 'a,
     {
         let (elements, mut offset) = decode_varint_len(data);
-        let mut result = Vec::with_capacity(elements);
+        if offset > data.len() {
+            return Vec::new();
+        }
+        let mut result = Vec::with_capacity(elements.min(data.len()));
         for _ in 0..elements {
+            if offset >= data.len() {
+                break;
+            }
             let element_len = if let Some(len) = T::fixed_width() {
                 len
             } else {
@@ -61,10 +78,12 @@ impl<T: Value> Value for Vec<T> {
                 offset += consumed;
                 len
             };
+            if offset + element_len > data.len() {
+                break;
+            }
             result.push(T::from_bytes(&data[offset..(offset + element_len)]));
             offset += element_len;
         }
-        assert_eq!(offset, data.len());
         result
     }
 

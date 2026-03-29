@@ -17,6 +17,26 @@ fn te(e: crate::error::TableError) -> StorageError {
     e.into_storage_error_or_corrupted("fractal index internal table error")
 }
 
+/// Extract an `f32` from a byte slice at the given offset.
+#[inline]
+fn read_f32(bytes: &[u8], offset: usize) -> Result<f32, StorageError> {
+    bytes
+        .get(offset..offset + 4)
+        .and_then(|s| s.try_into().ok())
+        .map(f32::from_le_bytes)
+        .ok_or_else(|| StorageError::Corrupted(String::from("truncated f32 in fractal cluster")))
+}
+
+/// Extract an `f64` from a byte slice at the given offset.
+#[inline]
+fn read_f64(bytes: &[u8], offset: usize) -> Result<f64, StorageError> {
+    bytes
+        .get(offset..offset + 8)
+        .and_then(|s| s.try_into().ok())
+        .map(f64::from_le_bytes)
+        .ok_or_else(|| StorageError::Corrupted(String::from("truncated f64 in fractal cluster")))
+}
+
 // ---------------------------------------------------------------------------
 // Centroid update (Welford's online algorithm)
 // ---------------------------------------------------------------------------
@@ -45,10 +65,7 @@ pub(crate) fn centroid_add(
     if let Some(existing) = sums_tbl.get(cluster_id)? {
         let bytes = existing.value();
         for i in 0..dim {
-            let offset = i * 8;
-            sums.push(f64::from_le_bytes(
-                bytes[offset..offset + 8].try_into().unwrap(),
-            ));
+            sums.push(read_f64(bytes, i * 8)?);
         }
     } else {
         sums.resize(dim, 0.0);
@@ -106,10 +123,7 @@ pub(crate) fn centroid_remove(
     if let Some(existing) = sums_tbl.get(cluster_id)? {
         let bytes = existing.value();
         for i in 0..dim {
-            let offset = i * 8;
-            sums.push(f64::from_le_bytes(
-                bytes[offset..offset + 8].try_into().unwrap(),
-            ));
+            sums.push(read_f64(bytes, i * 8)?);
         }
     } else {
         sums.resize(dim, 0.0);
@@ -191,10 +205,7 @@ pub(crate) fn split_cluster(
                     continue;
                 }
                 for i in 0..dim {
-                    let offset = i * 4;
-                    flat_vectors.push(f32::from_le_bytes(
-                        bytes[offset..offset + 4].try_into().unwrap(),
-                    ));
+                    flat_vectors.push(read_f32(bytes, i * 4)?);
                 }
             }
         }
@@ -428,8 +439,8 @@ pub(crate) fn merge_cluster(
                     return Ok(None);
                 }
                 (0..dim)
-                    .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                    .collect()
+                    .map(|i| read_f32(bytes, i * 4))
+                    .collect::<Result<Vec<f32>, _>>()?
             }
             None => return Ok(None),
         }
@@ -446,8 +457,8 @@ pub(crate) fn merge_cluster(
                     continue;
                 }
                 let sib_centroid: Vec<f32> = (0..dim)
-                    .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                    .collect();
+                    .map(|i| read_f32(bytes, i * 4))
+                    .collect::<Result<Vec<f32>, _>>()?;
                 let dist = config.metric.compute(&my_centroid, &sib_centroid);
                 if dist < best_dist {
                     best_dist = dist;
@@ -527,8 +538,8 @@ pub(crate) fn merge_cluster(
             Some(g) => {
                 let bytes = g.value();
                 (0..dim)
-                    .map(|i| f64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()))
-                    .collect()
+                    .map(|i| read_f64(bytes, i * 8))
+                    .collect::<Result<Vec<f64>, _>>()?
             }
             None => alloc::vec![0.0; dim],
         };
@@ -537,8 +548,8 @@ pub(crate) fn merge_cluster(
             Some(g) => {
                 let bytes = g.value();
                 (0..dim)
-                    .map(|i| f64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()))
-                    .collect()
+                    .map(|i| read_f64(bytes, i * 8))
+                    .collect::<Result<Vec<f64>, _>>()?
             }
             None => alloc::vec![0.0; dim],
         };
@@ -562,8 +573,8 @@ pub(crate) fn merge_cluster(
             Some(g) => {
                 let bytes = g.value();
                 (0..dim)
-                    .map(|i| f64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()))
-                    .collect()
+                    .map(|i| read_f64(bytes, i * 8))
+                    .collect::<Result<Vec<f64>, _>>()?
             }
             None => alloc::vec![0.0; dim],
         };
@@ -655,8 +666,8 @@ pub(crate) fn cascade_leaf_buffer(
                 continue;
             }
             let vec: Vec<f32> = (0..dim)
-                .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                .collect();
+                .map(|i| read_f32(bytes, i * 4))
+                .collect::<Result<Vec<f32>, _>>()?;
             entries.push((vid, vec));
         }
     }

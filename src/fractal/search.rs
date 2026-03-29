@@ -128,7 +128,9 @@ pub(crate) fn search_write(
     };
 
     let codebooks = idx.codebooks.as_ref().ok_or_else(|| {
-        StorageError::Corrupted("fractal: search called on index without codebooks".to_string())
+        StorageError::Corrupted(alloc::string::String::from(
+            "fractal: search called on index without codebooks",
+        ))
     })?;
     let adc = AdcTable::build(&q, codebooks, idx.config.metric);
     let nprobe = params.nprobe.max(1);

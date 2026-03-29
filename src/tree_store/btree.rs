@@ -17,6 +17,7 @@ use crate::tree_store::{
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result, StorageError};
 use alloc::format;
+use alloc::string::String;
 #[cfg(feature = "std")]
 use alloc::string::ToString;
 use alloc::sync::Arc;

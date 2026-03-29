@@ -186,12 +186,10 @@ impl TransactionTracker {
                 Ok(())
             }
             Some(active_id) => Err(StorageError::Corrupted(format!(
-                "end_write_transaction called with id {:?}, but active transaction is {:?}",
-                id, active_id
+                "end_write_transaction called with id {id:?}, but active transaction is {active_id:?}"
             ))),
             None => Err(StorageError::Corrupted(format!(
-                "end_write_transaction called with id {:?}, but no write transaction is active",
-                id
+                "end_write_transaction called with id {id:?}, but no write transaction is active"
             ))),
         }
     }
@@ -205,12 +203,10 @@ impl TransactionTracker {
                 Ok(())
             }
             Some(active_id) => Err(StorageError::Corrupted(format!(
-                "end_write_transaction called with id {:?}, but active transaction is {:?}",
-                id, active_id
+                "end_write_transaction called with id {id:?}, but active transaction is {active_id:?}"
             ))),
             None => Err(StorageError::Corrupted(format!(
-                "end_write_transaction called with id {:?}, but no write transaction is active",
-                id
+                "end_write_transaction called with id {id:?}, but no write transaction is active"
             ))),
         }
     }

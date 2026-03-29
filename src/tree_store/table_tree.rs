@@ -614,8 +614,7 @@ impl TableTreeMut<'_> {
         }
         if self.tree.get(&name)?.is_some() {
             return Err(crate::StorageError::Corrupted(alloc::format!(
-                "create_table_and_flush_table_root: table '{}' already exists",
-                name
+                "create_table_and_flush_table_root: table '{name}' already exists"
             )));
         }
 
@@ -726,15 +725,13 @@ impl TableTreeMut<'_> {
             }
             if self.tree.remove(&name)?.is_none() {
                 return Err(StorageError::Corrupted(alloc::format!(
-                    "rename_table: table '{}' disappeared during rename",
-                    name
+                    "rename_table: table '{name}' disappeared during rename"
                 ))
                 .into());
             }
             if self.tree.insert(&new_name, &definition)?.is_some() {
                 return Err(StorageError::Corrupted(alloc::format!(
-                    "rename_table: destination '{}' appeared during rename",
-                    new_name
+                    "rename_table: destination '{new_name}' appeared during rename"
                 ))
                 .into());
             }

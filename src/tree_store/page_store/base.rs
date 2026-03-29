@@ -251,7 +251,7 @@ pub(crate) struct PageMut {
 
 impl PageMut {
     pub(crate) fn memory_mut(&mut self) -> crate::Result<&mut [u8]> {
-        self.mem.mem_mut().map_err(Into::into)
+        self.mem.mem_mut()
     }
 }
 

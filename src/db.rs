@@ -1917,13 +1917,10 @@ impl Database {
     fn run_group_commit(&self) {
         // Initial drain — the leader's own batch (and any that arrived concurrently)
         // are already in the pending queue.
-        let mut batches = match self.group_committer.drain_pending() {
-            Ok(b) => b,
-            Err(_) => {
-                // Mutex poisoned — relinquish leadership (best-effort).
-                let _ = self.group_committer.finish_leader();
-                return;
-            }
+        let Ok(mut batches) = self.group_committer.drain_pending() else {
+            // Mutex poisoned — relinquish leadership (best-effort).
+            let _ = self.group_committer.finish_leader();
+            return;
         };
 
         loop {
@@ -1983,13 +1980,11 @@ impl Database {
             if failed {
                 let _ = txn.abort();
                 // Re-drain: new batches may have arrived while we were processing.
-                batches = match self.group_committer.drain_pending() {
-                    Ok(b) => b,
-                    Err(_) => {
-                        let _ = self.group_committer.finish_leader();
-                        return;
-                    }
+                let Ok(b) = self.group_committer.drain_pending() else {
+                    let _ = self.group_committer.finish_leader();
+                    return;
                 };
+                batches = b;
                 continue;
             }
 
@@ -2010,13 +2005,11 @@ impl Database {
             }
 
             // Check for batches that arrived while we were committing.
-            batches = match self.group_committer.drain_pending() {
-                Ok(b) => b,
-                Err(_) => {
-                    let _ = self.group_committer.finish_leader();
-                    return;
-                }
+            let Ok(b) = self.group_committer.drain_pending() else {
+                let _ = self.group_committer.finish_leader();
+                return;
             };
+            batches = b;
         }
     }
 

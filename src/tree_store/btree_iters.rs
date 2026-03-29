@@ -379,9 +379,10 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                 match operation.delete(&entry.key()) {
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        return Some(Err(crate::StorageError::Corrupted(alloc::format!(
+                        return Some(Err(crate::StorageError::Corrupted(
                             "extract_if: key existed during iteration but delete returned None"
-                        ))));
+                                .into(),
+                        )));
                     }
                     Err(x) => {
                         return Some(Err(x));
@@ -412,9 +413,10 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                 match operation.delete(&entry.key()) {
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        return Some(Err(crate::StorageError::Corrupted(alloc::format!(
+                        return Some(Err(crate::StorageError::Corrupted(
                             "extract_if: key existed during iteration but delete returned None"
-                        ))));
+                                .into(),
+                        )));
                     }
                     Err(x) => {
                         return Some(Err(x));

@@ -361,10 +361,14 @@ impl CacheStats {
     }
 }
 
-pub(crate) struct TransactionGuard {
-    transaction_tracker: Option<Arc<TransactionTracker>>,
-    transaction_id: Option<TransactionId>,
-    write_transaction: bool,
+pub(crate) enum TransactionGuard {
+    Active {
+        transaction_tracker: Arc<TransactionTracker>,
+        transaction_id: Option<TransactionId>,
+        write_transaction: bool,
+    },
+    /// No-op guard for verification and repair page traversal.
+    Verification,
 }
 
 impl TransactionGuard {
@@ -372,8 +376,8 @@ impl TransactionGuard {
         transaction_id: TransactionId,
         tracker: Arc<TransactionTracker>,
     ) -> Self {
-        Self {
-            transaction_tracker: Some(tracker),
+        Self::Active {
+            transaction_tracker: tracker,
             transaction_id: Some(transaction_id),
             write_transaction: false,
         }
@@ -383,44 +387,50 @@ impl TransactionGuard {
         transaction_id: TransactionId,
         tracker: Arc<TransactionTracker>,
     ) -> Self {
-        Self {
-            transaction_tracker: Some(tracker),
+        Self::Active {
+            transaction_tracker: tracker,
             transaction_id: Some(transaction_id),
             write_transaction: true,
         }
     }
 
-    // TODO: remove this hack
-    pub(crate) fn fake() -> Self {
-        Self {
-            transaction_tracker: None,
-            transaction_id: None,
-            write_transaction: false,
+    pub(crate) fn id(&self) -> Result<TransactionId, StorageError> {
+        match self {
+            Self::Active { transaction_id, .. } => transaction_id.ok_or_else(|| {
+                StorageError::Corrupted(String::from("TransactionGuard::id() called after leak()"))
+            }),
+            Self::Verification => Err(StorageError::Corrupted(String::from(
+                "TransactionGuard::id() called on Verification guard",
+            ))),
         }
     }
 
-    pub(crate) fn id(&self) -> Result<TransactionId, StorageError> {
-        self.transaction_id.ok_or_else(|| {
-            StorageError::Corrupted("TransactionGuard::id() called with no transaction_id".into())
-        })
-    }
-
-    pub(crate) fn leak(mut self) -> Result<TransactionId, StorageError> {
-        self.transaction_id.take().ok_or_else(|| {
-            StorageError::Corrupted("TransactionGuard::leak() called with no transaction_id".into())
-        })
+    pub(crate) fn leak(&mut self) -> Result<TransactionId, StorageError> {
+        match self {
+            Self::Active { transaction_id, .. } => transaction_id.take().ok_or_else(|| {
+                StorageError::Corrupted(String::from(
+                    "TransactionGuard::leak() called after prior leak()",
+                ))
+            }),
+            Self::Verification => Err(StorageError::Corrupted(String::from(
+                "TransactionGuard::leak() called on Verification guard",
+            ))),
+        }
     }
 }
 
 impl Drop for TransactionGuard {
     fn drop(&mut self) {
-        if let (Some(tracker), Some(transaction_id)) =
-            (self.transaction_tracker.as_ref(), self.transaction_id)
+        if let Self::Active {
+            transaction_tracker,
+            transaction_id: Some(transaction_id),
+            write_transaction,
+        } = self
         {
-            if self.write_transaction {
-                let _ = tracker.end_write_transaction(transaction_id);
+            if *write_transaction {
+                let _ = transaction_tracker.end_write_transaction(*transaction_id);
             } else {
-                let _ = tracker.deallocate_read_transaction(transaction_id);
+                let _ = transaction_tracker.deallocate_read_transaction(*transaction_id);
             }
         }
     }
@@ -663,7 +673,7 @@ impl Database {
         let table_tree = TableTree::new(
             mem.get_data_root(),
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::Verification),
             mem.clone(),
         )?;
         if !table_tree.verify_checksums()? {
@@ -672,7 +682,7 @@ impl Database {
         let system_table_tree = TableTree::new(
             mem.get_system_root(),
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::Verification),
             mem.clone(),
         )?;
         if !system_table_tree.verify_checksums()? {
@@ -693,7 +703,7 @@ impl Database {
         let table_tree = TableTree::new(
             mem.get_data_root(),
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::Verification),
             mem.clone(),
         )?;
         let (pages, corruptions) = table_tree.verify_checksums_detailed()?;
@@ -703,7 +713,7 @@ impl Database {
         let system_table_tree = TableTree::new(
             mem.get_system_root(),
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::Verification),
             mem.clone(),
         )?;
         let (pages, corruptions) = system_table_tree.verify_checksums_detailed()?;
@@ -723,7 +733,7 @@ impl Database {
         let table_tree = TableTree::new(
             mem.get_data_root(),
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::Verification),
             mem.clone(),
         )?;
         all_corruptions.extend(table_tree.verify_structure_detailed()?);
@@ -731,7 +741,7 @@ impl Database {
         let system_table_tree = TableTree::new(
             mem.get_system_root(),
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::Verification),
             mem.clone(),
         )?;
         all_corruptions.extend(system_table_tree.verify_structure_detailed()?);
@@ -1431,7 +1441,7 @@ impl Database {
         let table_tree = TableTree::new(
             system_root,
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::Verification),
             mem.clone(),
         )?;
         if let Some(table_def) = table_tree
@@ -1451,7 +1461,7 @@ impl Database {
                     DATA_ALLOCATED_TABLE.name().to_string(),
                     table_root,
                     PageHint::None,
-                    Arc::new(TransactionGuard::fake()),
+                    Arc::new(TransactionGuard::Verification),
                     mem.clone(),
                 )?;
             for result in table.range::<TransactionIdWithPagination>(..)? {
@@ -1474,7 +1484,7 @@ impl Database {
     where
         F: FnMut(PageNumber) -> Result,
     {
-        let fake_guard = Arc::new(TransactionGuard::fake());
+        let fake_guard = Arc::new(TransactionGuard::Verification);
         let system_tree = TableTree::new(system_root, PageHint::None, fake_guard, mem.clone())?;
         let table_name = table_def.name();
         let result = match system_tree.get_table::<K, V>(table_name, TableType::Normal) {
@@ -1506,7 +1516,7 @@ impl Database {
                     table_name.to_string(),
                     table_root,
                     PageHint::None,
-                    Arc::new(TransactionGuard::fake()),
+                    Arc::new(TransactionGuard::Verification),
                     mem.clone(),
                 )?;
             for result in table.range::<TransactionIdWithPagination>(..)? {
@@ -1526,7 +1536,7 @@ impl Database {
     ) -> Result {
         let data_root = mem.get_data_root();
         {
-            let fake = Arc::new(TransactionGuard::fake());
+            let fake = Arc::new(TransactionGuard::Verification);
             let tables = TableTree::new(data_root, PageHint::None, fake, mem.clone())?;
             tables.visit_all_pages(|path| {
                 mem.mark_debug_allocated_page(path.page_number());
@@ -1536,7 +1546,7 @@ impl Database {
 
         let system_root = mem.get_system_root();
         {
-            let fake = Arc::new(TransactionGuard::fake());
+            let fake = Arc::new(TransactionGuard::Verification);
             let system_tables = TableTree::new(system_root, PageHint::None, fake, mem.clone())?;
             system_tables.visit_all_pages(|path| {
                 mem.mark_debug_allocated_page(path.page_number());
@@ -1596,7 +1606,7 @@ impl Database {
 
         let data_root = mem.get_data_root();
         {
-            let fake = Arc::new(TransactionGuard::fake());
+            let fake = Arc::new(TransactionGuard::Verification);
             let tables = TableTree::new(data_root, PageHint::None, fake, mem.clone())?;
             tables.visit_all_pages(|path| {
                 mem.mark_page_allocated(path.page_number());
@@ -1613,7 +1623,7 @@ impl Database {
 
         let system_root = mem.get_system_root();
         {
-            let fake = Arc::new(TransactionGuard::fake());
+            let fake = Arc::new(TransactionGuard::Verification);
             let system_tables = TableTree::new(system_root, PageHint::None, fake, mem.clone())?;
             system_tables.visit_all_pages(|path| {
                 mem.mark_page_allocated(path.page_number());
@@ -1778,7 +1788,7 @@ impl Database {
         let system_table_tree = TableTree::new(
             mem.get_system_root(),
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::Verification),
             mem.clone(),
         )?;
         let Some(allocator_state_table) = system_table_tree
@@ -1797,7 +1807,7 @@ impl Database {
         let tree = Btree::new_uncompressed(
             table_root,
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::Verification),
             mem.clone(),
         )?;
 
@@ -1856,17 +1866,17 @@ impl Database {
     /// Returns a [`ReadTransaction`] that sees the user-table state as of the
     /// requested commit.
     pub fn begin_read_at(&self, transaction_id: u64) -> Result<ReadTransaction, TransactionError> {
+        let lookup_txn = self.begin_read()?;
+        let snapshot = lookup_txn
+            .get_history_snapshot_ro(transaction_id)
+            .map_err(TransactionError::Storage)?
+            .ok_or(TransactionError::Storage(
+                StorageError::HistorySnapshotNotFound(transaction_id),
+            ))?;
+        let user_root = snapshot.user_root();
         let guard = self.allocate_read_transaction()?;
-        let snapshot = {
-            let txn = self.begin_write()?;
-            let snap = txn.get_history_snapshot(transaction_id)?;
-            txn.abort()?;
-            snap
-        };
-        let snapshot = snapshot.ok_or(TransactionError::Storage(
-            StorageError::HistorySnapshotNotFound(transaction_id),
-        ))?;
-        ReadTransaction::new_historical(self.mem.clone(), guard, snapshot.user_root())
+        drop(lookup_txn);
+        ReadTransaction::new_historical(self.mem.clone(), guard, user_root)
     }
 
     /// Begin a read transaction at the latest snapshot whose timestamp is <= the given
@@ -1878,24 +1888,25 @@ impl Database {
         &self,
         timestamp_ms: u64,
     ) -> Result<ReadTransaction, TransactionError> {
-        let (best_id, best_root) = {
-            let txn = self.begin_write()?;
-            let ids = txn.list_history_snapshot_ids()?;
-            let mut best: Option<(u64, Option<BtreeHeader>)> = None;
-            for id in ids {
-                if let Some(snap) = txn.get_history_snapshot(id)?
-                    && snap.timestamp_ms() <= timestamp_ms
-                {
-                    best = Some((id, snap.user_root()));
-                }
+        let lookup_txn = self.begin_read()?;
+        let ids = lookup_txn
+            .list_history_snapshot_ids_ro()
+            .map_err(TransactionError::Storage)?;
+        let mut best: Option<Option<BtreeHeader>> = None;
+        for id in ids {
+            if let Some(snap) = lookup_txn
+                .get_history_snapshot_ro(id)
+                .map_err(TransactionError::Storage)?
+                && snap.timestamp_ms() <= timestamp_ms
+            {
+                best = Some(snap.user_root());
             }
-            txn.abort()?;
-            best.ok_or(TransactionError::Storage(
-                StorageError::HistorySnapshotNotFound(timestamp_ms),
-            ))?
-        };
+        }
+        let best_root = best.ok_or(TransactionError::Storage(
+            StorageError::HistorySnapshotNotFound(timestamp_ms),
+        ))?;
         let guard = self.allocate_read_transaction()?;
-        let _ = best_id;
+        drop(lookup_txn);
         ReadTransaction::new_historical(self.mem.clone(), guard, best_root)
     }
 
@@ -1903,18 +1914,22 @@ impl Database {
     ///
     /// Returns entries ordered by transaction ID (ascending).
     pub fn transaction_history(&self) -> Result<Vec<TransactionInfo>, TransactionError> {
-        let txn = self.begin_write()?;
-        let ids = txn.list_history_snapshot_ids()?;
+        let lookup_txn = self.begin_read()?;
+        let ids = lookup_txn
+            .list_history_snapshot_ids_ro()
+            .map_err(TransactionError::Storage)?;
         let mut result = Vec::with_capacity(ids.len());
         for id in ids {
-            if let Some(snap) = txn.get_history_snapshot(id)? {
+            if let Some(snap) = lookup_txn
+                .get_history_snapshot_ro(id)
+                .map_err(TransactionError::Storage)?
+            {
                 result.push(TransactionInfo {
                     transaction_id: id,
                     timestamp_ms: snap.timestamp_ms(),
                 });
             }
         }
-        txn.abort()?;
         Ok(result)
     }
 

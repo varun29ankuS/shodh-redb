@@ -2628,16 +2628,6 @@ impl WriteTransaction {
         Ok(ids)
     }
 
-    pub(crate) fn get_history_snapshot(
-        &self,
-        transaction_id: u64,
-    ) -> Result<Option<HistorySnapshot>> {
-        let mut system_tables = self.system_tables.lock();
-        let history_table = system_tables.open_system_table(self, HISTORY_TABLE)?;
-        let result = history_table.get(&transaction_id)?;
-        Ok(result.map(|guard| guard.value()))
-    }
-
     pub(crate) fn purge_all_history_snapshots(&self) -> Result {
         let mut system_tables = self.system_tables.lock();
         let mut history_table = system_tables.open_system_table(self, HISTORY_TABLE)?;
@@ -3437,6 +3427,30 @@ impl ReadTransaction {
                     .into_storage_error_or_corrupted("Internal error: blob system table corrupted"))
             }
         }
+    }
+
+    /// Look up a single history snapshot by transaction ID (read-only).
+    pub(crate) fn get_history_snapshot_ro(
+        &self,
+        transaction_id: u64,
+    ) -> Result<Option<HistorySnapshot>> {
+        let Some(btree) = self.open_system_btree(HISTORY_TABLE)? else {
+            return Ok(None);
+        };
+        Ok(btree.get(&transaction_id)?.map(|guard| guard.value()))
+    }
+
+    /// List all retained history snapshot IDs in ascending order (read-only).
+    pub(crate) fn list_history_snapshot_ids_ro(&self) -> Result<Vec<u64>> {
+        let Some(btree) = self.open_system_btree(HISTORY_TABLE)? else {
+            return Ok(Vec::new());
+        };
+        let mut ids = Vec::new();
+        for entry in btree.range::<core::ops::RangeFull, u64>(&(..))? {
+            let guard = entry?;
+            ids.push(guard.key());
+        }
+        Ok(ids)
     }
 
     /// Retrieve a blob's data and metadata by ID.

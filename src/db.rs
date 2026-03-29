@@ -399,32 +399,28 @@ impl TransactionGuard {
         }
     }
 
-    pub(crate) fn id(&self) -> TransactionId {
-        self.transaction_id.unwrap()
+    pub(crate) fn id(&self) -> Result<TransactionId, StorageError> {
+        self.transaction_id.ok_or_else(|| {
+            StorageError::Corrupted("TransactionGuard::id() called with no transaction_id".into())
+        })
     }
 
-    pub(crate) fn leak(mut self) -> TransactionId {
-        self.transaction_id.take().unwrap()
+    pub(crate) fn leak(mut self) -> Result<TransactionId, StorageError> {
+        self.transaction_id.take().ok_or_else(|| {
+            StorageError::Corrupted("TransactionGuard::leak() called with no transaction_id".into())
+        })
     }
 }
 
 impl Drop for TransactionGuard {
     fn drop(&mut self) {
-        if self.transaction_tracker.is_none() {
-            return;
-        }
-        if let Some(transaction_id) = self.transaction_id {
+        if let (Some(tracker), Some(transaction_id)) =
+            (self.transaction_tracker.as_ref(), self.transaction_id)
+        {
             if self.write_transaction {
-                let _ = self
-                    .transaction_tracker
-                    .as_ref()
-                    .unwrap()
-                    .end_write_transaction(transaction_id);
+                let _ = tracker.end_write_transaction(transaction_id);
             } else {
-                self.transaction_tracker
-                    .as_ref()
-                    .unwrap()
-                    .deallocate_read_transaction(transaction_id);
+                let _ = tracker.deallocate_read_transaction(transaction_id);
             }
         }
     }
@@ -634,7 +630,7 @@ impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
         let guard = self.allocate_read_transaction()?;
         #[cfg(feature = "logging")]
-        debug!("Beginning read transaction id={:?}", guard.id());
+        debug!("Beginning read transaction id={:?}", guard.id().ok());
         ReadTransaction::new(self.get_memory(), guard)
     }
 
@@ -1098,14 +1094,20 @@ impl Database {
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         let allocator_hash = self.mem.allocator_hash();
         let mut was_clean = Arc::get_mut(&mut self.mem)
-            .unwrap()
+            .ok_or_else(|| {
+                DatabaseError::Storage(StorageError::Corrupted(
+                    "check_integrity() requires exclusive database access, but other references to the memory exist".into(),
+                ))
+            })?
             .clear_cache_and_reload()?;
 
         let old_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
 
         let new_roots = Self::do_repair(&mut self.mem, &|_| {}).map_err(|err| match err {
             DatabaseError::Storage(storage_err) => storage_err,
-            _ => unreachable!(),
+            _ => StorageError::Corrupted(
+                "unexpected non-storage error during integrity check repair".to_string(),
+            ),
         })?;
 
         if old_roots != new_roots || allocator_hash != self.mem.allocator_hash() {
@@ -1136,6 +1138,7 @@ impl Database {
         if self
             .transaction_tracker
             .oldest_live_read_transaction()
+            .map_err(CompactionError::Storage)?
             .is_some()
         {
             return Err(CompactionError::TransactionInProgress);
@@ -1148,7 +1151,11 @@ impl Database {
         if txn.list_persistent_savepoints()?.next().is_some() {
             return Err(CompactionError::PersistentSavepointExists);
         }
-        if self.transaction_tracker.any_savepoint_exists() {
+        if self
+            .transaction_tracker
+            .any_savepoint_exists()
+            .map_err(CompactionError::Storage)?
+        {
             return Err(CompactionError::EphemeralSavepointExists);
         }
         txn.set_two_phase_commit(true);
@@ -1217,6 +1224,7 @@ impl Database {
         if self
             .transaction_tracker
             .oldest_live_read_transaction()
+            .map_err(CompactionError::Storage)?
             .is_some()
         {
             return Err(CompactionError::TransactionInProgress);
@@ -1229,7 +1237,11 @@ impl Database {
                 txn.abort().map_err(CompactionError::Storage)?;
                 return Err(CompactionError::PersistentSavepointExists);
             }
-            if self.transaction_tracker.any_savepoint_exists() {
+            if self
+                .transaction_tracker
+                .any_savepoint_exists()
+                .map_err(CompactionError::Storage)?
+            {
                 txn.abort().map_err(CompactionError::Storage)?;
                 return Err(CompactionError::EphemeralSavepointExists);
             }
@@ -1331,7 +1343,11 @@ impl Database {
             txn.abort().map_err(CompactionError::Storage)?;
             return Err(CompactionError::PersistentSavepointExists);
         }
-        if self.transaction_tracker.any_savepoint_exists() {
+        if self
+            .transaction_tracker
+            .any_savepoint_exists()
+            .map_err(CompactionError::Storage)?
+        {
             txn.abort().map_err(CompactionError::Storage)?;
             return Err(CompactionError::EphemeralSavepointExists);
         }
@@ -1426,7 +1442,9 @@ impl Database {
             .map_err(|e| e.into_storage_error_or_corrupted("Allocated pages table corrupted"))?
         {
             let InternalTableDefinition::Normal { table_root, .. } = table_def else {
-                unreachable!()
+                return Err(StorageError::Corrupted(
+                    "unexpected non-normal table type for allocated pages table".to_string(),
+                ));
             };
             let table: ReadOnlyTable<TransactionIdWithPagination, PageList> =
                 ReadOnlyTable::new_uncompressed(
@@ -1477,7 +1495,11 @@ impl Database {
         if let Some(definition) = result {
             let table_root = match definition {
                 InternalTableDefinition::Normal { table_root, .. } => table_root,
-                InternalTableDefinition::Multimap { .. } => unreachable!(),
+                InternalTableDefinition::Multimap { .. } => {
+                    return Err(StorageError::Corrupted(
+                        "unexpected multimap table type in freed tree lookup".to_string(),
+                    ));
+                }
             };
             let table: ReadOnlyTable<TransactionIdWithPagination, PageList<'static>> =
                 ReadOnlyTable::new_uncompressed(
@@ -1700,27 +1722,33 @@ impl Database {
         let txn = db.begin_write().map_err(|e| e.into_storage_error())?;
         if let Some(next_id) = txn.next_persistent_savepoint_id()? {
             db.transaction_tracker
-                .restore_savepoint_counter_state(next_id);
+                .restore_savepoint_counter_state(next_id)?;
         }
         for id in txn.list_persistent_savepoints()? {
             let savepoint = match txn.get_persistent_savepoint(id) {
                 Ok(savepoint) => savepoint,
                 Err(err) => match err {
-                    SavepointError::InvalidSavepoint => unreachable!(),
+                    SavepointError::InvalidSavepoint => {
+                        return Err(StorageError::Corrupted(
+                            "invalid savepoint encountered during database initialization"
+                                .to_string(),
+                        )
+                        .into());
+                    }
                     SavepointError::Storage(storage) => {
                         return Err(storage.into());
                     }
                 },
             };
             db.transaction_tracker
-                .register_persistent_savepoint(&savepoint);
+                .register_persistent_savepoint(&savepoint)?;
         }
         // Restore history holds for retained snapshots
         let history_ids = txn.list_history_snapshot_ids()?;
         if history_retention > 0 {
             for id in &history_ids {
                 db.transaction_tracker
-                    .register_history_hold(TransactionId::new(*id));
+                    .register_history_hold(TransactionId::new(*id))?;
             }
         }
         txn.abort()?;
@@ -1762,7 +1790,9 @@ impl Database {
 
         // Load the allocator state table
         let InternalTableDefinition::Normal { table_root, .. } = allocator_state_table else {
-            unreachable!();
+            return Err(StorageError::Corrupted(
+                "unexpected non-normal table type for allocator state table".to_string(),
+            ));
         };
         let tree = Btree::new_uncompressed(
             table_root,

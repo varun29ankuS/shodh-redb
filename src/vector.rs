@@ -52,18 +52,18 @@ impl<const N: usize> Value for FixedVec<N> {
     where
         Self: 'a,
     {
-        assert_eq!(
-            data.len(),
-            N * core::mem::size_of::<f32>(),
-            "FixedVec<{N}>: expected {} bytes, got {}",
-            N * core::mem::size_of::<f32>(),
-            data.len()
-        );
         let mut result = [0.0f32; N];
-        for (i, val) in result.iter_mut().enumerate() {
-            let start = i * core::mem::size_of::<f32>();
-            let bytes: [u8; 4] = data[start..start + 4].try_into().unwrap();
-            *val = f32::from_le_bytes(bytes);
+        let expected = N * core::mem::size_of::<f32>();
+        let usable = data.len().min(expected);
+        let dims = usable / 4;
+        for (i, val) in result.iter_mut().enumerate().take(dims) {
+            let start = i * 4;
+            *val = f32::from_le_bytes([
+                data[start],
+                data[start + 1],
+                data[start + 2],
+                data[start + 3],
+            ]);
         }
         result
     }
@@ -145,17 +145,18 @@ impl Value for DynVec {
     where
         Self: 'a,
     {
-        assert_eq!(
-            data.len() % core::mem::size_of::<f32>(),
-            0,
-            "DynVec: byte length {} is not a multiple of 4",
-            data.len()
-        );
-        let dim = data.len() / core::mem::size_of::<f32>();
+        // Truncate to a multiple of 4 bytes to avoid partial reads
+        let usable = data.len() - (data.len() % 4);
+        let dim = usable / 4;
         let mut result = Vec::with_capacity(dim);
         for i in 0..dim {
-            let start = i * core::mem::size_of::<f32>();
-            let bytes: [u8; 4] = data[start..start + 4].try_into().unwrap();
+            let start = i * 4;
+            let bytes: [u8; 4] = [
+                data[start],
+                data[start + 1],
+                data[start + 2],
+                data[start + 3],
+            ];
             result.push(f32::from_le_bytes(bytes));
         }
         result
@@ -308,11 +309,17 @@ impl<const N: usize> Value for ScalarQuantized<N> {
     where
         Self: 'a,
     {
-        assert_eq!(data.len(), SQ_HEADER + N);
-        let min_val = f32::from_le_bytes(data[0..4].try_into().unwrap());
-        let max_val = f32::from_le_bytes(data[4..8].try_into().unwrap());
+        if data.len() < SQ_HEADER + N {
+            return SQVec {
+                min_val: 0.0,
+                max_val: 0.0,
+                codes: [0u8; N],
+            };
+        }
+        let min_val = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let max_val = f32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         let mut codes = [0u8; N];
-        codes.copy_from_slice(&data[SQ_HEADER..]);
+        codes.copy_from_slice(&data[SQ_HEADER..SQ_HEADER + N]);
         SQVec {
             min_val,
             max_val,

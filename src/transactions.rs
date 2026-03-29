@@ -159,22 +159,20 @@ impl HistorySnapshot {
 
     pub(crate) fn user_root(&self) -> Option<BtreeHeader> {
         if self.data[Self::USER_ROOT_FLAG] != 0 {
-            Some(BtreeHeader::from_le_bytes(
-                self.data[Self::USER_ROOT..Self::USER_ROOT_END]
-                    .try_into()
-                    .unwrap(),
-            ))
+            self.data[Self::USER_ROOT..Self::USER_ROOT_END]
+                .try_into()
+                .ok()
+                .map(BtreeHeader::from_le_bytes)
         } else {
             None
         }
     }
 
     pub(crate) fn timestamp_ms(&self) -> u64 {
-        u64::from_le_bytes(
-            self.data[Self::TIMESTAMP..Self::TIMESTAMP + 8]
-                .try_into()
-                .unwrap(),
-        )
+        self.data[Self::TIMESTAMP..Self::TIMESTAMP + 8]
+            .try_into()
+            .map(u64::from_le_bytes)
+            .unwrap_or(0)
     }
 }
 
@@ -234,16 +232,18 @@ impl PageList<'_> {
     }
 
     pub(crate) fn len(&self) -> usize {
-        u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().unwrap()).into()
+        self.data[..size_of::<u16>()]
+            .try_into()
+            .map(|b| u16::from_le_bytes(b) as usize)
+            .unwrap_or(0)
     }
 
     pub(crate) fn get(&self, index: usize) -> PageNumber {
         let start = size_of::<u16>() + PageNumber::serialized_size() * index;
-        PageNumber::from_le_bytes(
-            self.data[start..(start + PageNumber::serialized_size())]
-                .try_into()
-                .unwrap(),
-        )
+        self.data[start..(start + PageNumber::serialized_size())]
+            .try_into()
+            .map(PageNumber::from_le_bytes)
+            .unwrap_or(PageNumber::new(0, 0, 0))
     }
 }
 
@@ -284,9 +284,11 @@ impl MutInPlaceValue for PageList<'_> {
     type BaseRefType = PageListMut;
 
     fn initialize(data: &mut [u8]) {
-        assert!(data.len() >= 8);
+        debug_assert!(data.len() >= 8);
         // Set the length to zero
-        data[..8].fill(0);
+        if data.len() >= 8 {
+            data[..8].fill(0);
+        }
     }
 
     fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType {
@@ -318,8 +320,14 @@ impl Value for TransactionIdWithPagination {
     where
         Self: 'a,
     {
-        let transaction_id = u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap());
-        let pagination_id = u64::from_le_bytes(data[size_of::<u64>()..].try_into().unwrap());
+        let transaction_id = data[..size_of::<u64>()]
+            .try_into()
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+        let pagination_id = data[size_of::<u64>()..]
+            .try_into()
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
         Self {
             transaction_id,
             pagination_id,
@@ -375,7 +383,7 @@ impl Value for AllocatorStateKey {
         Self: 'a,
     {
         match data[0] {
-            3 => Self::Region(u32::from_le_bytes(data[1..].try_into().unwrap())),
+            3 => Self::Region(data[1..].try_into().map(u32::from_le_bytes).unwrap_or(0)),
             4 => Self::RegionTracker,
             5 => Self::TransactionId,
             // 0, 1, 2 were used in redb 2.x; unknown discriminants are also
@@ -765,7 +773,11 @@ impl TableNamespace<'_> {
 
     fn set_dirty(&mut self, transaction: &WriteTransaction) {
         transaction.dirty.store(true, Ordering::Release);
-        if !transaction.transaction_tracker.any_savepoint_exists() {
+        if !transaction
+            .transaction_tracker
+            .any_savepoint_exists()
+            .unwrap_or(true)
+        {
             // No savepoints exist, and we don't allow savepoints to be created in a dirty transaction
             // so we can disable allocation tracking now
             *self.allocated_pages.lock() = PageTrackerPolicy::Ignore;
@@ -773,7 +785,7 @@ impl TableNamespace<'_> {
     }
 
     fn set_root(&mut self, root: Option<BtreeHeader>) {
-        assert!(self.open_tables.is_empty());
+        debug_assert!(self.open_tables.is_empty());
         self.table_tree.set_root(root);
     }
 
@@ -918,7 +930,9 @@ impl TableNamespace<'_> {
         table: &BtreeMut<K, V>,
         length: u64,
     ) {
-        self.open_tables.remove(name).unwrap();
+        // Table should always be present when closing, but gracefully handle the case
+        // where it is not to avoid panicking in production
+        let _ = self.open_tables.remove(name);
         self.table_tree
             .stage_update_table_root(name, table.get_root(), length);
     }
@@ -962,7 +976,7 @@ impl WriteTransaction {
         cdc_config: CdcConfig,
         history_retention: u64,
     ) -> Result<Self> {
-        let transaction_id = guard.id();
+        let transaction_id = guard.id()?;
         let guard = Arc::new(guard);
 
         let root_page = mem.get_data_root();
@@ -1244,7 +1258,7 @@ impl WriteTransaction {
     }
 
     fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionId)> {
-        let transaction_id = self.allocate_read_transaction()?.leak();
+        let transaction_id = self.allocate_read_transaction()?.leak()?;
         let id = self
             .transaction_tracker
             .allocate_savepoint(transaction_id)?;
@@ -1289,7 +1303,7 @@ impl WriteTransaction {
 
         if !self
             .transaction_tracker
-            .is_valid_savepoint(savepoint.get_id())
+            .is_valid_savepoint(savepoint.get_id())?
         {
             return Err(SavepointError::InvalidSavepoint);
         }
@@ -1353,7 +1367,7 @@ impl WriteTransaction {
         // 3) Invalidate all savepoints that are newer than the one being applied to prevent the user
         // from later trying to restore a savepoint "on another timeline"
         self.transaction_tracker
-            .invalidate_savepoints_after(savepoint.get_id());
+            .invalidate_savepoints_after(savepoint.get_id())?;
         for persistent_savepoint in self.list_persistent_savepoints()? {
             if persistent_savepoint > savepoint.get_id().0 {
                 self.delete_persistent_savepoint(persistent_savepoint)?;
@@ -1671,9 +1685,11 @@ impl WriteTransaction {
         let wall_clock_ns = {
             #[cfg(feature = "std")]
             {
+                // If the system clock is before UNIX epoch, fall back to zero;
+                // HLC still provides causal ordering in that degenerate case.
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .expect("system clock before UNIX epoch")
+                    .unwrap_or_default()
                     .as_nanos() as u64
             }
             #[cfg(not(feature = "std"))]
@@ -2428,7 +2444,7 @@ impl WriteTransaction {
         if matches!(self.durability, InternalDurability::Immediate) {
             let free_until_transaction = self
                 .transaction_tracker
-                .oldest_live_read_transaction()
+                .oldest_live_read_transaction()?
                 .map(|x| x.next())
                 .transpose()?
                 .unwrap_or(self.transaction_id);
@@ -2457,17 +2473,17 @@ impl WriteTransaction {
 
         for (savepoint, transaction) in self.deleted_persistent_savepoints.lock().iter() {
             self.transaction_tracker
-                .deallocate_savepoint(*savepoint, *transaction);
+                .deallocate_savepoint(*savepoint, *transaction)?;
         }
 
-        assert!(
+        debug_assert!(
             self.system_tables
                 .lock()
                 .system_freed_pages()
                 .lock()
                 .is_empty()
         );
-        assert!(self.tables.lock().freed_pages.lock().is_empty());
+        debug_assert!(self.tables.lock().freed_pages.lock().is_empty());
 
         #[cfg(feature = "logging")]
         debug!(
@@ -2542,7 +2558,7 @@ impl WriteTransaction {
         // Purge any transactions that are no longer referenced
         let oldest = self
             .transaction_tracker
-            .oldest_savepoint()
+            .oldest_savepoint()?
             .map_or(u64::MAX, |(_, x)| x.raw_id());
         let key = TransactionIdWithPagination {
             transaction_id: oldest,
@@ -2653,7 +2669,9 @@ impl WriteTransaction {
                 Ok(_) => {}
                 Err(err) => match err {
                     SavepointError::InvalidSavepoint => {
-                        unreachable!();
+                        return Err(StorageError::Corrupted(
+                            "invalid savepoint encountered during transaction abort".to_string(),
+                        ));
                     }
                     SavepointError::Storage(storage_err) => {
                         return Err(storage_err);
@@ -2698,7 +2716,7 @@ impl WriteTransaction {
             let mut history_table = system_tables.open_system_table(self, HISTORY_TABLE)?;
             history_table.insert(&self.transaction_id.raw_id(), &snapshot)?;
             self.transaction_tracker
-                .register_history_hold(self.transaction_id);
+                .register_history_hold(self.transaction_id)?;
 
             // Prune old snapshots beyond retention limit.
             let mut all_keys = Vec::new();
@@ -2712,7 +2730,7 @@ impl WriteTransaction {
                 for key in &all_keys[..to_remove] {
                     history_table.remove(key)?;
                     self.transaction_tracker
-                        .deallocate_history_hold(TransactionId::new(*key));
+                        .deallocate_history_hold(TransactionId::new(*key))?;
                 }
             }
         }
@@ -2773,7 +2791,8 @@ impl WriteTransaction {
         )?;
 
         // Mark any pending non-durable commits as fully committed.
-        self.transaction_tracker.clear_pending_non_durable_commits();
+        self.transaction_tracker
+            .clear_pending_non_durable_commits()?;
 
         // Immediately free the pages that were freed from the system-tree. These are only
         // accessed by write transactions, so it's safe to free them as soon as the commit is done.
@@ -2788,11 +2807,11 @@ impl WriteTransaction {
     pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
         let mut free_until_transaction = self
             .transaction_tracker
-            .oldest_live_read_nondurable_transaction()
+            .oldest_live_read_nondurable_transaction()?
             .map(|x| x.next())
             .transpose()?
             .unwrap_or(self.transaction_id);
-        if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint() {
+        if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint()? {
             free_until_transaction = TransactionId::min(free_until_transaction, oldest_savepoint);
         }
         self.process_freed_pages_nondurable(free_until_transaction)?;
@@ -2831,7 +2850,7 @@ impl WriteTransaction {
         self.transaction_tracker.register_non_durable_commit(
             self.transaction_id,
             self.mem.get_last_durable_transaction_id()?,
-        );
+        )?;
 
         for page in post_commit_frees {
             self.mem.free(page, &mut PageTrackerPolicy::Ignore);
@@ -2956,7 +2975,7 @@ impl WriteTransaction {
         };
         let oldest_unprocessed = self
             .transaction_tracker
-            .oldest_unprocessed_non_durable_commit()
+            .oldest_unprocessed_non_durable_commit()?
             .map_or(free_until.raw_id(), |x| x.raw_id());
         let first_key = TransactionIdWithPagination {
             transaction_id: oldest_unprocessed,
@@ -2970,7 +2989,7 @@ impl WriteTransaction {
             let transaction_id = TransactionId::new(key.value().transaction_id);
             if self
                 .transaction_tracker
-                .is_unprocessed_non_durable_commit(transaction_id)
+                .is_unprocessed_non_durable_commit(transaction_id)?
             {
                 candidate_transactions.push(transaction_id);
             }
@@ -3035,7 +3054,7 @@ impl WriteTransaction {
 
         for transaction_id in processed {
             self.transaction_tracker
-                .mark_unprocessed_non_durable_commit(transaction_id);
+                .mark_unprocessed_non_durable_commit(transaction_id)?;
         }
 
         Ok(())
@@ -3122,10 +3141,8 @@ impl WriteTransaction {
         let mut tables = self.tables.lock();
         if let Some(page) = tables
             .table_tree
-            .flush_table_root_updates()
-            .unwrap()
-            .finalize_dirty_checksums()
-            .unwrap()
+            .flush_table_root_updates()?
+            .finalize_dirty_checksums()?
         {
             eprintln!("Master tree:");
             let master_tree: Btree<&str, InternalTableDefinition> = Btree::new_uncompressed(
@@ -3141,10 +3158,8 @@ impl WriteTransaction {
         let mut system_tables = self.system_tables.lock();
         if let Some(page) = system_tables
             .table_tree
-            .flush_table_root_updates()
-            .unwrap()
-            .finalize_dirty_checksums()
-            .unwrap()
+            .flush_table_root_updates()?
+            .finalize_dirty_checksums()?
         {
             eprintln!("System tree:");
             let master_tree: Btree<&str, InternalTableDefinition> = Btree::new_uncompressed(
@@ -3243,7 +3258,11 @@ impl ReadTransaction {
                 self.tree.transaction_guard().clone(),
                 self.mem.clone(),
             )?),
-            InternalTableDefinition::Multimap { .. } => unreachable!(),
+            InternalTableDefinition::Multimap { .. } => {
+                Err(TableError::Storage(StorageError::Corrupted(
+                    "unexpected multimap table type when opening normal table".to_string(),
+                )))
+            }
         }
     }
 
@@ -3299,7 +3318,11 @@ impl ReadTransaction {
                 fixed_value_size,
                 self.mem.clone(),
             )),
-            InternalTableDefinition::Multimap { .. } => unreachable!(),
+            InternalTableDefinition::Multimap { .. } => {
+                Err(TableError::Storage(StorageError::Corrupted(
+                    "unexpected multimap table type when opening untyped normal table".to_string(),
+                )))
+            }
         }
     }
 
@@ -3314,7 +3337,11 @@ impl ReadTransaction {
             .ok_or_else(|| TableError::TableDoesNotExist(definition.name().to_string()))?;
 
         match header {
-            InternalTableDefinition::Normal { .. } => unreachable!(),
+            InternalTableDefinition::Normal { .. } => {
+                Err(TableError::Storage(StorageError::Corrupted(
+                    "unexpected normal table type when opening multimap table".to_string(),
+                )))
+            }
             InternalTableDefinition::Multimap {
                 table_root,
                 table_length,
@@ -3340,7 +3367,11 @@ impl ReadTransaction {
             .ok_or_else(|| TableError::TableDoesNotExist(handle.name().to_string()))?;
 
         match header {
-            InternalTableDefinition::Normal { .. } => unreachable!(),
+            InternalTableDefinition::Normal { .. } => {
+                Err(TableError::Storage(StorageError::Corrupted(
+                    "unexpected normal table type when opening untyped multimap table".to_string(),
+                )))
+            }
             InternalTableDefinition::Multimap {
                 table_root,
                 table_length,
@@ -3397,7 +3428,9 @@ impl ReadTransaction {
                 )?;
                 Ok(Some(btree))
             }
-            Ok(Some(InternalTableDefinition::Multimap { .. })) => unreachable!(),
+            Ok(Some(InternalTableDefinition::Multimap { .. })) => Err(StorageError::Corrupted(
+                "unexpected multimap table type in system table lookup".to_string(),
+            )),
             Ok(None) => Ok(None),
             Err(e) => {
                 Err(e

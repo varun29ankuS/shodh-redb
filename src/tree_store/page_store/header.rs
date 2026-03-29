@@ -95,11 +95,19 @@ const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
 pub(crate) const PAGE_SIZE: usize = 4096;
 
 fn get_u32(data: &[u8]) -> u32 {
-    u32::from_le_bytes(data[..size_of::<u32>()].try_into().unwrap())
+    if data.len() < size_of::<u32>() {
+        return 0;
+    }
+    u32::from_le_bytes([data[0], data[1], data[2], data[3]])
 }
 
 fn get_u64(data: &[u8]) -> u64 {
-    u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap())
+    if data.len() < size_of::<u64>() {
+        return 0;
+    }
+    u64::from_le_bytes([
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+    ])
 }
 
 #[derive(Copy, Clone)]

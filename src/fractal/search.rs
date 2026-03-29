@@ -175,6 +175,9 @@ pub(crate) fn search_write(
             let (key, val) = entry?;
             let vid = key.value().vector_id;
             let bytes = val.value();
+            if bytes.len() < dim * 4 {
+                continue;
+            }
             let vec: Vec<f32> = (0..dim)
                 .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                 .collect();
@@ -196,6 +199,13 @@ pub(crate) fn search_write(
         for c in &candidates {
             if let Some(g) = vtbl.get(c.key)? {
                 let bytes = g.value();
+                if bytes.len() < dim * 4 {
+                    reranked.push(Neighbor {
+                        key: c.key,
+                        distance: c.distance,
+                    });
+                    continue;
+                }
                 let vec: Vec<f32> = (0..dim)
                     .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                     .collect();
@@ -292,6 +302,9 @@ pub(crate) fn search_read(
             let (key, val) = entry?;
             let vid = key.value().vector_id;
             let bytes = val.value();
+            if bytes.len() < dim * 4 {
+                continue;
+            }
             let vec: Vec<f32> = (0..dim)
                 .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                 .collect();
@@ -312,6 +325,13 @@ pub(crate) fn search_read(
         for c in &candidates {
             if let Some(g) = vtbl.get(c.key)? {
                 let bytes = g.value();
+                if bytes.len() < dim * 4 {
+                    reranked.push(Neighbor {
+                        key: c.key,
+                        distance: c.distance,
+                    });
+                    continue;
+                }
                 let vec: Vec<f32> = (0..dim)
                     .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                     .collect();
@@ -412,6 +432,9 @@ fn beam_search_leaves_write(
 
                 if let Some(cg) = ctbl.get(child_id)? {
                     let bytes = cg.value();
+                    if bytes.len() < dim * 4 {
+                        continue;
+                    }
                     let centroid: Vec<f32> = (0..dim)
                         .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                         .collect();
@@ -534,6 +557,9 @@ fn beam_search_leaves_read(
 
                 if let Some(cg) = ctbl.get(child_id)? {
                     let bytes = cg.value();
+                    if bytes.len() < dim * 4 {
+                        continue;
+                    }
                     let centroid: Vec<f32> = (0..dim)
                         .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                         .collect();

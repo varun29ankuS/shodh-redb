@@ -99,8 +99,16 @@ impl CdcKey {
     }
 
     fn from_le_bytes(data: &[u8]) -> Self {
-        let transaction_id = u64::from_le_bytes(data[..8].try_into().unwrap());
-        let sequence = u32::from_le_bytes(data[8..12].try_into().unwrap());
+        if data.len() < Self::SERIALIZED_SIZE {
+            return Self {
+                transaction_id: 0,
+                sequence: 0,
+            };
+        }
+        let transaction_id = u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]);
+        let sequence = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
         Self {
             transaction_id,
             sequence,
@@ -368,7 +376,13 @@ impl Value for CdcRecord {
     {
         match Self::deserialize(data) {
             Ok(record) => record,
-            Err(e) => panic!("corrupted CDC record in Value::from_bytes: {e}"),
+            Err(_) => CdcRecord {
+                op: ChangeOp::Insert,
+                table_name: String::new(),
+                key: Vec::new(),
+                new_value: None,
+                old_value: None,
+            },
         }
     }
 

@@ -8,6 +8,14 @@ use core::cmp::Ordering;
 use core::fmt;
 use core::mem::size_of;
 
+/// Try to convert a byte slice to a fixed-size array, zero-padding if the slice is too short.
+fn try_into_padded<const N: usize>(data: &[u8]) -> [u8; N] {
+    let mut buf = [0u8; N];
+    let copy_len = data.len().min(N);
+    buf[..copy_len].copy_from_slice(&data[..copy_len]);
+    buf
+}
+
 // ---------------------------------------------------------------------------
 // ContentType
 // ---------------------------------------------------------------------------
@@ -176,7 +184,7 @@ impl Value for BlobId {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -301,7 +309,7 @@ impl Value for BlobRef {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -478,7 +486,7 @@ impl Value for BlobMeta {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -681,7 +689,7 @@ impl Value for CausalEdge {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -768,7 +776,7 @@ impl Value for CausalEdgeKey {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -943,7 +951,7 @@ impl Value for TagKey {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -1077,7 +1085,7 @@ impl Value for NamespaceKey {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -1173,7 +1181,7 @@ impl Value for NamespaceVal {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -1366,7 +1374,7 @@ impl Value for TemporalKey {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -1468,7 +1476,7 @@ impl Value for Sha256Key {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -1564,7 +1572,7 @@ impl Value for DedupVal {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>

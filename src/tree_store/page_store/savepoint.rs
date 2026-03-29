@@ -79,7 +79,8 @@ impl Savepoint {
 impl Drop for Savepoint {
     fn drop(&mut self) {
         if self.ephemeral {
-            self.transaction_tracker
+            let _ = self
+                .transaction_tracker
                 .deallocate_savepoint(self.get_id(), self.get_transaction_id());
         }
     }

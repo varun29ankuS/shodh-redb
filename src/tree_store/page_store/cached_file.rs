@@ -3,6 +3,7 @@ use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
 use crate::{CacheStats, DatabaseError, Result, StorageBackend, StorageError};
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -24,7 +25,7 @@ impl WritablePage {
     }
 
     pub(super) fn mem_mut(&mut self) -> core::result::Result<&mut [u8], StorageError> {
-        Arc::get_mut(&mut self.data).ok_or(StorageError::Corrupted(alloc::string::String::from(
+        Arc::get_mut(&mut self.data).ok_or(StorageError::Corrupted(String::from(
             "WritablePage::mem_mut() called while other Arc references exist",
         )))
     }
@@ -48,9 +49,17 @@ impl<I: SliceIndex<[u8]>> Index<I> for WritablePage {
 
 impl<I: SliceIndex<[u8]>> IndexMut<I> for WritablePage {
     fn index_mut(&mut self, index: I) -> &mut Self::Output {
-        Arc::get_mut(&mut self.data)
-            .expect("WritablePage::index_mut() called while other Arc references exist")
-            .index_mut(index)
+        // IndexMut cannot return Result. In correct code WritablePage holds the
+        // sole Arc reference, making get_mut infallible. We keep the panic as a
+        // last-resort guard because the trait signature offers no alternative.
+        debug_assert!(
+            Arc::strong_count(&self.data) == 1,
+            "WritablePage::index_mut() requires exclusive Arc ownership"
+        );
+        match Arc::get_mut(&mut self.data) {
+            Some(data) => data.index_mut(index),
+            None => panic!("WritablePage::index_mut() called while other Arc references exist"),
+        }
     }
 }
 
@@ -67,29 +76,48 @@ impl LRUWriteCache {
     }
 
     fn insert(&mut self, key: u64, value: Arc<[u8]>) {
-        assert!(self.cache.insert(key, Some(value)).is_none());
+        let prev = self.cache.insert(key, Some(value));
+        debug_assert!(
+            prev.is_none(),
+            "LRUWriteCache::insert() duplicate key {key}"
+        );
     }
 
     fn get(&self, key: u64) -> Option<&Arc<[u8]>> {
-        self.cache.get(key).map(|x| x.as_ref().unwrap())
+        self.cache.get(key).and_then(|x| x.as_ref())
     }
 
     fn remove(&mut self, key: u64) -> Option<Arc<[u8]>> {
         if let Some(value) = self.cache.remove(key) {
-            assert!(value.is_some());
+            debug_assert!(
+                value.is_some(),
+                "LRUWriteCache::remove() found None value for key {key}"
+            );
             return value;
         }
         None
     }
 
     fn return_value(&mut self, key: u64, value: Arc<[u8]>) {
-        assert!(self.cache.get_mut(key).unwrap().replace(value).is_none());
+        // Called from Drop, which cannot propagate errors. The entry must exist
+        // (it was inserted before take_value) and its slot must be None (taken).
+        if let Some(slot) = self.cache.get_mut(key) {
+            let prev = slot.replace(value);
+            debug_assert!(
+                prev.is_none(),
+                "LRUWriteCache::return_value() slot was not empty for key {key}"
+            );
+        } else {
+            debug_assert!(
+                false,
+                "LRUWriteCache::return_value() key {key} not found in cache"
+            );
+        }
     }
 
     fn take_value(&mut self, key: u64) -> Option<Arc<[u8]>> {
         if let Some(value) = self.cache.get_mut(key) {
-            let result = value.take().unwrap();
-            return Some(result);
+            return value.take();
         }
         None
     }
@@ -312,7 +340,8 @@ impl PagedCachedFile {
     /// Returns the number of bytes actually freed.
     fn evict_read_cache_global(&self, bytes_to_free: usize) -> usize {
         let mut freed = 0usize;
-        let num_stripes: usize = Self::lock_stripes().try_into().unwrap();
+        #[allow(clippy::cast_possible_truncation)] // lock_stripes() == 131, always fits in usize
+        let num_stripes: usize = Self::lock_stripes() as usize;
         for stripe in 0..num_stripes {
             if freed >= bytes_to_free {
                 break;
@@ -352,21 +381,37 @@ impl PagedCachedFile {
         131
     }
 
+    /// Returns `(offset % lock_stripes())` as a `usize` cache-slot index.
+    /// Safe because `lock_stripes()` is 131, so the result always fits in a `usize`.
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    fn cache_slot(offset: u64) -> usize {
+        (offset % Self::lock_stripes()) as usize
+    }
+
     fn flush_write_buffer(&self) -> Result {
         let mut write_buffer = self.write_buffer.lock();
 
         for (offset, buffer) in write_buffer.cache.iter() {
-            let raw = buffer.as_ref().unwrap();
+            let raw = buffer.as_ref().ok_or_else(|| {
+                StorageError::Corrupted(String::from(
+                    "flush_write_buffer: write cache entry has no data",
+                ))
+            })?;
             self.file.write(*offset, raw)?;
         }
         for (offset, buffer) in write_buffer.cache.iter_mut() {
-            let buffer = buffer.take().unwrap();
+            let buffer = buffer.take().ok_or_else(|| {
+                StorageError::Corrupted(String::from(
+                    "flush_write_buffer: write cache entry has no data during promotion",
+                ))
+            })?;
             let cache_size = self
                 .read_cache_bytes
                 .fetch_add(buffer.len(), Ordering::AcqRel);
 
             if cache_size + buffer.len() <= self.max_read_cache_bytes {
-                let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+                let cache_slot: usize = Self::cache_slot(*offset);
                 let mut lock = self.read_cache[cache_slot].write();
                 if let Some(replaced) = lock.insert(*offset, buffer) {
                     // A race could cause us to replace an existing buffer
@@ -454,7 +499,7 @@ impl PagedCachedFile {
             }
         }
 
-        let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+        let cache_slot: usize = Self::cache_slot(offset);
         {
             let read_lock = self.read_cache[cache_slot].read();
             if let Some(cached) = read_lock.get(offset) {
@@ -519,7 +564,11 @@ impl PagedCachedFile {
 
     // Discard pending writes to the given range
     pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
-        assert_eq!(0, offset % self.page_size);
+        debug_assert_eq!(
+            0,
+            offset % self.page_size,
+            "cancel_pending_write: offset not page-aligned"
+        );
         if let Some(removed) = self.write_buffer.lock().remove(offset) {
             self.write_buffer_bytes
                 .fetch_sub(removed.len(), Ordering::Release);
@@ -530,10 +579,14 @@ impl PagedCachedFile {
     //
     // NOTE: Invalidating a cached region in subsections is permitted, as long as all subsections are invalidated
     pub(super) fn invalidate_cache(&self, offset: u64, len: usize) {
-        let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+        let cache_slot: usize = Self::cache_slot(offset);
         let mut lock = self.read_cache[cache_slot].write();
         if let Some(removed) = lock.remove(offset) {
-            assert_eq!(len, removed.len());
+            debug_assert_eq!(
+                len,
+                removed.len(),
+                "invalidate_cache: length mismatch for offset {offset}"
+            );
             self.read_cache_bytes
                 .fetch_sub(removed.len(), Ordering::AcqRel);
         }
@@ -552,20 +605,23 @@ impl PagedCachedFile {
     // If overwrite is true, the page is initialized to zero
     // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
     pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
-        assert_eq!(0, offset % self.page_size);
+        if offset % self.page_size != 0 {
+            return Err(StorageError::Corrupted(String::from(
+                "write: offset not page-aligned",
+            )));
+        }
         let mut lock = self.write_buffer.lock();
 
         // TODO: allow hint that page is known to be dirty and will not be in the read cache
-        let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+        let cache_slot: usize = Self::cache_slot(offset);
         let existing = {
             let mut lock = self.read_cache[cache_slot].write();
             if let Some(removed) = lock.remove(offset) {
-                assert_eq!(
-                    len,
-                    removed.len(),
-                    "cache inconsistency {len} != {} for offset {offset}",
-                    removed.len()
-                );
+                if len != removed.len() {
+                    return Err(StorageError::Corrupted(String::from(
+                        "write: cache inconsistency, length mismatch for cached page",
+                    )));
+                }
                 self.read_cache_bytes
                     .fetch_sub(removed.len(), Ordering::AcqRel);
                 Some(removed)
@@ -622,7 +678,11 @@ impl PagedCachedFile {
                 self.read_direct(offset, len)?.into()
             };
             lock.insert(offset, result);
-            lock.take_value(offset).unwrap()
+            lock.take_value(offset).ok_or_else(|| {
+                StorageError::Corrupted(String::from(
+                    "write: take_value failed immediately after insert",
+                ))
+            })?
         };
         #[cfg(feature = "cache_metrics")]
         self.writes_total.fetch_add(1, Ordering::AcqRel);

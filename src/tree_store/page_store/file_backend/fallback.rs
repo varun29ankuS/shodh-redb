@@ -35,7 +35,12 @@ impl StorageBackend for FileBackend {
     }
 
     fn read(&self, offset: u64, out: &mut [u8]) -> core::result::Result<(), BackendError> {
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file.lock().map_err(|_| {
+            BackendError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "mutex poisoned",
+            ))
+        })?;
         file.seek(SeekFrom::Start(offset))
             .map_err(BackendError::Io)?;
         file.read_exact(out).map_err(BackendError::Io)?;
@@ -59,7 +64,12 @@ impl StorageBackend for FileBackend {
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> core::result::Result<(), BackendError> {
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file.lock().map_err(|_| {
+            BackendError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "mutex poisoned",
+            ))
+        })?;
         file.seek(SeekFrom::Start(offset))
             .map_err(BackendError::Io)?;
         file.write_all(data).map_err(BackendError::Io)

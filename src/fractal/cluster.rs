@@ -187,6 +187,9 @@ pub(crate) fn split_cluster(
         for &vid in &vector_ids {
             if let Some(raw) = vtbl.get(vid)? {
                 let bytes = raw.value();
+                if bytes.len() < dim * 4 {
+                    continue;
+                }
                 for i in 0..dim {
                     let offset = i * 4;
                     flat_vectors.push(f32::from_le_bytes(
@@ -421,6 +424,9 @@ pub(crate) fn merge_cluster(
         match ctbl.get(cluster_id)? {
             Some(g) => {
                 let bytes = g.value();
+                if bytes.len() < dim * 4 {
+                    return Ok(None);
+                }
                 (0..dim)
                     .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                     .collect()
@@ -436,6 +442,9 @@ pub(crate) fn merge_cluster(
         for &sib in &siblings {
             if let Some(g) = ctbl.get(sib)? {
                 let bytes = g.value();
+                if bytes.len() < dim * 4 {
+                    continue;
+                }
                 let sib_centroid: Vec<f32> = (0..dim)
                     .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                     .collect();
@@ -642,6 +651,9 @@ pub(crate) fn cascade_leaf_buffer(
             let (key, val) = entry?;
             let vid = key.value().vector_id;
             let bytes = val.value();
+            if bytes.len() < dim * 4 {
+                continue;
+            }
             let vec: Vec<f32> = (0..dim)
                 .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
                 .collect();

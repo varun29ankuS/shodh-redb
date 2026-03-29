@@ -118,30 +118,71 @@ pub fn encode_fractal_config(cfg: &FractalIndexConfig) -> [u8; FRACTAL_CONFIG_SI
     buf
 }
 
+fn read_u16_le(data: &[u8], offset: usize) -> u16 {
+    if offset + 2 > data.len() {
+        return 0;
+    }
+    u16::from_le_bytes([data[offset], data[offset + 1]])
+}
+
+fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+    if offset + 4 > data.len() {
+        return 0;
+    }
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
+}
+
+fn read_u64_le(data: &[u8], offset: usize) -> u64 {
+    if offset + 8 > data.len() {
+        return 0;
+    }
+    u64::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+        data[offset + 4],
+        data[offset + 5],
+        data[offset + 6],
+        data[offset + 7],
+    ])
+}
+
+fn read_byte(data: &[u8], offset: usize) -> u8 {
+    if offset >= data.len() {
+        return 0;
+    }
+    data[offset]
+}
+
 pub fn decode_fractal_config(data: &[u8]) -> FractalIndexConfig {
-    let dim = u32::from_le_bytes(data[0..4].try_into().unwrap());
-    let num_subvectors = u32::from_le_bytes(data[4..8].try_into().unwrap());
-    let num_codewords = u16::from_le_bytes(data[8..10].try_into().unwrap());
-    let metric = match data[10] {
+    let dim = read_u32_le(data, 0);
+    let num_subvectors = read_u32_le(data, 4);
+    let num_codewords = read_u16_le(data, 8);
+    let metric = match read_byte(data, 10) {
         0 => DistanceMetric::Cosine,
         2 => DistanceMetric::DotProduct,
         3 => DistanceMetric::Manhattan,
         _ => DistanceMetric::EuclideanSq,
     };
-    let store_raw_vectors = data[11] != 0;
-    let default_nprobe = u32::from_le_bytes(data[12..16].try_into().unwrap());
-    let state = data[16];
-    let root_cluster_id = u32::from_le_bytes(data[20..24].try_into().unwrap());
-    let next_cluster_id = u32::from_le_bytes(data[24..28].try_into().unwrap());
-    let max_leaf_population = u32::from_le_bytes(data[28..32].try_into().unwrap());
-    let min_leaf_population = u32::from_le_bytes(data[32..36].try_into().unwrap());
-    let max_buffer_size = u32::from_le_bytes(data[36..40].try_into().unwrap());
-    let max_children = u32::from_le_bytes(data[40..44].try_into().unwrap());
-    let max_depth = u32::from_le_bytes(data[44..48].try_into().unwrap());
-    let num_vectors = u64::from_le_bytes(data[48..56].try_into().unwrap());
-    let num_clusters = u64::from_le_bytes(data[56..64].try_into().unwrap());
-    let variance_split_factor =
-        f32::from_bits(u32::from_le_bytes(data[64..68].try_into().unwrap()));
+    let store_raw_vectors = read_byte(data, 11) != 0;
+    let default_nprobe = read_u32_le(data, 12);
+    let state = read_byte(data, 16);
+    let root_cluster_id = read_u32_le(data, 20);
+    let next_cluster_id = read_u32_le(data, 24);
+    let max_leaf_population = read_u32_le(data, 28);
+    let min_leaf_population = read_u32_le(data, 32);
+    let max_buffer_size = read_u32_le(data, 36);
+    let max_children = read_u32_le(data, 40);
+    let max_depth = read_u32_le(data, 44);
+    let num_vectors = read_u64_le(data, 48);
+    let num_clusters = read_u64_le(data, 56);
+    let variance_split_factor = f32::from_bits(read_u32_le(data, 64));
 
     FractalIndexConfig {
         dim,

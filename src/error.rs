@@ -569,7 +569,7 @@ impl TransactionError {
     pub(crate) fn into_storage_error(self) -> StorageError {
         match self {
             TransactionError::Storage(storage) => storage,
-            _ => unreachable!(),
+            _ => StorageError::Corrupted(String::from("unexpected non-storage transaction error")),
         }
     }
 }

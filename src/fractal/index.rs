@@ -265,7 +265,11 @@ impl<'txn> FractalIndex<'txn> {
         }
 
         // Bulk-insert all training vectors into root cluster
-        let codebooks_ref = self.codebooks.as_ref().unwrap();
+        let codebooks_ref = self.codebooks.as_ref().ok_or_else(|| {
+            StorageError::Corrupted(
+                "fractal: codebooks not initialized after ensure_codebooks".to_string(),
+            )
+        })?;
         let postings_def = TableDefinition::<PostingKey, &[u8]>::new(&self.names.postings);
         let assignments_def = TableDefinition::<u64, u32>::new(&self.names.assignments);
         let vectors_def = TableDefinition::<u64, &[u8]>::new(&self.names.vectors);
@@ -513,7 +517,9 @@ impl<'txn> FractalIndex<'txn> {
             cascade_leaf_buffer(
                 self.txn,
                 leaf_id,
-                self.codebooks.as_ref().unwrap(),
+                self.codebooks.as_ref().ok_or_else(|| {
+                    StorageError::Corrupted("fractal: codebooks not initialized".to_string())
+                })?,
                 &self.config,
                 &self.names,
             )?;
@@ -528,7 +534,9 @@ impl<'txn> FractalIndex<'txn> {
             cascade_leaf_buffer(
                 self.txn,
                 leaf_id,
-                self.codebooks.as_ref().unwrap(),
+                self.codebooks.as_ref().ok_or_else(|| {
+                    StorageError::Corrupted("fractal: codebooks not initialized".to_string())
+                })?,
                 &self.config,
                 &self.names,
             )?;

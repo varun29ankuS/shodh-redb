@@ -20,7 +20,9 @@ impl Value for Uuid {
     where
         Self: 'a,
     {
-        Uuid::from_slice(data).unwrap()
+        // Safety: fixed_width() returns Some(16), so the framework guarantees
+        // data.len() == 16. from_slice only fails on wrong length.
+        Uuid::from_slice(data).unwrap_or_else(|_| Uuid::nil())
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>

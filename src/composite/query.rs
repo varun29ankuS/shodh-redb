@@ -206,7 +206,11 @@ impl<'a> CompositeQuery<'a> {
 
         // 1a: Semantic candidates (fractal index takes priority over IVF-PQ)
         if sem_active {
-            let query = self.query_vector.unwrap();
+            let query = self.query_vector.ok_or_else(|| {
+                StorageError::Corrupted(
+                    "semantic search enabled but no query vector provided".to_string(),
+                )
+            })?;
             let k = self.semantic_candidates.unwrap_or(self.top_k.max(1) * 5);
 
             let results = if let Some(fi) = self.fractal_index {
@@ -220,7 +224,11 @@ impl<'a> CompositeQuery<'a> {
                 });
                 fi.search(self.txn, query, &params)?
             } else {
-                let index = self.vector_index.unwrap();
+                let index = self.vector_index.ok_or_else(|| {
+                    StorageError::Corrupted(
+                        "semantic search enabled but no vector index provided".to_string(),
+                    )
+                })?;
                 let params = self.search_params.unwrap_or(SearchParams {
                     nprobe: 16,
                     candidates: k * 2,
@@ -356,6 +364,11 @@ impl<'a> CompositeQuery<'a> {
         let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(self.top_k + 1);
 
         for entry in candidates.values() {
+            // Skip candidates without metadata — they cannot be scored
+            let Some(meta) = entry.meta.clone() else {
+                continue;
+            };
+
             let sem = if sem_active {
                 Some(*sem_scores.get(&entry.blob_id).unwrap_or(&0.0))
             } else {
@@ -379,7 +392,7 @@ impl<'a> CompositeQuery<'a> {
             let he = HeapEntry {
                 score,
                 blob_id: entry.blob_id,
-                meta: entry.meta.clone().unwrap(),
+                meta,
                 signals: SignalScores {
                     semantic: sem,
                     temporal: tmp,

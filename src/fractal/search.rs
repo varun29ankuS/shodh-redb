@@ -127,7 +127,9 @@ pub(crate) fn search_write(
         query.to_vec()
     };
 
-    let codebooks = idx.codebooks.as_ref().unwrap();
+    let codebooks = idx.codebooks.as_ref().ok_or_else(|| {
+        StorageError::Corrupted("fractal: search called on index without codebooks".to_string())
+    })?;
     let adc = AdcTable::build(&q, codebooks, idx.config.metric);
     let nprobe = params.nprobe.max(1);
     let heap_cap = if params.rerank {

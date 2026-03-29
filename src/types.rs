@@ -515,7 +515,7 @@ impl Value for &str {
 
 impl Key for &str {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        // Compare raw bytes directly — avoids UTF-8 validation overhead and
+        // Compare raw bytes directly -- avoids UTF-8 validation overhead and
         // produces consistent ordering even on corrupted data
         data1.cmp(data2)
     }
@@ -557,7 +557,7 @@ impl Value for String {
 
 impl Key for String {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        // Compare raw bytes directly — avoids UTF-8 validation overhead and
+        // Compare raw bytes directly -- avoids UTF-8 validation overhead and
         // produces consistent ordering even on corrupted data
         data1.cmp(data2)
     }

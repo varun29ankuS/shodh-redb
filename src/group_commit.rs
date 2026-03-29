@@ -145,7 +145,7 @@ impl GroupCommitter {
     /// Atomically relinquish leadership, draining any batches that arrived
     /// while the leader was processing the previous round.
     ///
-    /// Returns `Ok(batches)` — if non-empty the caller must process them
+    /// Returns `Ok(batches)` -- if non-empty the caller must process them
     /// before calling `finish_leader` again, preventing orphaned batches.
     pub fn finish_leader(&self) -> Result<Vec<PendingBatch>, GroupCommitError> {
         let mut state = self

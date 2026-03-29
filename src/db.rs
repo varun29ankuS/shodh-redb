@@ -1915,17 +1915,17 @@ impl Database {
 
     #[cfg(feature = "std")]
     fn run_group_commit(&self) {
-        // Initial drain — the leader's own batch (and any that arrived concurrently)
+        // Initial drain -- the leader's own batch (and any that arrived concurrently)
         // are already in the pending queue.
         let Ok(mut batches) = self.group_committer.drain_pending() else {
-            // Mutex poisoned — relinquish leadership (best-effort).
+            // Mutex poisoned -- relinquish leadership (best-effort).
             let _ = self.group_committer.finish_leader();
             return;
         };
 
         loop {
             if batches.is_empty() {
-                // Nothing to process — atomically relinquish leadership.
+                // Nothing to process -- atomically relinquish leadership.
                 // finish_leader returns any batches that arrived between our
                 // last drain and now, preventing orphaned batches.
                 match self.group_committer.finish_leader() {

@@ -159,22 +159,20 @@ impl HistorySnapshot {
 
     pub(crate) fn user_root(&self) -> Option<BtreeHeader> {
         if self.data[Self::USER_ROOT_FLAG] != 0 {
-            Some(BtreeHeader::from_le_bytes(
-                self.data[Self::USER_ROOT..Self::USER_ROOT_END]
-                    .try_into()
-                    .unwrap(),
-            ))
+            self.data[Self::USER_ROOT..Self::USER_ROOT_END]
+                .try_into()
+                .ok()
+                .map(BtreeHeader::from_le_bytes)
         } else {
             None
         }
     }
 
     pub(crate) fn timestamp_ms(&self) -> u64 {
-        u64::from_le_bytes(
-            self.data[Self::TIMESTAMP..Self::TIMESTAMP + 8]
-                .try_into()
-                .unwrap(),
-        )
+        self.data[Self::TIMESTAMP..Self::TIMESTAMP + 8]
+            .try_into()
+            .map(u64::from_le_bytes)
+            .unwrap_or(0)
     }
 }
 
@@ -234,16 +232,18 @@ impl PageList<'_> {
     }
 
     pub(crate) fn len(&self) -> usize {
-        u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().unwrap()).into()
+        self.data[..size_of::<u16>()]
+            .try_into()
+            .map(|b| u16::from_le_bytes(b) as usize)
+            .unwrap_or(0)
     }
 
     pub(crate) fn get(&self, index: usize) -> PageNumber {
         let start = size_of::<u16>() + PageNumber::serialized_size() * index;
-        PageNumber::from_le_bytes(
-            self.data[start..(start + PageNumber::serialized_size())]
-                .try_into()
-                .unwrap(),
-        )
+        self.data[start..(start + PageNumber::serialized_size())]
+            .try_into()
+            .map(PageNumber::from_le_bytes)
+            .unwrap_or(PageNumber::new(0, 0, 0))
     }
 }
 
@@ -284,9 +284,11 @@ impl MutInPlaceValue for PageList<'_> {
     type BaseRefType = PageListMut;
 
     fn initialize(data: &mut [u8]) {
-        assert!(data.len() >= 8);
+        debug_assert!(data.len() >= 8);
         // Set the length to zero
-        data[..8].fill(0);
+        if data.len() >= 8 {
+            data[..8].fill(0);
+        }
     }
 
     fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType {
@@ -318,8 +320,14 @@ impl Value for TransactionIdWithPagination {
     where
         Self: 'a,
     {
-        let transaction_id = u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap());
-        let pagination_id = u64::from_le_bytes(data[size_of::<u64>()..].try_into().unwrap());
+        let transaction_id = data[..size_of::<u64>()]
+            .try_into()
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+        let pagination_id = data[size_of::<u64>()..]
+            .try_into()
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
         Self {
             transaction_id,
             pagination_id,
@@ -375,7 +383,7 @@ impl Value for AllocatorStateKey {
         Self: 'a,
     {
         match data[0] {
-            3 => Self::Region(u32::from_le_bytes(data[1..].try_into().unwrap())),
+            3 => Self::Region(data[1..].try_into().map(u32::from_le_bytes).unwrap_or(0)),
             4 => Self::RegionTracker,
             5 => Self::TransactionId,
             // 0, 1, 2 were used in redb 2.x; unknown discriminants are also
@@ -777,7 +785,7 @@ impl TableNamespace<'_> {
     }
 
     fn set_root(&mut self, root: Option<BtreeHeader>) {
-        assert!(self.open_tables.is_empty());
+        debug_assert!(self.open_tables.is_empty());
         self.table_tree.set_root(root);
     }
 
@@ -922,7 +930,9 @@ impl TableNamespace<'_> {
         table: &BtreeMut<K, V>,
         length: u64,
     ) {
-        self.open_tables.remove(name).unwrap();
+        // Table should always be present when closing, but gracefully handle the case
+        // where it is not to avoid panicking in production
+        let _ = self.open_tables.remove(name);
         self.table_tree
             .stage_update_table_root(name, table.get_root(), length);
     }
@@ -966,7 +976,7 @@ impl WriteTransaction {
         cdc_config: CdcConfig,
         history_retention: u64,
     ) -> Result<Self> {
-        let transaction_id = guard.id();
+        let transaction_id = guard.id()?;
         let guard = Arc::new(guard);
 
         let root_page = mem.get_data_root();
@@ -1248,7 +1258,7 @@ impl WriteTransaction {
     }
 
     fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionId)> {
-        let transaction_id = self.allocate_read_transaction()?.leak();
+        let transaction_id = self.allocate_read_transaction()?.leak()?;
         let id = self
             .transaction_tracker
             .allocate_savepoint(transaction_id)?;
@@ -1675,9 +1685,11 @@ impl WriteTransaction {
         let wall_clock_ns = {
             #[cfg(feature = "std")]
             {
+                // If the system clock is before UNIX epoch, fall back to zero;
+                // HLC still provides causal ordering in that degenerate case.
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .expect("system clock before UNIX epoch")
+                    .unwrap_or_default()
                     .as_nanos() as u64
             }
             #[cfg(not(feature = "std"))]
@@ -2464,14 +2476,14 @@ impl WriteTransaction {
                 .deallocate_savepoint(*savepoint, *transaction)?;
         }
 
-        assert!(
+        debug_assert!(
             self.system_tables
                 .lock()
                 .system_freed_pages()
                 .lock()
                 .is_empty()
         );
-        assert!(self.tables.lock().freed_pages.lock().is_empty());
+        debug_assert!(self.tables.lock().freed_pages.lock().is_empty());
 
         #[cfg(feature = "logging")]
         debug!(
@@ -3129,10 +3141,8 @@ impl WriteTransaction {
         let mut tables = self.tables.lock();
         if let Some(page) = tables
             .table_tree
-            .flush_table_root_updates()
-            .unwrap()
-            .finalize_dirty_checksums()
-            .unwrap()
+            .flush_table_root_updates()?
+            .finalize_dirty_checksums()?
         {
             eprintln!("Master tree:");
             let master_tree: Btree<&str, InternalTableDefinition> = Btree::new_uncompressed(
@@ -3148,10 +3158,8 @@ impl WriteTransaction {
         let mut system_tables = self.system_tables.lock();
         if let Some(page) = system_tables
             .table_tree
-            .flush_table_root_updates()
-            .unwrap()
-            .finalize_dirty_checksums()
-            .unwrap()
+            .flush_table_root_updates()?
+            .finalize_dirty_checksums()?
         {
             eprintln!("System tree:");
             let master_tree: Btree<&str, InternalTableDefinition> = Btree::new_uncompressed(

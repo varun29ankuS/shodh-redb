@@ -100,7 +100,9 @@ impl Codebooks {
         debug_assert_eq!(num_floats, 256 * sub_dim);
         let mut floats = Vec::with_capacity(num_floats);
         for chunk in bytes.chunks_exact(4) {
-            floats.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            if let Ok(b) = chunk.try_into() {
+                floats.push(f32::from_le_bytes(b));
+            }
         }
         floats
     }

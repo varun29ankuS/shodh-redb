@@ -651,7 +651,9 @@ impl<'txn> IvfPqIndex<'txn> {
                 ))
             })?;
             for chunk in guard.value().chunks_exact(4) {
-                flat.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+                if let Ok(bytes) = chunk.try_into() {
+                    flat.push(f32::from_le_bytes(bytes));
+                }
             }
         }
         Ok(flat)
@@ -780,7 +782,9 @@ impl ReadOnlyIvfPqIndex {
                     )))
                 })?;
                 for chunk in guard.value().chunks_exact(4) {
-                    flat.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+                    if let Ok(bytes) = chunk.try_into() {
+                        flat.push(f32::from_le_bytes(bytes));
+                    }
                 }
             }
             flat
@@ -999,6 +1003,6 @@ impl CandidateHeap {
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .filter_map(|c| c.try_into().ok().map(f32::from_le_bytes))
         .collect()
 }

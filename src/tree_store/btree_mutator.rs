@@ -574,11 +574,8 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             }
             x => {
                 return Err(StorageError::Corrupted(format!(
-                    "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                    x,
-                    page.get_page_number(),
-                    LEAF,
-                    BRANCH
+                    "Invalid page type byte {x} on page {:?}, expected LEAF ({LEAF}) or BRANCH ({BRANCH})",
+                    page.get_page_number()
                 )));
             }
         })
@@ -627,11 +624,8 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             }
             x => {
                 return Err(StorageError::Corrupted(format!(
-                    "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                    x,
-                    page.get_page_number(),
-                    LEAF,
-                    BRANCH
+                    "Invalid page type byte {x} on page {:?}, expected LEAF ({LEAF}) or BRANCH ({BRANCH})",
+                    page.get_page_number()
                 )));
             }
         }
@@ -1090,11 +1084,8 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             LEAF => self.delete_leaf_helper(page, checksum, key),
             BRANCH => self.delete_branch_helper(page, checksum, key),
             x => Err(StorageError::Corrupted(format!(
-                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                x,
-                page.get_page_number(),
-                LEAF,
-                BRANCH
+                "Invalid page type byte {x} on page {:?}, expected LEAF ({LEAF}) or BRANCH ({BRANCH})",
+                page.get_page_number()
             ))),
         }
     }

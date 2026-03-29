@@ -399,33 +399,28 @@ impl TransactionGuard {
         }
     }
 
-    pub(crate) fn id(&self) -> TransactionId {
-        self.transaction_id.unwrap()
+    pub(crate) fn id(&self) -> Result<TransactionId, StorageError> {
+        self.transaction_id.ok_or_else(|| {
+            StorageError::Corrupted("TransactionGuard::id() called with no transaction_id".into())
+        })
     }
 
-    pub(crate) fn leak(mut self) -> TransactionId {
-        self.transaction_id.take().unwrap()
+    pub(crate) fn leak(mut self) -> Result<TransactionId, StorageError> {
+        self.transaction_id.take().ok_or_else(|| {
+            StorageError::Corrupted("TransactionGuard::leak() called with no transaction_id".into())
+        })
     }
 }
 
 impl Drop for TransactionGuard {
     fn drop(&mut self) {
-        if self.transaction_tracker.is_none() {
-            return;
-        }
-        if let Some(transaction_id) = self.transaction_id {
+        if let (Some(tracker), Some(transaction_id)) =
+            (self.transaction_tracker.as_ref(), self.transaction_id)
+        {
             if self.write_transaction {
-                let _ = self
-                    .transaction_tracker
-                    .as_ref()
-                    .unwrap()
-                    .end_write_transaction(transaction_id);
+                let _ = tracker.end_write_transaction(transaction_id);
             } else {
-                let _ = self
-                    .transaction_tracker
-                    .as_ref()
-                    .unwrap()
-                    .deallocate_read_transaction(transaction_id);
+                let _ = tracker.deallocate_read_transaction(transaction_id);
             }
         }
     }
@@ -635,7 +630,7 @@ impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
         let guard = self.allocate_read_transaction()?;
         #[cfg(feature = "logging")]
-        debug!("Beginning read transaction id={:?}", guard.id());
+        debug!("Beginning read transaction id={:?}", guard.id().ok());
         ReadTransaction::new(self.get_memory(), guard)
     }
 
@@ -1099,7 +1094,11 @@ impl Database {
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         let allocator_hash = self.mem.allocator_hash();
         let mut was_clean = Arc::get_mut(&mut self.mem)
-            .unwrap()
+            .ok_or_else(|| {
+                DatabaseError::Storage(StorageError::Corrupted(
+                    "check_integrity() requires exclusive database access, but other references to the memory exist".into(),
+                ))
+            })?
             .clear_cache_and_reload()?;
 
         let old_roots = [self.mem.get_data_root(), self.mem.get_system_root()];

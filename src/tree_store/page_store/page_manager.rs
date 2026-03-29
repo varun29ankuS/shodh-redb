@@ -176,14 +176,24 @@ impl TransactionalMemory {
         read_verification: ReadVerification,
         read_verification_callback: Option<Arc<ReadVerificationCallback>>,
     ) -> Result<Self, DatabaseError> {
-        assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
+        if !page_size.is_power_of_two() || page_size < DB_HEADER_SIZE {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "page_size must be a power of two and at least DB_HEADER_SIZE",
+            ))
+            .into());
+        }
 
         let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
         let region_size = min(
             region_size,
             (u64::from(MAX_PAGE_INDEX) + 1) * page_size as u64,
         );
-        assert!(region_size.is_power_of_two());
+        if !region_size.is_power_of_two() {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "region_size must be a power of two",
+            ))
+            .into());
+        }
 
         let storage = PagedCachedFile::new(
             file,
@@ -298,13 +308,23 @@ impl TransactionalMemory {
         // For existing databases, the on-disk compression config takes precedence.
         let compression = header.compression;
 
-        assert_eq!(header.page_size() as usize, page_size);
+        if header.page_size() as usize != page_size {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Database page_size does not match requested page_size",
+            ))
+            .into());
+        }
         // The blob region (if any) is appended after the B-tree region.
         // blob_region_offset marks where the B-tree region ends and blobs begin.
         // Exclude the EOF mirror (if present) from the B-tree file length.
         let blob_region_offset = header.primary_slot().blob_region_offset;
         let btree_file_len = Self::effective_btree_file_len(&storage, blob_region_offset)?;
-        assert!(btree_file_len >= header.layout().len());
+        if btree_file_len < header.layout().len() {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "B-tree file length is less than the database layout length",
+            ))
+            .into());
+        }
         let needs_recovery = header.recovery_required || header.layout().len() != btree_file_len;
         if needs_recovery {
             if read_only {
@@ -320,7 +340,12 @@ impl TransactionalMemory {
                 page_size.try_into().unwrap(),
             ));
             header.pick_primary_for_repair(repair_info)?;
-            assert!(!repair_info.invalid_magic_number);
+            if repair_info.invalid_magic_number {
+                return Err(StorageError::Corrupted(alloc::string::String::from(
+                    "Invalid magic number during recovery",
+                ))
+                .into());
+            }
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()?
@@ -329,7 +354,12 @@ impl TransactionalMemory {
         }
 
         let layout = header.layout();
-        assert_eq!(layout.len(), btree_file_len);
+        if layout.len() != btree_file_len {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Database layout length does not match B-tree file length",
+            ))
+            .into());
+        }
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
 
@@ -347,7 +377,7 @@ impl TransactionalMemory {
 
         let state = InMemoryState::new(header);
 
-        assert!(page_size >= DB_HEADER_SIZE);
+        debug_assert!(page_size >= DB_HEADER_SIZE);
 
         Ok(Self {
             allocated_since_commit: Mutex::new(Default::default()),
@@ -605,7 +635,7 @@ impl TransactionalMemory {
 
     #[cfg(debug_assertions)]
     pub(crate) fn mark_debug_allocated_page(&self, page: PageNumber) {
-        assert!(self.allocated_pages.lock().insert(page));
+        debug_assert!(self.allocated_pages.lock().insert(page));
     }
 
     #[cfg(feature = "std")]
@@ -632,7 +662,12 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
-        assert!(self.allocated_since_commit.lock().is_empty());
+        if !self.allocated_since_commit.lock().is_empty() {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Cannot reload: uncommitted page allocations still pending",
+            ))
+            .into());
+        }
 
         self.storage.flush()?;
         self.storage.invalidate_cache_all();
@@ -665,7 +700,11 @@ impl TransactionalMemory {
 
     pub(crate) fn begin_writable(&self) -> Result {
         let mut state = self.state.lock();
-        assert!(!state.header.recovery_required);
+        if state.header.recovery_required {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Cannot begin writable transaction: recovery is already required",
+            )));
+        }
         state.header.recovery_required = true;
         self.write_header(&state.header)?;
         self.storage.flush()
@@ -704,7 +743,7 @@ impl TransactionalMemory {
         let allocator = state.get_region_mut(region_index);
         allocator.record_alloc(page_number.page_index, page_number.page_order);
         #[cfg(debug_assertions)]
-        assert!(self.allocated_pages.lock().insert(page_number));
+        debug_assert!(self.allocated_pages.lock().insert(page_number));
     }
 
     fn write_header(&self, header: &DatabaseHeader) -> Result {
@@ -901,7 +940,11 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn load_allocator_state(&self, tree: &AllocatorStateTree) -> Result {
-        assert!(self.is_valid_allocator_state(tree)?);
+        if !self.is_valid_allocator_state(tree)? {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Allocator state is stale or invalid for current transaction",
+            )));
+        }
 
         // Load the allocator state
         let mut region_allocators = vec![];
@@ -984,7 +1027,11 @@ impl TransactionalMemory {
         // to future read transactions
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().is_empty());
-        assert!(!self.needs_recovery.load(Ordering::Acquire));
+        if self.needs_recovery.load(Ordering::Acquire) {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Cannot proceed: database recovery is required",
+            )));
+        }
 
         let mut state = self.state.lock();
         // Trim surplus file space, before finalizing the commit
@@ -1064,10 +1111,11 @@ impl TransactionalMemory {
         unpersisted.shrink_to_fit();
 
         let mut state = self.state.lock();
-        assert_eq!(
-            state.header.secondary_slot().transaction_id,
-            old_transaction_id
-        );
+        if state.header.secondary_slot().transaction_id != old_transaction_id {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Secondary slot transaction_id changed unexpectedly during commit",
+            )));
+        }
         state.header = header;
         self.read_from_secondary.store(false, Ordering::Release);
         // Hold lock until read_from_secondary is set to false, so that the new primary state is read.
@@ -1092,7 +1140,11 @@ impl TransactionalMemory {
         // to future read transactions
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().is_empty());
-        assert!(!self.needs_recovery.load(Ordering::Acquire));
+        if self.needs_recovery.load(Ordering::Acquire) {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Cannot proceed: database recovery is required",
+            )));
+        }
 
         let mut unpersisted = self.unpersisted.lock();
         let mut allocated_since_commit = self.allocated_since_commit.lock();
@@ -1142,7 +1194,11 @@ impl TransactionalMemory {
                 "Dirty pages outstanding: {dirty_pages:?}"
             );
         }
-        assert!(!self.needs_recovery.load(Ordering::Acquire));
+        if self.needs_recovery.load(Ordering::Acquire) {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Cannot proceed: database recovery is required",
+            )));
+        }
         let mut state = self.state.lock();
         let mut guard = self.allocated_since_commit.lock();
         for page_number in guard.iter() {
@@ -1154,7 +1210,7 @@ impl TransactionalMemory {
                 .get_region_mut(region_index)
                 .free(page_number.page_index, page_number.page_order);
             #[cfg(debug_assertions)]
-            assert!(self.allocated_pages.lock().remove(page_number));
+            debug_assert!(self.allocated_pages.lock().remove(page_number));
 
             let address = page_number.address_range(
                 self.page_size.into(),
@@ -1220,8 +1276,8 @@ impl TransactionalMemory {
     pub(crate) fn get_page_mut(&self, page_number: PageNumber) -> Result<PageMut> {
         #[cfg(debug_assertions)]
         {
-            assert!(!self.read_page_ref_counts.lock().contains_key(&page_number));
-            assert!(!self.open_dirty_pages.lock().contains(&page_number));
+            debug_assert!(!self.read_page_ref_counts.lock().contains_key(&page_number));
+            debug_assert!(!self.open_dirty_pages.lock().contains(&page_number));
         }
 
         let address_range = page_number.address_range(
@@ -1237,7 +1293,7 @@ impl TransactionalMemory {
 
         #[cfg(debug_assertions)]
         {
-            assert!(self.open_dirty_pages.lock().insert(page_number));
+            debug_assert!(self.open_dirty_pages.lock().insert(page_number));
         }
 
         Ok(PageMut {
@@ -1297,9 +1353,9 @@ impl TransactionalMemory {
     fn free_helper(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
         #[cfg(debug_assertions)]
         {
-            assert!(!self.read_page_ref_counts.lock().contains_key(&page));
-            assert!(self.allocated_pages.lock().remove(&page));
-            assert!(!self.open_dirty_pages.lock().contains(&page));
+            debug_assert!(!self.read_page_ref_counts.lock().contains_key(&page));
+            debug_assert!(self.allocated_pages.lock().remove(&page));
+            debug_assert!(!self.open_dirty_pages.lock().contains(&page));
         }
         allocated.remove(page);
         let mut state = self.state.lock();
@@ -1385,12 +1441,12 @@ impl TransactionalMemory {
 
         #[cfg(debug_assertions)]
         {
-            assert!(self.allocated_pages.lock().insert(page_number));
-            assert!(
+            debug_assert!(self.allocated_pages.lock().insert(page_number));
+            debug_assert!(
                 !self.read_page_ref_counts.lock().contains_key(&page_number),
                 "Allocated a page that is still referenced! {page_number:?}"
             );
-            assert!(!self.open_dirty_pages.lock().contains(&page_number));
+            debug_assert!(!self.open_dirty_pages.lock().contains(&page_number));
         }
 
         if transactional {
@@ -1413,7 +1469,7 @@ impl TransactionalMemory {
 
         #[cfg(debug_assertions)]
         {
-            assert!(self.open_dirty_pages.lock().insert(page_number));
+            debug_assert!(self.open_dirty_pages.lock().insert(page_number));
 
             // Poison the memory in debug mode to help detect uninitialized reads
             mem.mem_mut()?.fill(0xFF);
@@ -1481,7 +1537,11 @@ impl TransactionalMemory {
         let mut new_layout = layout;
         new_layout.reduce_last_region(reduce_by);
         state.allocators.resize_to(new_layout);
-        assert!(new_layout.len() <= layout.len());
+        if new_layout.len() > layout.len() {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Shrink produced a layout larger than the original",
+            )));
+        }
         state.header.set_layout(new_layout);
 
         Ok(true)
@@ -1522,7 +1582,11 @@ impl TransactionalMemory {
                 .get_header_pages(),
             self.page_size,
         );
-        assert!(new_layout.len() >= layout.len());
+        if new_layout.len() < layout.len() {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "Grow produced a layout smaller than the original",
+            )));
+        }
 
         // Growing the file overwrites the EOF mirror; the next commit will rewrite it.
         self.eof_mirror_size.store(0, Ordering::Release);

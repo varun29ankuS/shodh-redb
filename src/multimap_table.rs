@@ -153,11 +153,9 @@ fn multimap_stats_helper(
                 fragmented_bytes,
             })
         }
-        other => {
-            Err(StorageError::Corrupted(format!(
-                "unexpected page type {other} in multimap stats helper"
-            )))
-        }
+        other => Err(StorageError::Corrupted(format!(
+            "unexpected page type {other} in multimap stats helper"
+        ))),
     }
 }
 

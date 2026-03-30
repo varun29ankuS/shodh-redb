@@ -30,10 +30,21 @@ pub struct Codebooks {
 
 impl Codebooks {
     /// Returns the centroid for sub-quantizer `m`, codeword `k`.
+    ///
+    /// Returns an empty slice if indices are out of bounds (corrupted data).
     #[inline]
     pub fn centroid(&self, m: usize, k: usize) -> &[f32] {
-        let start = (m * 256 + k) * self.sub_dim;
-        &self.data[start..start + self.sub_dim]
+        let Some(start) = (m.checked_mul(256))
+            .and_then(|v| v.checked_add(k))
+            .and_then(|v| v.checked_mul(self.sub_dim))
+        else {
+            return &[];
+        };
+        let end = match start.checked_add(self.sub_dim) {
+            Some(e) if e <= self.data.len() => e,
+            _ => return &[],
+        };
+        &self.data[start..end]
     }
 
     /// Encode a full vector into PQ codes.
@@ -95,15 +106,20 @@ impl Codebooks {
     }
 
     /// Deserialize a single codebook from bytes.
+    ///
+    /// If the byte length does not match the expected `256 * sub_dim * 4`,
+    /// returns as many floats as possible (truncated or padded with zeros).
     pub fn deserialize_codebook(bytes: &[u8], sub_dim: usize) -> Vec<f32> {
+        let expected = 256 * sub_dim;
         let num_floats = bytes.len() / 4;
-        debug_assert_eq!(num_floats, 256 * sub_dim);
-        let mut floats = Vec::with_capacity(num_floats);
+        let mut floats = Vec::with_capacity(num_floats.max(expected));
         for chunk in bytes.chunks_exact(4) {
             if let Ok(b) = chunk.try_into() {
                 floats.push(f32::from_le_bytes(b));
             }
         }
+        // Pad to expected size if data was truncated
+        floats.resize(expected, 0.0);
         floats
     }
 }

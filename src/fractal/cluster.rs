@@ -222,9 +222,13 @@ pub(crate) fn split_cluster(
             if let Some(pq_guard) = ptbl.get(PostingKey::new(cluster_id, vid))? {
                 let pq_codes = pq_guard.value();
                 for (m, &code) in pq_codes.iter().enumerate().take(cb.num_subvectors) {
-                    let base = m * 256 * sub_dim + (code as usize) * sub_dim;
-                    for d in 0..sub_dim {
-                        flat_vectors.push(cb.data[base + d]);
+                    if let Some(base) = (m.checked_mul(256))
+                        .and_then(|v| v.checked_add(code as usize))
+                        .and_then(|v| v.checked_mul(sub_dim))
+                    {
+                        for d in 0..sub_dim {
+                            flat_vectors.push(cb.data.get(base + d).copied().unwrap_or(0.0));
+                        }
                     }
                 }
             }
@@ -251,8 +255,8 @@ pub(crate) fn split_cluster(
     }
 
     // 3. Allocate new cluster IDs
-    let child_a = config.alloc_cluster_id();
-    let child_b = config.alloc_cluster_id();
+    let child_a = config.alloc_cluster_id()?;
+    let child_b = config.alloc_cluster_id()?;
 
     // 4. Compute per-child statistics
     let mut pop_a: u32 = 0;
@@ -264,12 +268,12 @@ pub(crate) fn split_cluster(
         let vec_start = idx * dim;
         let vec_slice = &flat_vectors[vec_start..vec_start + dim];
         if assignment == 0 {
-            pop_a += 1;
+            pop_a = pop_a.saturating_add(1);
             for (s, &v) in sums_a.iter_mut().zip(vec_slice.iter()) {
                 *s += f64::from(v);
             }
         } else {
-            pop_b += 1;
+            pop_b = pop_b.saturating_add(1);
             for (s, &v) in sums_b.iter_mut().zip(vec_slice.iter()) {
                 *s += f64::from(v);
             }
@@ -580,12 +584,16 @@ pub(crate) fn merge_cluster(
         };
         drop(sum_tbl);
 
-        let pop_f64 = f64::from(combined_pop);
-        let centroid_bytes: Vec<u8> = merged_sums
-            .iter()
-            .map(|s| (s / pop_f64) as f32)
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let centroid_bytes: Vec<u8> = if combined_pop > 0 {
+            let pop_f64 = f64::from(combined_pop);
+            merged_sums
+                .iter()
+                .map(|s| (s / pop_f64) as f32)
+                .flat_map(|f| f.to_le_bytes())
+                .collect()
+        } else {
+            alloc::vec![0u8; dim * 4]
+        };
 
         let mut cent_tbl = txn.open_table(centroids_def).map_err(te)?;
         cent_tbl.insert(best_sibling, centroid_bytes.as_slice())?;

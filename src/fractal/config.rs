@@ -67,10 +67,15 @@ impl FractalIndexConfig {
     ///
     /// Callers are responsible for updating `num_clusters` to reflect the
     /// net change in live clusters (splits add, merges subtract).
-    pub fn alloc_cluster_id(&mut self) -> u32 {
+    pub fn alloc_cluster_id(&mut self) -> crate::Result<u32> {
+        if self.next_cluster_id == u32::MAX {
+            return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+                "fractal: cluster ID space exhausted (u32::MAX)",
+            )));
+        }
         let id = self.next_cluster_id;
-        self.next_cluster_id = self.next_cluster_id.saturating_add(1);
-        id
+        self.next_cluster_id += 1;
+        Ok(id)
     }
 }
 

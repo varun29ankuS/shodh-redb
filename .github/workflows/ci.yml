@@ -138,7 +138,7 @@ jobs:
             python: true
           - name: macOS
             os: macos-latest
-            fuzz: false
+            fuzz: true
             wasi: true
             python: true
           - name: Windows
@@ -199,11 +199,14 @@ jobs:
         if: matrix.fuzz
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-fuzz@0.12.0
+          tool: cargo-fuzz@0.13.1
 
       - name: Setup fuzz toolchain
         if: matrix.fuzz
-        run: rustup install nightly
+        run: |
+          rustup install nightly
+          HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
+          rustup target add --toolchain nightly "$HOST_TARGET"
 
       - name: Install just
         uses: taiki-e/install-action@v2

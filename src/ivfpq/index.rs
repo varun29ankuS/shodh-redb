@@ -650,7 +650,15 @@ impl<'txn> IvfPqIndex<'txn> {
                     self.name,
                 ))
             })?;
-            for chunk in guard.value().chunks_exact(4) {
+            let raw = guard.value();
+            if raw.len() % 4 != 0 {
+                return Err(StorageError::Corrupted(alloc::format!(
+                    "IVF-PQ '{}': centroid {c} has misaligned byte length {} (not a multiple of 4)",
+                    self.name,
+                    raw.len(),
+                )));
+            }
+            for chunk in raw.chunks_exact(4) {
                 if let Ok(bytes) = chunk.try_into() {
                     flat.push(f32::from_le_bytes(bytes));
                 }

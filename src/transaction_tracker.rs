@@ -149,6 +149,11 @@ impl TransactionTracker {
         Ok(transaction_id)
     }
 
+    /// NOTE (no_std): `spin::Mutex::lock()` does not detect poisoning, so if a
+    /// thread panics while holding the lock the mutex silently continues with
+    /// potentially inconsistent inner state. This is an accepted limitation of
+    /// the no_std spin-lock implementation -- callers that require strict
+    /// consistency guarantees should use the `std` feature.
     #[cfg(not(feature = "std"))]
     pub(crate) fn start_write_transaction(&self) -> Result<TransactionId> {
         const MAX_SPIN_RETRIES: u32 = 1000;
@@ -199,6 +204,7 @@ impl TransactionTracker {
         }
     }
 
+    /// NOTE (no_std): see `start_write_transaction` for spin-lock poisoning caveat.
     #[cfg(not(feature = "std"))]
     pub(crate) fn end_write_transaction(&self, id: TransactionId) -> Result {
         let mut state = self.state.lock();

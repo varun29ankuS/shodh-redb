@@ -372,7 +372,8 @@ impl BlobMeta {
     }
 
     pub fn label_str(&self) -> &str {
-        core::str::from_utf8(&self.label[..self.label_len as usize]).unwrap_or("")
+        let len = (self.label_len as usize).min(self.label.len());
+        core::str::from_utf8(&self.label[..len]).unwrap_or("")
     }
 
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
@@ -602,7 +603,8 @@ impl CausalEdge {
     }
 
     pub fn context_str(&self) -> &str {
-        core::str::from_utf8(&self.context[..self.context_len as usize]).unwrap_or("")
+        let len = (self.context_len as usize).min(self.context.len());
+        core::str::from_utf8(&self.context[..len]).unwrap_or("")
     }
 
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
@@ -652,11 +654,12 @@ impl fmt::Debug for CausalEdge {
 
 impl PartialEq for CausalEdge {
     fn eq(&self, other: &Self) -> bool {
+        let self_len = (self.context_len as usize).min(self.context.len());
+        let other_len = (other.context_len as usize).min(other.context.len());
         self.child == other.child
             && self.relation == other.relation
             && self.context_len == other.context_len
-            && self.context[..self.context_len as usize]
-                == other.context[..other.context_len as usize]
+            && self.context[..self_len] == other.context[..other_len]
     }
 }
 
@@ -664,10 +667,11 @@ impl Eq for CausalEdge {}
 
 impl core::hash::Hash for CausalEdge {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        let len = (self.context_len as usize).min(self.context.len());
         self.child.hash(state);
         self.relation.hash(state);
         self.context_len.hash(state);
-        self.context[..self.context_len as usize].hash(state);
+        self.context[..len].hash(state);
     }
 }
 
@@ -884,7 +888,8 @@ impl TagKey {
     }
 
     pub fn tag_str(&self) -> &str {
-        core::str::from_utf8(&self.tag[..self.tag_len as usize]).unwrap_or("")
+        let len = (self.tag_len as usize).min(self.tag.len());
+        core::str::from_utf8(&self.tag[..len]).unwrap_or("")
     }
 
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
@@ -1018,7 +1023,8 @@ impl NamespaceKey {
     }
 
     pub fn namespace_str(&self) -> &str {
-        core::str::from_utf8(&self.namespace[..self.ns_len as usize]).unwrap_or("")
+        let len = (self.ns_len as usize).min(self.namespace.len());
+        core::str::from_utf8(&self.namespace[..len]).unwrap_or("")
     }
 
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
@@ -1139,7 +1145,8 @@ impl NamespaceVal {
     }
 
     pub fn namespace_str(&self) -> &str {
-        core::str::from_utf8(&self.namespace[..self.ns_len as usize]).unwrap_or("")
+        let len = (self.ns_len as usize).min(self.namespace.len());
+        core::str::from_utf8(&self.namespace[..len]).unwrap_or("")
     }
 
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {

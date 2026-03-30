@@ -75,11 +75,13 @@ pub(crate) enum ShrinkPolicy {
     Never,
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
-        x.trailing_zeros().try_into().unwrap()
+        // trailing_zeros() returns at most usize::BITS-1 which always fits in u8
+        x.trailing_zeros() as u8
     } else {
-        x.next_power_of_two().trailing_zeros().try_into().unwrap()
+        x.next_power_of_two().trailing_zeros() as u8
     }
 }
 
@@ -210,7 +212,11 @@ impl TransactionalMemory {
                 storage
                     .read_direct(0, MAGICNUMBER.len())?
                     .try_into()
-                    .unwrap()
+                    .map_err(|_| {
+                        StorageError::Corrupted(
+                            "Failed to read magic number: unexpected byte length".to_string(),
+                        )
+                    })?
             } else {
                 [0; MAGICNUMBER.len()]
             };
@@ -248,14 +254,18 @@ impl TransactionalMemory {
                 (page_size * region_tracker_required_bytes.div_ceil(page_size)) as u64;
             let starting_size = size + tracker_space;
 
-            let page_capacity = (region_size / u64::try_from(page_size).unwrap())
-                .try_into()
-                .unwrap();
+            let page_size_u64 = u64::try_from(page_size)
+                .map_err(|_| StorageError::Corrupted("page_size exceeds u64 range".to_string()))?;
+            let page_capacity = (region_size / page_size_u64).try_into().map_err(|_| {
+                StorageError::Corrupted("page_capacity exceeds u32 range".to_string())
+            })?;
             let layout = DatabaseLayout::calculate(
                 starting_size,
                 page_capacity,
                 NO_HEADER,
-                page_size.try_into().unwrap(),
+                page_size.try_into().map_err(|_| {
+                    StorageError::Corrupted("page_size exceeds target integer range".to_string())
+                })?,
             );
 
             {

@@ -22,6 +22,14 @@ fn te(e: crate::error::TableError) -> StorageError {
     e.into_storage_error_or_corrupted("fractal search internal table error")
 }
 
+/// Safely read a little-endian `f32` from `data` at `offset`.
+/// Returns `0.0` if the slice is out of bounds or not exactly 4 bytes.
+fn read_f32_le(data: &[u8], offset: usize) -> f32 {
+    data.get(offset..offset + 4)
+        .and_then(|s| s.try_into().ok())
+        .map_or(0.0, f32::from_le_bytes)
+}
+
 // ---------------------------------------------------------------------------
 // CandidateHeap -- fixed-capacity max-heap for top-K selection
 // ---------------------------------------------------------------------------
@@ -182,9 +190,7 @@ pub(crate) fn search_write(
             if bytes.len() < dim * 4 {
                 continue;
             }
-            let vec: Vec<f32> = (0..dim)
-                .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                .collect();
+            let vec: Vec<f32> = (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
             let dist = idx.config.metric.compute(&q, &vec);
             heap.push(vid, dist);
         }
@@ -210,9 +216,7 @@ pub(crate) fn search_write(
                     });
                     continue;
                 }
-                let vec: Vec<f32> = (0..dim)
-                    .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                    .collect();
+                let vec: Vec<f32> = (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
                 let dist = idx.config.metric.compute(&q, &vec);
                 reranked.push(Neighbor {
                     key: c.key,
@@ -309,9 +313,7 @@ pub(crate) fn search_read(
             if bytes.len() < dim * 4 {
                 continue;
             }
-            let vec: Vec<f32> = (0..dim)
-                .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                .collect();
+            let vec: Vec<f32> = (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
             let dist = idx.config.metric.compute(&q, &vec);
             heap.push(vid, dist);
         }
@@ -336,9 +338,7 @@ pub(crate) fn search_read(
                     });
                     continue;
                 }
-                let vec: Vec<f32> = (0..dim)
-                    .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                    .collect();
+                let vec: Vec<f32> = (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
                 let dist = idx.config.metric.compute(&q, &vec);
                 reranked.push(Neighbor {
                     key: c.key,
@@ -387,8 +387,17 @@ fn beam_search_leaves_write(
 
     let mut current_level = alloc::vec![root];
     let mut leaves: Vec<u32> = Vec::new();
+    // Guard against infinite traversal due to corrupted hierarchy.
+    // Use twice the configured max_depth as a generous bound.
+    let max_levels = (config.max_depth as usize).saturating_mul(2).max(64);
+    let mut level_count: usize = 0;
 
     loop {
+        level_count += 1;
+        if level_count > max_levels {
+            break;
+        }
+
         let mut next_level: Vec<(u32, f32)> = Vec::new();
         let mut next_centroids: Vec<f32> = Vec::new();
         let collect_centroids = diversity.enabled();
@@ -439,9 +448,7 @@ fn beam_search_leaves_write(
                     if bytes.len() < dim * 4 {
                         continue;
                     }
-                    let centroid: Vec<f32> = (0..dim)
-                        .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                        .collect();
+                    let centroid: Vec<f32> = (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
                     let dist = config.metric.compute(query, &centroid);
                     next_level.push((child_id, dist));
                     if collect_centroids {
@@ -515,8 +522,16 @@ fn beam_search_leaves_read(
 
     let mut current_level = alloc::vec![root];
     let mut leaves: Vec<u32> = Vec::new();
+    // Guard against infinite traversal due to corrupted hierarchy.
+    let max_levels = (config.max_depth as usize).saturating_mul(2).max(64);
+    let mut level_count: usize = 0;
 
     loop {
+        level_count += 1;
+        if level_count > max_levels {
+            break;
+        }
+
         let mut next_level: Vec<(u32, f32)> = Vec::new();
         let mut next_centroids: Vec<f32> = Vec::new();
         let collect_centroids = diversity.enabled();
@@ -564,9 +579,7 @@ fn beam_search_leaves_read(
                     if bytes.len() < dim * 4 {
                         continue;
                     }
-                    let centroid: Vec<f32> = (0..dim)
-                        .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                        .collect();
+                    let centroid: Vec<f32> = (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
                     let dist = config.metric.compute(query, &centroid);
                     next_level.push((child_id, dist));
                     if collect_centroids {

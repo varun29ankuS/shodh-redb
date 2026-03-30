@@ -210,6 +210,30 @@ impl fmt::Debug for CdcRecord {
 
 impl CdcRecord {
     pub fn from_event(event: &CdcEvent) -> Self {
+        debug_assert!(
+            u16::try_from(event.table_name.len()).is_ok(),
+            "CDC table_name exceeds u16::MAX bytes ({})",
+            event.table_name.len()
+        );
+        debug_assert!(
+            event.key.len() < NONE_SENTINEL as usize,
+            "CDC key exceeds maximum serializable length ({})",
+            event.key.len()
+        );
+        if let Some(ref v) = event.new_value {
+            debug_assert!(
+                v.len() < NONE_SENTINEL as usize,
+                "CDC new_value exceeds maximum serializable length ({})",
+                v.len()
+            );
+        }
+        if let Some(ref v) = event.old_value {
+            debug_assert!(
+                v.len() < NONE_SENTINEL as usize,
+                "CDC old_value exceeds maximum serializable length ({})",
+                v.len()
+            );
+        }
         Self {
             op: event.op,
             table_name: event.table_name.clone(),

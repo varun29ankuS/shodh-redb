@@ -65,7 +65,11 @@ fn multimap_stats_helper(
             let mut leaf_bytes = 0u64;
             let mut is_branch = false;
             for i in 0..accessor.num_pairs() {
-                let entry = accessor.entry(i).unwrap();
+                let entry = accessor.entry(i).ok_or_else(|| {
+                    StorageError::Corrupted(format!(
+                        "invalid entry index {i} in multimap_stats_helper leaf"
+                    ))
+                })?;
                 let collection: &UntypedDynamicCollection =
                     UntypedDynamicCollection::new(entry.value());
                 match collection.collection_type()? {
@@ -89,7 +93,11 @@ fn multimap_stats_helper(
             let (mut leaf_pages, mut branch_pages) = if is_branch { (0, 1) } else { (1, 0) };
 
             for i in 0..accessor.num_pairs() {
-                let entry = accessor.entry(i).unwrap();
+                let entry = accessor.entry(i).ok_or_else(|| {
+                    StorageError::Corrupted(format!(
+                        "invalid entry index {i} in multimap_stats_helper branch iteration"
+                    ))
+                })?;
                 let collection: &UntypedDynamicCollection =
                     UntypedDynamicCollection::new(entry.value());
                 match collection.collection_type()? {
@@ -323,7 +331,11 @@ pub(crate) fn relocate_subtrees(
                 UntypedDynamicCollection::fixed_width_with(value_size),
             );
             for i in 0..accessor.num_pairs() {
-                let entry = accessor.entry(i).unwrap();
+                let entry = accessor.entry(i).ok_or_else(|| {
+                    StorageError::Corrupted(format!(
+                        "invalid entry index {i} in relocate_subtrees leaf"
+                    ))
+                })?;
                 let collection = UntypedDynamicCollection::from_bytes(entry.value());
                 if matches!(collection.collection_type()?, SubtreeV2) {
                     let sub_root = collection.as_subtree();
@@ -335,9 +347,13 @@ pub(crate) fn relocate_subtrees(
                         <() as Value>::fixed_width(),
                     );
                     tree.relocate(relocation_map)?;
-                    if sub_root != tree.get_root().unwrap() {
-                        let new_collection =
-                            UntypedDynamicCollection::make_subtree_data(tree.get_root().unwrap());
+                    let new_root = tree.get_root().ok_or_else(|| {
+                        StorageError::Corrupted(
+                            "missing subtree root after relocate in relocate_subtrees".to_string(),
+                        )
+                    })?;
+                    if sub_root != new_root {
+                        let new_collection = UntypedDynamicCollection::make_subtree_data(new_root);
                         mutator.insert(i, true, entry.key(), &new_collection);
                     }
                 }
@@ -404,7 +420,11 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
             DynamicCollection::<()>::fixed_width_with(value_size),
         );
         for i in 0..accessor.num_pairs() {
-            let entry = accessor.entry(i).unwrap();
+            let entry = accessor.entry(i).ok_or_else(|| {
+                StorageError::Corrupted(format!(
+                    "invalid entry index {i} in finalize_dirty_checksums leaf visitor"
+                ))
+            })?;
             let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
             if matches!(collection.collection_type()?, SubtreeV2) {
                 let sub_root = collection.as_subtree();
@@ -456,7 +476,11 @@ fn parse_subtree_roots<T: Page>(
                 DynamicCollection::<()>::fixed_width_with(fixed_value_size),
             );
             for i in 0..accessor.num_pairs() {
-                let entry = accessor.entry(i).unwrap();
+                let entry = accessor.entry(i).ok_or_else(|| {
+                    StorageError::Corrupted(format!(
+                        "invalid entry index {i} in parse_subtree_roots"
+                    ))
+                })?;
                 let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
                 if matches!(collection.collection_type()?, SubtreeV2) {
                     result.push(collection.as_subtree());
@@ -555,7 +579,12 @@ impl<'a, V: Key> LeafKeyIter<'a, V> {
     ) -> Self {
         let accessor =
             LeafAccessor::new(data.value().as_inline(), fixed_key_size, fixed_value_size);
-        let end_entry = isize::try_from(accessor.num_pairs()).unwrap() - 1;
+        let num_pairs = accessor.num_pairs();
+        let end_entry = if num_pairs == 0 {
+            -1
+        } else {
+            isize::try_from(num_pairs).unwrap_or(isize::MAX) - 1
+        };
         Self {
             inline_collection: data,
             fixed_key_size,
@@ -950,8 +979,7 @@ impl<'a, V: Key + 'static> Iterator for MultimapValue<'a, V> {
     type Item = Result<AccessGuard<'a, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // TODO: optimize out this copy
-        let bytes = match self.inner.as_mut().unwrap() {
+        let bytes = match self.inner.as_mut()? {
             ValueIterState::Subtree(iter) => match iter.next()? {
                 Ok(e) => e.key_data(),
                 Err(err) => {
@@ -967,8 +995,7 @@ impl<'a, V: Key + 'static> Iterator for MultimapValue<'a, V> {
 
 impl<V: Key + 'static> DoubleEndedIterator for MultimapValue<'_, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        // TODO: optimize out this copy
-        let bytes = match self.inner.as_mut().unwrap() {
+        let bytes = match self.inner.as_mut()? {
             ValueIterState::Subtree(iter) => match iter.next_back()? {
                 Ok(e) => e.key_data(),
                 Err(err) => {
@@ -985,16 +1012,14 @@ impl<V: Key + 'static> Drop for MultimapValue<'_, V> {
     fn drop(&mut self) {
         // Drop our references to the pages that are about to be freed
         drop(mem::take(&mut self.inner));
-        if !self.free_on_drop.is_empty() {
-            let mut freed_pages = self.freed_pages.as_ref().unwrap().lock();
+        if !self.free_on_drop.is_empty()
+            && let (Some(freed_pages_arc), Some(mem_arc)) =
+                (self.freed_pages.as_ref(), self.mem.as_ref())
+        {
+            let mut freed_pages = freed_pages_arc.lock();
             let mut allocated_pages = self.allocated_pages.lock();
             for page in &self.free_on_drop {
-                if !self
-                    .mem
-                    .as_ref()
-                    .unwrap()
-                    .free_if_uncommitted(*page, &mut allocated_pages)
-                {
+                if !mem_arc.free_if_uncommitted(*page, &mut allocated_pages) {
                     freed_pages.push(*page);
                 }
             }
@@ -1199,7 +1224,11 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                                 builder
                                     .append(value_bytes_ref, <() as Value>::as_bytes(&()).as_ref());
                             }
-                            let entry = accessor.entry(i).unwrap();
+                            let entry = accessor.entry(i).ok_or_else(|| {
+                                StorageError::Corrupted(format!(
+                                    "invalid entry index {i} in multimap insert inline expansion"
+                                ))
+                            })?;
                             builder.append(entry.key(), entry.value());
                         }
                         if position == accessor.num_pairs() {
@@ -1230,8 +1259,13 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         );
                         let existed = subtree.insert(value.borrow(), &())?.is_some();
                         assert_eq!(existed, found);
-                        let subtree_data =
-                            DynamicCollection::<V>::make_subtree_data(subtree.get_root().unwrap());
+                        let subtree_root = subtree.get_root().ok_or_else(|| {
+                            StorageError::Corrupted(
+                                "missing subtree root after insert in inline-to-subtree conversion"
+                                    .to_string(),
+                            )
+                        })?;
+                        let subtree_data = DynamicCollection::<V>::make_subtree_data(subtree_root);
                         self.tree
                             .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                     }
@@ -1248,8 +1282,12 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     );
                     drop(guard);
                     let existed = subtree.insert(value.borrow(), &())?.is_some();
-                    let subtree_data =
-                        DynamicCollection::<V>::make_subtree_data(subtree.get_root().unwrap());
+                    let subtree_root = subtree.get_root().ok_or_else(|| {
+                        StorageError::Corrupted(
+                            "missing subtree root after insert into existing subtree".to_string(),
+                        )
+                    })?;
+                    let subtree_data = DynamicCollection::<V>::make_subtree_data(subtree_root);
                     self.tree
                         .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
 
@@ -1287,8 +1325,12 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     self.allocated_pages.clone(),
                 );
                 subtree.insert(value.borrow(), &())?;
-                let subtree_data =
-                    DynamicCollection::<V>::make_subtree_data(subtree.get_root().unwrap());
+                let subtree_root = subtree.get_root().ok_or_else(|| {
+                    StorageError::Corrupted(
+                        "missing subtree root after insert into new subtree".to_string(),
+                    )
+                })?;
+                let subtree_data = DynamicCollection::<V>::make_subtree_data(subtree_root);
                 self.tree
                     .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
             }
@@ -1338,7 +1380,15 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         self.tree.remove(key.borrow())?;
                     } else {
                         let old_pairs_len = accessor.length_of_pairs(0, old_num_pairs);
-                        let removed_value_len = accessor.entry(position).unwrap().key().len();
+                        let removed_value_len = accessor
+                            .entry(position)
+                            .ok_or_else(|| {
+                                StorageError::Corrupted(format!(
+                                    "invalid entry index {position} in multimap remove"
+                                ))
+                            })?
+                            .key()
+                            .len();
                         let required = RawLeafBuilder::required_bytes(
                             old_num_pairs - 1,
                             old_pairs_len - removed_value_len,
@@ -1357,7 +1407,11 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         );
                         for i in 0..old_num_pairs {
                             if i != position {
-                                let entry = accessor.entry(i).unwrap();
+                                let entry = accessor.entry(i).ok_or_else(|| {
+                                    StorageError::Corrupted(format!(
+                                        "invalid entry index {i} in multimap remove rebuild"
+                                    ))
+                                })?;
                                 builder.append(entry.key(), entry.value());
                             }
                         }

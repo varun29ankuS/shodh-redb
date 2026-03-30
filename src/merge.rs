@@ -52,18 +52,27 @@ impl MergeOperator for NumericAdd {
                 vec![a.wrapping_add(b)]
             }
             2 => {
-                let a = u16::from_le_bytes(existing.try_into().unwrap());
-                let b = u16::from_le_bytes(operand.try_into().unwrap());
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u16::from_le_bytes(a_bytes);
+                let b = u16::from_le_bytes(b_bytes);
                 a.wrapping_add(b).to_le_bytes().to_vec()
             }
             4 => {
-                let a = u32::from_le_bytes(existing.try_into().unwrap());
-                let b = u32::from_le_bytes(operand.try_into().unwrap());
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u32::from_le_bytes(a_bytes);
+                let b = u32::from_le_bytes(b_bytes);
                 a.wrapping_add(b).to_le_bytes().to_vec()
             }
             8 => {
-                let a = u64::from_le_bytes(existing.try_into().unwrap());
-                let b = u64::from_le_bytes(operand.try_into().unwrap());
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u64::from_le_bytes(a_bytes);
+                let b = u64::from_le_bytes(b_bytes);
                 a.wrapping_add(b).to_le_bytes().to_vec()
             }
             _ => return Some(existing.to_vec()),
@@ -99,18 +108,27 @@ impl MergeOperator for NumericMax {
         let use_operand = match operand.len() {
             1 => operand[0] > existing[0],
             2 => {
-                let a = u16::from_le_bytes(existing.try_into().unwrap());
-                let b = u16::from_le_bytes(operand.try_into().unwrap());
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u16::from_le_bytes(a_bytes);
+                let b = u16::from_le_bytes(b_bytes);
                 b > a
             }
             4 => {
-                let a = u32::from_le_bytes(existing.try_into().unwrap());
-                let b = u32::from_le_bytes(operand.try_into().unwrap());
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u32::from_le_bytes(a_bytes);
+                let b = u32::from_le_bytes(b_bytes);
                 b > a
             }
             8 => {
-                let a = u64::from_le_bytes(existing.try_into().unwrap());
-                let b = u64::from_le_bytes(operand.try_into().unwrap());
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u64::from_le_bytes(a_bytes);
+                let b = u64::from_le_bytes(b_bytes);
                 b > a
             }
             _ => return Some(existing.to_vec()),
@@ -150,18 +168,27 @@ impl MergeOperator for NumericMin {
         let use_operand = match operand.len() {
             1 => operand[0] < existing[0],
             2 => {
-                let a = u16::from_le_bytes(existing.try_into().unwrap());
-                let b = u16::from_le_bytes(operand.try_into().unwrap());
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u16::from_le_bytes(a_bytes);
+                let b = u16::from_le_bytes(b_bytes);
                 b < a
             }
             4 => {
-                let a = u32::from_le_bytes(existing.try_into().unwrap());
-                let b = u32::from_le_bytes(operand.try_into().unwrap());
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u32::from_le_bytes(a_bytes);
+                let b = u32::from_le_bytes(b_bytes);
                 b < a
             }
             8 => {
-                let a = u64::from_le_bytes(existing.try_into().unwrap());
-                let b = u64::from_le_bytes(operand.try_into().unwrap());
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u64::from_le_bytes(a_bytes);
+                let b = u64::from_le_bytes(b_bytes);
                 b < a
             }
             _ => return Some(existing.to_vec()),

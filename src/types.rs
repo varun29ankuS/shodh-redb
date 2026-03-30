@@ -79,6 +79,12 @@ impl TypeName {
     }
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
+        if bytes.is_empty() {
+            return Self {
+                classification: TypeClassification::UserDefined,
+                name: alloc::string::String::from("<empty>"),
+            };
+        }
         let classification =
             TypeClassification::from_byte(bytes[0]).unwrap_or(TypeClassification::UserDefined);
         let name = core::str::from_utf8(&bytes[1..])
@@ -578,7 +584,9 @@ impl Value for char {
     where
         Self: 'a,
     {
-        // Use replacement character on corrupted data instead of panicking
+        if data.len() < 3 {
+            return '\u{FFFD}';
+        }
         char::from_u32(u32::from_le_bytes([data[0], data[1], data[2], 0])).unwrap_or('\u{FFFD}')
     }
 

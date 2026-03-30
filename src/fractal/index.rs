@@ -230,7 +230,7 @@ impl<'txn> FractalIndex<'txn> {
         self.codebooks = Some(codebooks);
 
         // Create root cluster
-        let root_id = self.config.alloc_cluster_id();
+        let root_id = self.config.alloc_cluster_id()?;
         self.config.root_cluster_id = root_id;
         self.config.num_clusters += 1;
 

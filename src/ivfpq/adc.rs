@@ -57,7 +57,10 @@ impl AdcTable {
         let len = pq_codes.len().min(self.num_subvectors);
         let mut dist = 0.0f32;
         for (m, &code) in pq_codes[..len].iter().enumerate() {
-            dist += self.distances[m * 256 + code as usize];
+            let idx = m * 256 + code as usize;
+            if let Some(&d) = self.distances.get(idx) {
+                dist += d;
+            }
         }
         dist
     }

@@ -146,9 +146,12 @@ impl ClusterMeta {
     }
 
     /// Construct from raw bytes.
+    ///
+    /// If `data` is shorter than `CLUSTER_META_SIZE`, missing bytes are zero-filled.
     pub fn from_bytes(data: &[u8]) -> Self {
         let mut buf = [0u8; CLUSTER_META_SIZE];
-        buf.copy_from_slice(&data[..CLUSTER_META_SIZE]);
+        let copy_len = data.len().min(CLUSTER_META_SIZE);
+        buf[..copy_len].copy_from_slice(&data[..copy_len]);
         Self { data: buf }
     }
 }

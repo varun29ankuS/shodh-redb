@@ -95,7 +95,12 @@ impl<'txn> BlobWriter<'txn> {
         self.txn.blob_write_raw(file_offset, data)?;
 
         // Feed the streaming hashers
-        self.hasher.as_mut().expect("hasher taken").update(data);
+        self.hasher
+            .as_mut()
+            .ok_or_else(|| {
+                crate::StorageError::Corrupted("BlobWriter::write() called after finish()".into())
+            })?
+            .update(data);
         if let Some(ref mut sha) = self.sha256_hasher {
             sha.update(data);
         }
@@ -114,7 +119,9 @@ impl<'txn> BlobWriter<'txn> {
         let blob_id = BlobId::new(self.sequence, content_prefix_hash);
 
         // Finalize full checksum (xxh3-128)
-        let hasher = self.hasher.take().expect("hasher taken");
+        let hasher = self.hasher.take().ok_or_else(|| {
+            crate::StorageError::Corrupted("BlobWriter::finish() called more than once".into())
+        })?;
         let checksum = hasher.finish_128();
 
         // Build BlobRef and BlobMeta

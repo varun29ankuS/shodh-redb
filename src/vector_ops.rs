@@ -336,6 +336,15 @@ pub fn quantize_scalar<const N: usize>(v: &[f32; N]) -> SQVec<N> {
 
     let mut codes = [0u8; N];
     let range = max_val - min_val;
+    if !range.is_finite() {
+        // Input contained NaN or Inf -- quantization is meaningless.
+        // Return zero codes with clamped min/max so dequantize produces 0.0.
+        return SQVec {
+            min_val: 0.0,
+            max_val: 0.0,
+            codes,
+        };
+    }
     if range > 0.0 {
         let inv_range = 255.0 / range;
         for (i, &x) in v.iter().enumerate() {

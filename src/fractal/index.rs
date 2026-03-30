@@ -26,6 +26,14 @@ fn te(e: TableError) -> StorageError {
     e.into_storage_error_or_corrupted("fractal index internal table error")
 }
 
+/// Safely read a little-endian `f32` from `data` at `offset`.
+/// Returns `0.0` if the slice is out of bounds or not exactly 4 bytes.
+fn read_f32_le(data: &[u8], offset: usize) -> f32 {
+    data.get(offset..offset + 4)
+        .and_then(|s| s.try_into().ok())
+        .map_or(0.0, f32::from_le_bytes)
+}
+
 /// Validate that a fractal index configuration is internally consistent.
 fn validate_config(config: &FractalIndexConfig) -> crate::Result<()> {
     if config.num_subvectors == 0 {
@@ -151,9 +159,14 @@ impl<'txn> FractalIndex<'txn> {
                 }
                 for k in 0..256 {
                     for d in 0..sub_dim {
-                        let offset = (k * sub_dim + d) * 4;
-                        data[m * 256 * sub_dim + k * sub_dim + d] =
-                            f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+                        let src_offset = (k * sub_dim + d) * 4;
+                        let dst_idx = m * 256 * sub_dim + k * sub_dim + d;
+                        if dst_idx >= data.len() || src_offset + 4 > bytes.len() {
+                            return Err(StorageError::Corrupted(alloc::format!(
+                                "fractal: codebook {m} index overflow: dst={dst_idx}, src_offset={src_offset}",
+                            )));
+                        }
+                        data[dst_idx] = read_f32_le(bytes, src_offset);
                     }
                 }
             }
@@ -318,7 +331,15 @@ impl<'txn> FractalIndex<'txn> {
 
     /// Recursively split any leaf cluster that exceeds `max_leaf_population`.
     fn split_overflowing_clusters(&mut self) -> crate::Result<()> {
+        const MAX_SPLIT_ITERS: u32 = 10_000;
+        let mut split_iters: u32 = 0;
         loop {
+            split_iters += 1;
+            if split_iters > MAX_SPLIT_ITERS {
+                return Err(StorageError::Corrupted(alloc::format!(
+                    "fractal: split loop exceeded {MAX_SPLIT_ITERS} iterations, aborting to prevent infinite loop",
+                )));
+            }
             // Find a leaf cluster that needs splitting
             let clusters_def = TableDefinition::<u32, &[u8]>::new(&self.names.clusters);
             let mut to_split: Option<u32> = None;
@@ -447,7 +468,14 @@ impl<'txn> FractalIndex<'txn> {
             btbl.insert(PostingKey::new(leaf_id, vector_id), raw_bytes.as_slice())?;
         }
 
-        // Update centroid incrementally
+        // Update centroid incrementally.
+        //
+        // NOTE(audit #131): Under SNAPSHOT isolation, concurrent writers may read
+        // stale centroid sums / population counts, causing slight centroid drift.
+        // This is acceptable for approximate nearest-neighbor search: centroids
+        // self-correct over subsequent inserts and periodic rebalancing. A strict
+        // fix would require serializable isolation or an external mutex, which is
+        // not warranted for the marginal accuracy impact.
         let clusters_def = TableDefinition::<u32, &[u8]>::new(&self.names.clusters);
         let old_pop = {
             let ctbl = self.txn.open_table(clusters_def).map_err(te)?;
@@ -729,9 +757,8 @@ impl<'txn> FractalIndex<'txn> {
                     if bytes.len() < dim * 4 {
                         continue;
                     }
-                    let child_centroid: Vec<f32> = (0..dim)
-                        .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                        .collect();
+                    let child_centroid: Vec<f32> =
+                        (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
                     let dist = self.config.metric.compute(vector, &child_centroid);
                     if dist < best_dist {
                         best_dist = dist;
@@ -812,9 +839,7 @@ impl<'txn> FractalIndex<'txn> {
                 if bytes.len() < dim * 4 {
                     return Ok(None);
                 }
-                let vec: Vec<f32> = (0..dim)
-                    .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                    .collect();
+                let vec: Vec<f32> = (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
                 Ok(Some(vec))
             }
             None => Ok(None),
@@ -840,9 +865,7 @@ impl<'txn> FractalIndex<'txn> {
             if bytes.len() < dim * 4 {
                 return Ok(None);
             }
-            let vec: Vec<f32> = (0..dim)
-                .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-                .collect();
+            let vec: Vec<f32> = (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
             return Ok(Some(vec));
         }
         Ok(None)
@@ -916,9 +939,16 @@ impl ReadOnlyFractalIndex {
                 }
                 for k in 0..256 {
                     for d in 0..sub_dim {
-                        let offset = (k * sub_dim + d) * 4;
-                        data[m * 256 * sub_dim + k * sub_dim + d] =
-                            f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+                        let src_offset = (k * sub_dim + d) * 4;
+                        let dst_idx = m * 256 * sub_dim + k * sub_dim + d;
+                        if dst_idx >= data.len() || src_offset + 4 > bytes.len() {
+                            return Err(TableError::Storage(StorageError::Corrupted(
+                                alloc::format!(
+                                    "fractal: codebook {m} index overflow: dst={dst_idx}, src_offset={src_offset}",
+                                ),
+                            )));
+                        }
+                        data[dst_idx] = read_f32_le(bytes, src_offset);
                     }
                 }
             }

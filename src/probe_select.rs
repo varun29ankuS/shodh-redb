@@ -70,15 +70,11 @@ pub fn select_diverse_probes(
         return candidates[..n].to_vec();
     }
 
-    debug_assert_eq!(
-        candidate_centroids.len(),
-        candidates.len() * dim,
-        "candidate_centroids length mismatch: expected {} ({}*{}), got {}",
-        candidates.len() * dim,
-        candidates.len(),
-        dim,
-        candidate_centroids.len(),
-    );
+    if candidate_centroids.len() != candidates.len() * dim {
+        // Length mismatch -- cannot safely index into centroid data.
+        // Return the top-n by distance as a fallback rather than panicking.
+        return candidates[..n].to_vec();
+    }
 
     // Shortlist: top 2*nprobe by distance (already sorted)
     let shortlist_len = candidates.len().min(nprobe.saturating_mul(2));

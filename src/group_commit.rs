@@ -113,6 +113,13 @@ impl GroupCommitter {
 
     /// Enqueue a batch and determine whether this thread should become the leader.
     /// Returns `(should_lead, result_rx)`.
+    ///
+    /// A poisoned mutex means a previous leader panicked while holding the lock,
+    /// leaving `GroupCommitState` in an unknown (potentially half-mutated) state.
+    /// We intentionally do **not** call `into_inner()` to recover: the pending
+    /// batches inside may reference already-dropped resources, and replaying them
+    /// could corrupt the write-ahead log. Returning `LockPoisoned` forces callers
+    /// to treat this as a fatal, non-recoverable error.
     pub fn enqueue(
         &self,
         batch: WriteBatch,

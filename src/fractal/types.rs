@@ -221,8 +221,20 @@ impl HierarchyKey {
 
     #[allow(clippy::big_endian_bytes)]
     pub fn from_be_bytes(data: &[u8]) -> Self {
-        let parent_id = u32::from_be_bytes(data[..4].try_into().unwrap());
-        let child_id = u32::from_be_bytes(data[4..8].try_into().unwrap());
+        debug_assert!(
+            data.len() >= Self::SERIALIZED_SIZE,
+            "HierarchyKey::from_be_bytes: truncated data ({} < {})",
+            data.len(),
+            Self::SERIALIZED_SIZE,
+        );
+        if data.len() < Self::SERIALIZED_SIZE {
+            return Self {
+                parent_id: 0,
+                child_id: 0,
+            };
+        }
+        let parent_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        let child_id = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         Self {
             parent_id,
             child_id,
@@ -290,7 +302,10 @@ impl Value for HierarchyKey {
 impl Key for HierarchyKey {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         // Big-endian serialization means raw byte comparison is correct.
-        data1[..Self::SERIALIZED_SIZE].cmp(&data2[..Self::SERIALIZED_SIZE])
+        let len = Self::SERIALIZED_SIZE.min(data1.len()).min(data2.len());
+        data1[..len]
+            .cmp(&data2[..len])
+            .then(data1.len().cmp(&data2.len()))
     }
 }
 

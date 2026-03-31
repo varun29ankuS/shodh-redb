@@ -56,14 +56,19 @@ impl RangeIterState {
                 parent,
             } => {
                 let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
-                let direction = if reverse { -1 } else { 1 };
-                let next_entry = isize::try_from(entry).unwrap() + direction;
-                if 0 <= next_entry && next_entry < accessor.num_pairs().try_into().unwrap() {
+                let num_pairs = accessor.num_pairs();
+                let next_entry = if reverse {
+                    entry.checked_sub(1)
+                } else {
+                    let next = entry + 1;
+                    if next < num_pairs { Some(next) } else { None }
+                };
+                if let Some(next_entry) = next_entry {
                     Ok(Some(Leaf {
                         page,
                         fixed_key_size,
                         fixed_value_size,
-                        entry: next_entry.try_into().unwrap(),
+                        entry: next_entry,
                         parent,
                     }))
                 } else {
@@ -78,7 +83,13 @@ impl RangeIterState {
                 mut parent,
             } => {
                 let accessor = BranchAccessor::new(&page, fixed_key_size);
-                let child_page_num = accessor.child_page(child).unwrap();
+                let child_page_num = accessor.child_page(child).ok_or_else(|| {
+                    StorageError::Corrupted(format!(
+                        "branch page {:?} has no child at index {}",
+                        page.get_page_number(),
+                        child,
+                    ))
+                })?;
                 let child_page = manager.get_page(child_page_num)?;
                 // Inline read verification for the child page
                 if manager.should_verify_read()
@@ -98,14 +109,22 @@ impl RangeIterState {
                         manager.on_verification_failure(child_page_num)?;
                     }
                 }
-                let direction = if reverse { -1 } else { 1 };
-                let next_child = isize::try_from(child).unwrap() + direction;
-                if 0 <= next_child && next_child < accessor.count_children().try_into().unwrap() {
+                let next_child = if reverse {
+                    child.checked_sub(1)
+                } else {
+                    let next = child + 1;
+                    if next < accessor.count_children() {
+                        Some(next)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(next_child) = next_child {
                     parent = Some(Box::new(Internal {
                         page,
                         fixed_key_size,
                         fixed_value_size,
-                        child: next_child.try_into().unwrap(),
+                        child: next_child,
                         parent,
                     }));
                 }
@@ -117,7 +136,7 @@ impl RangeIterState {
                             fixed_value_size,
                         );
                         let entry = if reverse {
-                            child_accessor.num_pairs() - 1
+                            child_accessor.num_pairs().saturating_sub(1)
                         } else {
                             0
                         };
@@ -132,7 +151,7 @@ impl RangeIterState {
                     BRANCH => {
                         let child_accessor = BranchAccessor::new(&child_page, fixed_key_size);
                         let child = if reverse {
-                            child_accessor.count_children() - 1
+                            child_accessor.count_children().saturating_sub(1)
                         } else {
                             0
                         };
@@ -200,8 +219,11 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
             let raw = &page.memory()[value_range.clone()];
             match decompress_value(raw) {
                 Ok(Cow::Owned(decompressed)) => Some(decompressed),
-                // Borrowed (uncompressed) or error -- defer to value() call
-                _ => None,
+                Ok(Cow::Borrowed(_)) => None,
+                Err(e) => {
+                    debug_assert!(false, "value decompression failed: {e}");
+                    None
+                }
             }
         } else {
             None
@@ -651,8 +673,8 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
 
             self.include_left = false;
             let ce = self.compression_enabled;
-            if self.left.as_ref().unwrap().get_entry::<K, V>(ce).is_some() {
-                return self.left.as_ref().map(|s| s.get_entry(ce).unwrap()).map(Ok);
+            if let Some(entry) = self.left.as_ref().and_then(|s| s.get_entry::<K, V>(ce)) {
+                return Some(Ok(entry));
             }
         }
     }
@@ -713,12 +735,8 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
 
             self.include_right = false;
             let ce = self.compression_enabled;
-            if self.right.as_ref().unwrap().get_entry::<K, V>(ce).is_some() {
-                return self
-                    .right
-                    .as_ref()
-                    .map(|s| s.get_entry(ce).unwrap())
-                    .map(Ok);
+            if let Some(entry) = self.right.as_ref().and_then(|s| s.get_entry::<K, V>(ce)) {
+                return Some(Ok(entry));
             }
         }
     }
@@ -771,7 +789,11 @@ fn find_iter_unbounded<K: Key, V: Value>(
     match page_type {
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
-            let entry = if reverse { accessor.num_pairs() - 1 } else { 0 };
+            let entry = if reverse {
+                accessor.num_pairs().saturating_sub(1)
+            } else {
+                0
+            };
             Ok(Some(Leaf {
                 page,
                 fixed_key_size: K::fixed_width(),
@@ -783,23 +805,38 @@ fn find_iter_unbounded<K: Key, V: Value>(
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
             let child_index = if reverse {
-                accessor.count_children() - 1
+                accessor.count_children().saturating_sub(1)
             } else {
                 0
             };
-            let child_page_number = accessor.child_page(child_index).unwrap();
+            let child_page_number = accessor.child_page(child_index).ok_or_else(|| {
+                StorageError::Corrupted(format!(
+                    "branch page {:?} has no child at index {}",
+                    page.get_page_number(),
+                    child_index,
+                ))
+            })?;
             let child_checksum = accessor.child_checksum(child_index);
             let child_page = manager.get_page(child_page_number)?;
-            let direction = if reverse { -1isize } else { 1 };
-            parent = Some(Box::new(Internal {
-                page,
-                fixed_key_size: K::fixed_width(),
-                fixed_value_size,
-                child: (isize::try_from(child_index).unwrap() + direction)
-                    .try_into()
-                    .unwrap(),
-                parent,
-            }));
+            let next_child = if reverse {
+                child_index.checked_sub(1)
+            } else {
+                let next = child_index + 1;
+                if next < accessor.count_children() {
+                    Some(next)
+                } else {
+                    None
+                }
+            };
+            if let Some(sibling) = next_child {
+                parent = Some(Box::new(Internal {
+                    page,
+                    fixed_key_size: K::fixed_width(),
+                    fixed_value_size,
+                    child: sibling,
+                    parent,
+                }));
+            }
             find_iter_unbounded::<K, V>(
                 child_page,
                 parent,
@@ -841,11 +878,14 @@ fn find_iter_left<K: Key, V: Value>(
     match page_type {
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
+            if accessor.num_pairs() == 0 {
+                return Ok((false, None));
+            }
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query || !found
             } else {
-                // Back up to the last valid position
+                // Back up to the last valid position (safe: num_pairs > 0 checked above)
                 position -= 1;
                 // and exclude it
                 false
@@ -864,7 +904,7 @@ fn find_iter_left<K: Key, V: Value>(
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_checksum = accessor.child_checksum(child_index);
             let child_page = manager.get_page(child_page_number)?;
-            if child_index < accessor.count_children() - 1 {
+            if child_index + 1 < accessor.count_children() {
                 parent = Some(Box::new(Internal {
                     page,
                     fixed_key_size: K::fixed_width(),
@@ -913,11 +953,14 @@ fn find_iter_right<K: Key, V: Value>(
     match page_type {
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
+            if accessor.num_pairs() == 0 {
+                return Ok((false, None));
+            }
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query && found
             } else {
-                // Back up to the last valid position
+                // Back up to the last valid position (safe: num_pairs > 0 checked above)
                 position -= 1;
                 // and include it
                 true
@@ -995,16 +1038,23 @@ fn find_iter_unbounded_raw(
         })),
         BRANCH => {
             let accessor = BranchAccessor::new(&page, fixed_key_size);
-            let child_page_number = accessor.child_page(0).unwrap();
+            let child_page_number = accessor.child_page(0).ok_or_else(|| {
+                StorageError::Corrupted(format!(
+                    "branch page {:?} has no child at index 0",
+                    page.get_page_number(),
+                ))
+            })?;
             let child_checksum = accessor.child_checksum(0);
             let child_page = manager.get_page(child_page_number)?;
-            parent = Some(Box::new(Internal {
-                page,
-                fixed_key_size,
-                fixed_value_size,
-                child: 1,
-                parent,
-            }));
+            if 1 < accessor.count_children() {
+                parent = Some(Box::new(Internal {
+                    page,
+                    fixed_key_size,
+                    fixed_value_size,
+                    child: 1,
+                    parent,
+                }));
+            }
             find_iter_unbounded_raw(
                 child_page,
                 parent,

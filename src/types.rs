@@ -221,8 +221,8 @@ impl Value for bool {
     where
         Self: 'a,
     {
-        // Treat any non-zero as true (like C) to avoid crashing on corrupted data
-        data[0] != 0
+        // Treat any non-zero as true (like C); empty slice yields false on corrupted data
+        matches!(data.first(), Some(&b) if b != 0)
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
@@ -266,6 +266,9 @@ impl<T: Value> Value for Option<T> {
     where
         Self: 'a,
     {
+        if data.is_empty() {
+            return None;
+        }
         match data[0] {
             0 => None,
             // Treat any non-zero discriminator as Some to avoid crashing on corrupted data
@@ -282,7 +285,7 @@ impl<T: Value> Value for Option<T> {
             result[0] = 1;
             result.extend_from_slice(T::as_bytes(x).as_ref());
         } else if let Some(fixed_width) = T::fixed_width() {
-            result.extend_from_slice(&vec![0; fixed_width]);
+            result.resize(1 + fixed_width, 0);
         }
         result
     }
@@ -295,17 +298,19 @@ impl<T: Value> Value for Option<T> {
 impl<T: Key> Key for Option<T> {
     #[allow(clippy::collapsible_else_if)]
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        if data1[0] == 0 {
-            if data2[0] == 0 {
+        let d1 = data1.first().copied().unwrap_or(0);
+        let d2 = data2.first().copied().unwrap_or(0);
+        if d1 == 0 {
+            if d2 == 0 {
                 Ordering::Equal
             } else {
                 Ordering::Less
             }
         } else {
-            if data2[0] == 0 {
+            if d2 == 0 {
                 Ordering::Greater
             } else {
-                T::compare(&data1[1..], &data2[1..])
+                T::compare(data1.get(1..).unwrap_or(&[]), data2.get(1..).unwrap_or(&[]))
             }
         }
     }
@@ -368,7 +373,9 @@ impl<const N: usize> Value for &[u8; N] {
     where
         Self: 'a,
     {
-        data.try_into().unwrap()
+        // first_chunk returns None if data.len() < N. The fallback uses an
+        // inline const to produce a &'static [u8; N] (which outlives 'a).
+        data.first_chunk::<N>().unwrap_or(const { &[0u8; N] })
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8; N]
@@ -410,19 +417,32 @@ impl<const N: usize, T: Value> Value for [T; N] {
         let mut result = Vec::with_capacity(N);
         if let Some(fixed) = T::fixed_width() {
             for i in 0..N {
-                result.push(T::from_bytes(&data[fixed * i..fixed * (i + 1)]));
+                let slice_start = fixed * i;
+                let slice_end = fixed * (i + 1);
+                result.push(T::from_bytes(
+                    data.get(slice_start..slice_end).unwrap_or(&[]),
+                ));
             }
         } else {
             // Set offset to the first data item
             let mut start = size_of::<u32>() * N;
             for i in 0..N {
                 let range = size_of::<u32>() * i..size_of::<u32>() * (i + 1);
-                let end = u32::from_le_bytes(data[range].try_into().unwrap()) as usize;
-                result.push(T::from_bytes(&data[start..end]));
+                let end = data
+                    .get(range)
+                    .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                    .map_or(0, u32::from_le_bytes) as usize;
+                // Clamp to data bounds and enforce monotonically non-decreasing offsets
+                let end = end.min(data.len()).max(start);
+                let slice_start = start.min(data.len());
+                result.push(T::from_bytes(data.get(slice_start..end).unwrap_or(&[])));
                 start = end;
             }
         }
-        result.try_into().unwrap()
+        // Vec always has exactly N elements; the conversion is infallible.
+        result
+            .try_into()
+            .unwrap_or_else(|_| panic!("BUG: pushed exactly N={N} elements"))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
@@ -440,7 +460,15 @@ impl<const N: usize, T: Value> Value for [T; N] {
             let mut result = vec![0u8; size_of::<u32>() * N];
             for i in 0..N {
                 result.extend_from_slice(T::as_bytes(&value[i]).as_ref());
-                let end: u32 = result.len().try_into().unwrap();
+                debug_assert!(
+                    u32::try_from(result.len()).is_ok(),
+                    "[T; N] as_bytes: serialized size {} exceeds u32::MAX offset limit",
+                    result.len(),
+                );
+                // Saturate at u32::MAX rather than panic; reader will see
+                // clamped offsets and produce a shorter-than-expected element.
+                #[allow(clippy::cast_possible_truncation)]
+                let end = u32::try_from(result.len()).unwrap_or(u32::MAX);
                 result[size_of::<u32>() * i..size_of::<u32>() * (i + 1)]
                     .copy_from_slice(&end.to_le_bytes());
             }
@@ -459,8 +487,11 @@ impl<const N: usize, T: Key> Key for [T; N] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         if let Some(fixed) = T::fixed_width() {
             for i in 0..N {
-                let range = fixed * i..fixed * (i + 1);
-                let comparison = T::compare(&data1[range.clone()], &data2[range]);
+                let s = fixed * i;
+                let e = fixed * (i + 1);
+                let s1 = data1.get(s..e).unwrap_or(&[]);
+                let s2 = data2.get(s..e).unwrap_or(&[]);
+                let comparison = T::compare(s1, s2);
                 if !comparison.is_eq() {
                     return comparison;
                 }
@@ -471,9 +502,20 @@ impl<const N: usize, T: Key> Key for [T; N] {
             let mut start2 = size_of::<u32>() * N;
             for i in 0..N {
                 let range = size_of::<u32>() * i..size_of::<u32>() * (i + 1);
-                let end1 = u32::from_le_bytes(data1[range.clone()].try_into().unwrap()) as usize;
-                let end2 = u32::from_le_bytes(data2[range].try_into().unwrap()) as usize;
-                let comparison = T::compare(&data1[start1..end1], &data2[start2..end2]);
+                let end1 = data1
+                    .get(range.clone())
+                    .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                    .map_or(0, u32::from_le_bytes) as usize;
+                let end2 = data2
+                    .get(range)
+                    .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                    .map_or(0, u32::from_le_bytes) as usize;
+                // Enforce monotonic offsets and clamp to data bounds
+                let end1 = end1.min(data1.len()).max(start1);
+                let end2 = end2.min(data2.len()).max(start2);
+                let s1 = data1.get(start1..end1).unwrap_or(&[]);
+                let s2 = data2.get(start2..end2).unwrap_or(&[]);
+                let comparison = T::compare(s1, s2);
                 if !comparison.is_eq() {
                     return comparison;
                 }
@@ -626,7 +668,11 @@ macro_rules! le_value {
             where
                 Self: 'a,
             {
-                <$t>::from_le_bytes(data.try_into().unwrap())
+                let bytes: [u8; core::mem::size_of::<$t>()] = match data.try_into() {
+                    Ok(b) => b,
+                    Err(_) => return <$t>::from_le_bytes([0u8; core::mem::size_of::<$t>()]),
+                };
+                <$t>::from_le_bytes(bytes)
             }
 
             fn as_bytes<'a, 'b: 'a>(

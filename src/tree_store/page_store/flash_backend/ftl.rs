@@ -13,10 +13,19 @@ use super::wear_leveling::EraseCountTable;
 /// Sentinel value indicating an unmapped logical block.
 const UNMAPPED: u32 = 0xFFFF_FFFF;
 
-/// Trigger static wear leveling check every N erase operations.
+/// Trigger static wear leveling check every 256 erase operations.
+///
+/// Balances wear-leveling responsiveness against the overhead of scanning
+/// the full erase-count table. 256 is a common industry default for
+/// small-to-medium flash geometries (<=4 GiB).
 const STATIC_WL_INTERVAL: u32 = 256;
 
-/// Swap blocks if the max-min erase count delta exceeds this threshold.
+/// Swap hot/cold blocks when the max-min erase count delta exceeds 100 cycles.
+///
+/// Prevents erase concentration on heavily-used blocks while avoiding
+/// unnecessary block moves for small variations. Typical NAND endurance is
+/// 3,000-100,000 P/E cycles; a 100-cycle threshold triggers early enough to
+/// spread wear without excessive churn.
 const STATIC_WL_THRESHOLD: u32 = 100;
 
 /// Logical-to-physical block mapping table.
@@ -106,8 +115,10 @@ impl BlockMap {
             *r = logical_block;
         }
 
-        // Remove from free list
-        self.free_list.retain(|&b| b != physical_block);
+        // Remove from free list via swap_remove for O(1) instead of O(n) retain
+        if let Some(pos) = self.free_list.iter().position(|&b| b == physical_block) {
+            self.free_list.swap_remove(pos);
+        }
     }
 
     fn release(&mut self, logical_block: u32) {
@@ -139,9 +150,6 @@ struct FtlState<H: FlashHardware> {
     journal: FtlJournal,
     /// Current logical storage length in bytes.
     logical_len: u64,
-    /// Number of logical blocks available for data.
-    #[allow(dead_code)]
-    logical_block_count: u32,
     /// First physical block index used for data (after reserved region).
     data_region_start: u32,
     /// Erase operations since last static wear-level check.
@@ -156,11 +164,29 @@ pub(super) struct FlashTranslationLayer<H: FlashHardware> {
 
 #[allow(clippy::cast_possible_truncation)]
 impl<H: FlashHardware> FlashTranslationLayer<H> {
+    /// Validate that flash geometry has no zero-valued fields that would cause
+    /// division-by-zero or infinite loops.
+    fn validate_geometry(geo: &FlashGeometry) -> core::result::Result<(), BackendError> {
+        if geo.write_page_size == 0 || geo.erase_block_size == 0 || geo.total_blocks == 0 {
+            #[cfg(feature = "std")]
+            return Err(BackendError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid flash geometry: zero-valued field",
+            )));
+            #[cfg(not(feature = "std"))]
+            return Err(BackendError::Message(String::from(
+                "invalid flash geometry: zero-valued field",
+            )));
+        }
+        Ok(())
+    }
+
     /// Mount an existing FTL from flash, recovering state from the journal.
     ///
     /// If no valid journal is found, formats the device fresh.
     pub fn mount(hw: H) -> core::result::Result<Self, BackendError> {
         let geo = hw.geometry();
+        Self::validate_geometry(&geo)?;
         let reserved = geo.reserved_blocks();
         let journal_blocks_per_slot = (reserved.saturating_sub(2)) / 2;
 
@@ -179,7 +205,6 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             Some(data) => {
                 let (block_map, erase_counts, bad_blocks, logical_len) =
                     Self::deserialize_metadata(&data, data_physical_blocks, geo.total_blocks)?;
-                let logical_block_count = block_map.forward.len() as u32;
 
                 Ok(Self {
                     state: Mutex::new(FtlState {
@@ -190,7 +215,6 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                         bad_blocks,
                         journal,
                         logical_len,
-                        logical_block_count,
                         data_region_start,
                         ops_since_static_wl: 0,
                     }),
@@ -203,6 +227,7 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
     /// Format the flash device, erasing FTL metadata and creating a fresh mapping.
     pub fn format(hw: H) -> core::result::Result<Self, BackendError> {
         let geo = hw.geometry();
+        Self::validate_geometry(&geo)?;
         let reserved = geo.reserved_blocks();
         let journal_blocks_per_slot = (reserved.saturating_sub(2)) / 2;
 
@@ -260,7 +285,6 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             bad_blocks,
             journal,
             logical_len: 0,
-            logical_block_count,
             data_region_start,
             ops_since_static_wl: 0,
         };
@@ -283,19 +307,21 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
     pub fn read(&self, offset: u64, buf: &mut [u8]) -> core::result::Result<(), BackendError> {
         let state = self.state.lock();
         let ebs = u64::from(state.geometry.erase_block_size);
+        debug_assert!(ebs > 0, "erase_block_size validated at construction");
 
         let mut remaining = buf.len();
         let mut buf_offset = 0usize;
         let mut current_offset = offset;
 
         while remaining > 0 {
-            let logical_block = (current_offset / ebs) as u32;
+            let logical_block = u32::try_from(current_offset / ebs).unwrap_or(u32::MAX);
             let offset_in_block = (current_offset % ebs) as usize;
             let chunk_len = remaining.min(ebs as usize - offset_in_block);
 
             match state.block_map.get(logical_block) {
                 Some(phys_block) => {
-                    let phys_offset = u64::from(state.data_region_start + phys_block) * ebs
+                    let phys_offset = (u64::from(state.data_region_start) + u64::from(phys_block))
+                        * ebs
                         + offset_in_block as u64;
                     state
                         .hw
@@ -325,13 +351,14 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         let ebs = state.geometry.erase_block_size;
         let ebs_u64 = u64::from(ebs);
         let wps = state.geometry.write_page_size as usize;
+        debug_assert!(ebs > 0 && wps > 0, "geometry validated at construction");
 
         let mut remaining = data.len();
         let mut data_offset = 0usize;
         let mut current_offset = offset;
 
         while remaining > 0 {
-            let logical_block = (current_offset / ebs_u64) as u32;
+            let logical_block = u32::try_from(current_offset / ebs_u64).unwrap_or(u32::MAX);
             let offset_in_block = (current_offset % ebs_u64) as usize;
             let chunk_len = remaining.min(ebs as usize - offset_in_block);
 
@@ -342,7 +369,8 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
 
             // Read existing data if block is mapped
             if let Some(phys_block) = old_phys {
-                let phys_offset = u64::from(state.data_region_start + phys_block) * ebs_u64;
+                let phys_offset =
+                    (u64::from(state.data_region_start) + u64::from(phys_block)) * ebs_u64;
                 state.hw.read(phys_offset, &mut block_buf)?;
             }
 
@@ -353,14 +381,15 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             // Allocate fresh physical block (lowest erase count)
             let new_phys = Self::allocate_block(&mut state)?;
 
-            // Erase the new block
-            let global_new = state.data_region_start + new_phys;
-            state.hw.erase_block(global_new)?;
-            state.erase_counts.increment(global_new);
+            // Erase the new block -- widen to u64 before adding to prevent u32 overflow
+            let global_new = u64::from(state.data_region_start) + u64::from(new_phys);
+            let global_new_u32 = (global_new & 0xFFFF_FFFF) as u32;
+            state.hw.erase_block(global_new_u32)?;
+            state.erase_counts.increment(global_new_u32);
             state.ops_since_static_wl += 1;
 
             // Write the full block in write-page-sized chunks
-            let phys_base = u64::from(global_new) * ebs_u64;
+            let phys_base = global_new * ebs_u64;
             let mut page_offset = 0usize;
             while page_offset < ebs as usize {
                 let write_len = wps.min(ebs as usize - page_offset);
@@ -397,8 +426,9 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
     pub fn set_len(&self, len: u64) -> core::result::Result<(), BackendError> {
         let mut state = self.state.lock();
         let ebs = u64::from(state.geometry.erase_block_size);
-        let old_blocks = state.logical_len.div_ceil(ebs) as u32;
-        let new_blocks = len.div_ceil(ebs) as u32;
+        debug_assert!(ebs > 0, "erase_block_size validated at construction");
+        let old_blocks = u32::try_from(state.logical_len.div_ceil(ebs)).unwrap_or(u32::MAX);
+        let new_blocks = u32::try_from(len.div_ceil(ebs)).unwrap_or(u32::MAX);
 
         // If shrinking, release blocks beyond the new length
         if new_blocks < old_blocks {
@@ -458,8 +488,10 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
 
         let best = state.erase_counts.pick_lowest(free).unwrap_or(free[0]);
 
-        // Remove from free list
-        state.block_map.free_list.retain(|&b| b != best);
+        // Remove from free list via swap_remove for O(1) instead of O(n) retain
+        if let Some(pos) = state.block_map.free_list.iter().position(|&b| b == best) {
+            state.block_map.free_list.swap_remove(pos);
+        }
         Ok(best)
     }
 
@@ -469,6 +501,7 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         let ebs = state.geometry.erase_block_size;
         let ebs_u64 = u64::from(ebs);
         let wps = state.geometry.write_page_size as usize;
+        debug_assert!(ebs > 0 && wps > 0, "geometry validated at construction");
 
         // Collect in-use physical blocks (data-region-relative indices)
         let in_use: Vec<u32> = state
@@ -485,18 +518,20 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         );
 
         if let Some((hot_phys, cold_phys)) = swap {
-            let hot_global = state.data_region_start + hot_phys;
-            let cold_global = state.data_region_start + cold_phys;
+            // Widen to u64 before adding to prevent u32 overflow
+            let hot_global = u64::from(state.data_region_start) + u64::from(hot_phys);
+            let cold_global = u64::from(state.data_region_start) + u64::from(cold_phys);
+            let cold_global_u32 = (cold_global & 0xFFFF_FFFF) as u32;
 
             // Read hot block data
             let mut buf = vec![0u8; ebs as usize];
-            state.hw.read(u64::from(hot_global) * ebs_u64, &mut buf)?;
+            state.hw.read(hot_global * ebs_u64, &mut buf)?;
 
             // Erase cold block and write data there
-            state.hw.erase_block(cold_global)?;
-            state.erase_counts.increment(cold_global);
+            state.hw.erase_block(cold_global_u32)?;
+            state.erase_counts.increment(cold_global_u32);
 
-            let phys_base = u64::from(cold_global) * ebs_u64;
+            let phys_base = cold_global * ebs_u64;
             let mut page_offset = 0usize;
             while page_offset < ebs as usize {
                 let write_len = wps.min(ebs as usize - page_offset);

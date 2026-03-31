@@ -55,6 +55,12 @@ impl PostingKey {
 
     #[allow(clippy::big_endian_bytes)]
     pub fn from_be_bytes(data: &[u8]) -> Self {
+        debug_assert!(
+            data.len() >= Self::SERIALIZED_SIZE,
+            "PostingKey::from_be_bytes: truncated data ({} < {})",
+            data.len(),
+            Self::SERIALIZED_SIZE,
+        );
         if data.len() < Self::SERIALIZED_SIZE {
             return Self {
                 cluster_id: 0,
@@ -132,7 +138,10 @@ impl Value for PostingKey {
 impl Key for PostingKey {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         // Big-endian serialization means raw byte comparison is correct.
-        data1[..Self::SERIALIZED_SIZE].cmp(&data2[..Self::SERIALIZED_SIZE])
+        let len = Self::SERIALIZED_SIZE.min(data1.len()).min(data2.len());
+        data1[..len]
+            .cmp(&data2[..len])
+            .then(data1.len().cmp(&data2.len()))
     }
 }
 
@@ -169,6 +178,11 @@ impl Value for AssignmentValue {
     where
         Self: 'a,
     {
+        debug_assert!(
+            data.len() >= 4,
+            "AssignmentValue::from_bytes: truncated data ({} < 4)",
+            data.len(),
+        );
         if data.len() < 4 {
             return 0;
         }

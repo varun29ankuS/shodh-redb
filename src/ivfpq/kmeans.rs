@@ -1,7 +1,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::vector_ops::{DistanceMetric, euclidean_distance_sq};
+use crate::vector_ops::DistanceMetric;
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG -- no_std compatible
@@ -51,10 +51,30 @@ impl Xorshift64 {
     }
 
     /// Returns a random index in [0, n).
+    ///
+    /// Uses Lemire's nearly divisionless method to eliminate modulo bias.
+    /// Returns 0 if `n == 0`.
     #[inline]
     #[allow(clippy::cast_possible_truncation)]
     pub fn next_usize(&mut self, n: usize) -> usize {
-        (self.next_u64() % n as u64) as usize
+        if n == 0 {
+            return 0;
+        }
+        // Lemire's fast unbiased bounded random: avoids modulo bias for all n.
+        let n = n as u64;
+        let mut x = self.next_u64();
+        let mut hi = ((u128::from(x) * u128::from(n)) >> 64) as u64;
+        let mut lo = x.wrapping_mul(n);
+        if lo < n {
+            let threshold = n.wrapping_neg() % n; // (2^64 - n) % n
+            while lo < threshold {
+                x = self.next_u64();
+                let full = u128::from(x) * u128::from(n);
+                hi = (full >> 64) as u64;
+                lo = full as u64;
+            }
+        }
+        hi as usize
     }
 }
 
@@ -66,7 +86,13 @@ impl Xorshift64 {
 ///
 /// Each vector is `dim` contiguous f32 values. The total number of vectors is
 /// `vectors.len() / dim`.
-fn kmeans_pp_init(flat_vectors: &[f32], dim: usize, k: usize, rng: &mut Xorshift64) -> Vec<f32> {
+fn kmeans_pp_init(
+    flat_vectors: &[f32],
+    dim: usize,
+    k: usize,
+    rng: &mut Xorshift64,
+    metric: DistanceMetric,
+) -> Vec<f32> {
     let n = flat_vectors.len() / dim;
     debug_assert!(k > 0 && k <= n);
 
@@ -87,7 +113,7 @@ fn kmeans_pp_init(flat_vectors: &[f32], dim: usize, k: usize, rng: &mut Xorshift
         let mut total: f64 = 0.0;
         for i in 0..n {
             let v = &flat_vectors[i * dim..(i + 1) * dim];
-            let d = euclidean_distance_sq(v, prev_centroid);
+            let d = metric.compute(v, prev_centroid);
             if d < min_dists[i] {
                 min_dists[i] = d;
             }
@@ -225,9 +251,10 @@ pub fn kmeans(
     max_iter: usize,
     metric: DistanceMetric,
 ) -> Vec<f32> {
-    let n = flat_vectors.len() / dim;
-    assert!(n > 0, "kmeans: empty input");
-    assert!(dim > 0, "kmeans: zero dimension");
+    let n = flat_vectors.len() / dim.max(1);
+    if n == 0 || dim == 0 {
+        return Vec::new();
+    }
 
     // Clamp k to available points.
     let k = k.min(n);
@@ -236,10 +263,12 @@ pub fn kmeans(
     }
 
     let mut rng = Xorshift64::from_data(&flat_vectors[..dim.min(flat_vectors.len())]);
-    let mut centroids = kmeans_pp_init(flat_vectors, dim, k, &mut rng);
+    let mut centroids = kmeans_pp_init(flat_vectors, dim, k, &mut rng, metric);
 
     let mut assignments = Vec::with_capacity(n);
     let mut prev_dist = f64::INFINITY;
+    let mut old_centroids = vec![0.0f32; k * dim];
+    let mut counts = vec![0u32; k];
 
     for iter in 0..max_iter {
         let total_dist = assign_all(flat_vectors, dim, &centroids, k, &mut assignments, metric);
@@ -252,11 +281,11 @@ pub fn kmeans(
         prev_dist = total_dist;
 
         // Save current centroids for empty-cluster fallback.
-        let old_centroids = centroids.clone();
+        old_centroids.copy_from_slice(&centroids);
         recompute_centroids(flat_vectors, dim, k, &assignments, &mut centroids);
 
         // Restore centroids for any cluster that ended up empty.
-        let mut counts = vec![0u32; k];
+        counts.fill(0);
         for &a in &assignments {
             counts[a as usize] += 1;
         }
@@ -284,7 +313,12 @@ pub fn assign_nearest(
     let mut best_c = 0u32;
     let mut best_d = f32::INFINITY;
     for c in 0..num_clusters {
-        let centroid = &centroids[c * dim..(c + 1) * dim];
+        let start = c * dim;
+        let end = start + dim;
+        if end > centroids.len() {
+            break;
+        }
+        let centroid = &centroids[start..end];
         let d = metric.compute(vector, centroid);
         if d < best_d {
             best_d = d;
@@ -318,25 +352,36 @@ pub fn nearest_clusters(
 
     #[allow(clippy::cast_possible_truncation)]
     let mut dists: Vec<(u32, f32)> = (0..num_clusters)
-        .map(|c| {
-            let centroid = &centroids[c * dim..(c + 1) * dim];
-            (c as u32, metric.compute(query, centroid))
+        .filter_map(|c| {
+            let start = c * dim;
+            let end = start + dim;
+            if end > centroids.len() {
+                return None;
+            }
+            let centroid = &centroids[start..end];
+            Some((c as u32, metric.compute(query, centroid)))
         })
         .collect();
 
+    // All centroids may have been filtered out if centroid data is truncated.
+    if dists.is_empty() {
+        return Vec::new();
+    }
+
     if !diversity.enabled() {
         // Fast path: identical to previous behavior
-        dists.select_nth_unstable_by(nprobe - 1, |a, b| {
+        let select_idx = (nprobe - 1).min(dists.len() - 1);
+        dists.select_nth_unstable_by(select_idx, |a, b| {
             a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal)
         });
-        dists.truncate(nprobe);
+        dists.truncate(nprobe.min(dists.len()));
         dists.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
         return dists;
     }
 
     // Diversity path: partial sort top 2*nprobe, build centroid shortlist,
     // then delegate to the shared MMR selector.
-    let shortlist_size = (nprobe.saturating_mul(2)).min(num_clusters);
+    let shortlist_size = (nprobe.saturating_mul(2)).min(dists.len());
     dists.select_nth_unstable_by(shortlist_size - 1, |a, b| {
         a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal)
     });
@@ -347,7 +392,11 @@ pub fn nearest_clusters(
     let mut shortlist_centroids: Vec<f32> = Vec::with_capacity(shortlist_size * dim);
     for &(cid, _) in &dists {
         let start = cid as usize * dim;
-        shortlist_centroids.extend_from_slice(&centroids[start..start + dim]);
+        let end = start + dim;
+        if end > centroids.len() {
+            continue;
+        }
+        shortlist_centroids.extend_from_slice(&centroids[start..end]);
     }
 
     crate::probe_select::select_diverse_probes(

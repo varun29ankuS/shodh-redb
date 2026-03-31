@@ -1,6 +1,6 @@
 /// SOC Audit Hardening Tests
 ///
-/// Comprehensive test suite validating fixes for issues #143–#160 from the
+/// Comprehensive test suite validating fixes for issues #143-#160 from the
 /// silicon audit. Covers:
 ///
 /// - Boundary conditions and edge cases for all distance/vector functions
@@ -25,7 +25,7 @@ fn create_tempfile() -> tempfile::NamedTempFile {
 }
 
 // ===========================================================================
-// §1  NaN HANDLING — Issues #151, #157 (Neighbor Eq/Ord, nearest_k)
+// S1  NaN HANDLING -- Issues #151, #157 (Neighbor Eq/Ord, nearest_k)
 // ===========================================================================
 
 #[test]
@@ -34,7 +34,7 @@ fn neighbor_nan_distance_does_not_corrupt_heap() {
     // block valid results from entering the top-k heap.
     let vectors: Vec<(u64, Vec<f32>)> = vec![
         (1, vec![1.0, 0.0, 0.0]),      // close
-        (2, vec![f32::NAN, 0.0, 0.0]), // NaN → distance is NaN
+        (2, vec![f32::NAN, 0.0, 0.0]), // NaN -> distance is NaN
         (3, vec![0.9, 0.1, 0.0]),      // close
         (4, vec![0.0, 0.0, 1.0]),      // far
     ];
@@ -101,17 +101,17 @@ fn nearest_k_fixed_nan_handling() {
 }
 
 // ===========================================================================
-// §2  DISTANCE FUNCTION EDGE CASES — Issues #151, #157
+// S2  DISTANCE FUNCTION EDGE CASES -- Issues #151, #157
 // ===========================================================================
 
 #[test]
 fn cosine_similarity_zero_vectors() {
     let zero = [0.0f32; 4];
     let v = [1.0, 2.0, 3.0, 4.0];
-    // Zero vs non-zero → 0.0 (not NaN)
+    // Zero vs non-zero -> 0.0 (not NaN)
     assert_eq!(shodh_redb::cosine_similarity(&zero, &v), 0.0);
     assert_eq!(shodh_redb::cosine_similarity(&v, &zero), 0.0);
-    // Zero vs zero → 0.0 (not NaN)
+    // Zero vs zero -> 0.0 (not NaN)
     assert_eq!(shodh_redb::cosine_similarity(&zero, &zero), 0.0);
 }
 
@@ -166,7 +166,7 @@ fn distance_empty_vectors() {
     assert_eq!(shodh_redb::dot_product(&empty, &empty), 0.0);
     assert_eq!(shodh_redb::euclidean_distance_sq(&empty, &empty), 0.0);
     assert_eq!(shodh_redb::manhattan_distance(&empty, &empty), 0.0);
-    // cosine_similarity: zero-magnitude → 0.0
+    // cosine_similarity: zero-magnitude -> 0.0
     assert_eq!(shodh_redb::cosine_similarity(&empty, &empty), 0.0);
 }
 
@@ -189,7 +189,7 @@ fn hamming_distance_all_different() {
 }
 
 // ===========================================================================
-// §3  L2 NORMALIZATION EDGE CASES
+// S3  L2 NORMALIZATION EDGE CASES
 // ===========================================================================
 
 #[test]
@@ -219,7 +219,7 @@ fn l2_norm_empty() {
 }
 
 // ===========================================================================
-// §4  QUANTIZATION EDGE CASES — Issue #151 (scalar quantize rounding)
+// S4  QUANTIZATION EDGE CASES -- Issue #151 (scalar quantize rounding)
 // ===========================================================================
 
 #[test]
@@ -241,7 +241,7 @@ fn quantize_scalar_single_element() {
     let sq = shodh_redb::quantize_scalar(&v);
     assert_eq!(sq.min_val, 42.0);
     assert_eq!(sq.max_val, 42.0);
-    // Constant → range=0 → code=0
+    // Constant -> range=0 -> code=0
     let dq = sq.dequantize();
     assert!((dq[0] - 42.0).abs() < f32::EPSILON);
 }
@@ -256,7 +256,7 @@ fn quantize_scalar_nan_input() {
     assert_eq!(sq.min_val, 1.0);
     assert_eq!(sq.max_val, 3.0);
     // Non-NaN elements should be correctly quantized
-    // codes[1] ≈ 0 (min), codes[2] ≈ 128, codes[3] = 255 (max)
+    // codes[1] ~ 0 (min), codes[2] ~ 128, codes[3] = 255 (max)
     assert_eq!(sq.codes[3], 255);
 }
 
@@ -264,7 +264,7 @@ fn quantize_scalar_nan_input() {
 fn quantize_scalar_inf_input() {
     let v = [f32::INFINITY, f32::NEG_INFINITY, 1.0, 2.0];
     let sq = shodh_redb::quantize_scalar(&v);
-    // Inf range → not finite → fallback
+    // Inf range -> not finite -> fallback
     assert_eq!(sq.min_val, 0.0);
     assert_eq!(sq.max_val, 0.0);
 }
@@ -275,7 +275,7 @@ fn quantize_scalar_extreme_range() {
     let sq = shodh_redb::quantize_scalar(&v);
     assert!(sq.min_val < 0.0);
     assert!(sq.max_val > 0.0);
-    // Should not panic; codes are u8 — verify they roundtrip
+    // Should not panic; codes are u8 -- verify they roundtrip
     assert_eq!(sq.codes.len(), 4);
 }
 
@@ -321,7 +321,7 @@ fn quantize_binary_zero_is_not_positive() {
 }
 
 // ===========================================================================
-// §5  SQ DISTANCE APPROXIMATION EDGE CASES
+// S5  SQ DISTANCE APPROXIMATION EDGE CASES
 // ===========================================================================
 
 #[test]
@@ -346,12 +346,12 @@ fn sq_dot_product_constant_vector() {
 }
 
 // ===========================================================================
-// §6  FIXED/DYN VEC STORAGE — Issue #147 (silent corruption on truncated data)
+// S6  FIXED/DYN VEC STORAGE -- Issue #147 (silent corruption on truncated data)
 // ===========================================================================
 
 #[test]
 fn fixed_vec_zero_dimension() {
-    // FixedVec<0> is technically valid — fixed_width=0, stores nothing.
+    // FixedVec<0> is technically valid -- fixed_width=0, stores nothing.
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     const TABLE_VEC0: TableDefinition<u64, FixedVec<0>> = TableDefinition::new("vec0");
@@ -431,7 +431,7 @@ fn dyn_vec_large_dimension() {
 }
 
 // ===========================================================================
-// §7  BINARY QUANTIZED STORAGE ROUNDTRIPS
+// S7  BINARY QUANTIZED STORAGE ROUNDTRIPS
 // ===========================================================================
 
 #[test]
@@ -474,7 +474,7 @@ fn binary_quantized_large_roundtrip() {
 }
 
 // ===========================================================================
-// §8  SCALAR QUANTIZED STORAGE ROUNDTRIPS
+// S8  SCALAR QUANTIZED STORAGE ROUNDTRIPS
 // ===========================================================================
 
 #[test]
@@ -509,7 +509,7 @@ fn scalar_quantized_store_and_dequantize_accuracy() {
 }
 
 // ===========================================================================
-// §9  OPTION<T> TYPE SERIALIZATION — Issue #158
+// S9  OPTION<T> TYPE SERIALIZATION -- Issue #158
 // ===========================================================================
 
 #[test]
@@ -560,7 +560,7 @@ fn option_key_ordering() {
 }
 
 // ===========================================================================
-// §10  ARRAY [T; N] TYPE — Issue #149 (variable-width offset validation)
+// S10  ARRAY [T; N] TYPE -- Issue #149 (variable-width offset validation)
 // ===========================================================================
 
 #[test]
@@ -637,7 +637,7 @@ fn array_key_ordering_fixed_width() {
 }
 
 // ===========================================================================
-// §11  BOOL AND CHAR TYPES — Corruption resilience
+// S11  BOOL AND CHAR TYPES -- Corruption resilience
 // ===========================================================================
 
 #[test]
@@ -670,7 +670,7 @@ fn char_value_roundtrip() {
     {
         let mut table = write_txn.open_table(TABLE).unwrap();
         table.insert(&1u64, &'A').unwrap();
-        table.insert(&2u64, &'🦀').unwrap(); // U+1F980 (4-byte UTF-8, > U+FFFF)
+        table.insert(&2u64, &'\u{1F980}').unwrap(); // U+1F980 (4-byte UTF-8, > U+FFFF)
         table.insert(&3u64, &'\u{10FFFF}').unwrap(); // max Unicode scalar
     }
     write_txn.commit().unwrap();
@@ -678,7 +678,7 @@ fn char_value_roundtrip() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(TABLE).unwrap();
     assert_eq!(table.get(&1u64).unwrap().unwrap().value(), 'A');
-    assert_eq!(table.get(&2u64).unwrap().unwrap().value(), '🦀');
+    assert_eq!(table.get(&2u64).unwrap().unwrap().value(), '\u{1F980}');
     assert_eq!(table.get(&3u64).unwrap().unwrap().value(), '\u{10FFFF}');
 }
 
@@ -708,7 +708,7 @@ fn char_key_ordering() {
 }
 
 // ===========================================================================
-// §12  STRING TYPE — Corruption resilience
+// S12  STRING TYPE -- Corruption resilience
 // ===========================================================================
 
 #[test]
@@ -728,7 +728,7 @@ fn string_key_and_value_roundtrip() {
             .unwrap();
         // Unicode
         table
-            .insert("日本語".to_string(), "Japanese".to_string())
+            .insert("nihongo".to_string(), "Japanese".to_string())
             .unwrap();
     }
     write_txn.commit().unwrap();
@@ -744,13 +744,13 @@ fn string_key_and_value_roundtrip() {
         "empty_key"
     );
     assert_eq!(
-        table.get("日本語".to_string()).unwrap().unwrap().value(),
+        table.get("nihongo".to_string()).unwrap().unwrap().value(),
         "Japanese"
     );
 }
 
 // ===========================================================================
-// §13  NUMERIC TYPES — Boundary values
+// S13  NUMERIC TYPES -- Boundary values
 // ===========================================================================
 
 #[test]
@@ -842,7 +842,7 @@ fn f32_special_values_stored() {
 }
 
 // ===========================================================================
-// §14  BYTE SLICE AND BYTE ARRAY TYPES
+// S14  BYTE SLICE AND BYTE ARRAY TYPES
 // ===========================================================================
 
 #[test]
@@ -894,7 +894,7 @@ fn byte_array_roundtrip() {
 }
 
 // ===========================================================================
-// §15  NEAREST-K EDGE CASES
+// S15  NEAREST-K EDGE CASES
 // ===========================================================================
 
 #[test]
@@ -962,7 +962,7 @@ fn nearest_k_large_k_returns_all_sorted() {
 }
 
 // ===========================================================================
-// §16  WRITE_F32_LE / READ_F32_LE ROUNDTRIP
+// S16  WRITE_F32_LE / READ_F32_LE ROUNDTRIP
 // ===========================================================================
 
 #[test]
@@ -1003,7 +1003,7 @@ fn read_f32_le_empty() {
 }
 
 // ===========================================================================
-// §17  TRANSACTION ISOLATION
+// S17  TRANSACTION ISOLATION
 // ===========================================================================
 
 #[test]
@@ -1039,7 +1039,7 @@ fn read_transaction_sees_snapshot() {
 }
 
 // ===========================================================================
-// §18  RANGE ITERATION — B-tree iterator correctness
+// S18  RANGE ITERATION -- B-tree iterator correctness
 // ===========================================================================
 
 #[test]
@@ -1150,7 +1150,7 @@ fn range_iteration_empty_range() {
 }
 
 // ===========================================================================
-// §19  MANY ENTRIES — Stress test B-tree with enough data to split pages
+// S19  MANY ENTRIES -- Stress test B-tree with enough data to split pages
 // ===========================================================================
 
 #[test]
@@ -1223,7 +1223,7 @@ fn stress_many_entries_delete_half() {
 }
 
 // ===========================================================================
-// §20  FLASH BACKEND — Overflow-safe offset calculations (Issue #145)
+// S20  FLASH BACKEND -- Overflow-safe offset calculations (Issue #145)
 // ===========================================================================
 
 #[test]

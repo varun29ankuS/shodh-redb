@@ -17,14 +17,14 @@ const UNMAPPED: u32 = 0xFFFF_FFFF;
 ///
 /// Balances wear-leveling responsiveness against the overhead of scanning
 /// the full erase-count table. 256 is a common industry default for
-/// small-to-medium flash geometries (≤4 GiB).
+/// small-to-medium flash geometries (<=4 GiB).
 const STATIC_WL_INTERVAL: u32 = 256;
 
 /// Swap hot/cold blocks when the max-min erase count delta exceeds 100 cycles.
 ///
 /// Prevents erase concentration on heavily-used blocks while avoiding
 /// unnecessary block moves for small variations. Typical NAND endurance is
-/// 3 000–100 000 P/E cycles; a 100-cycle threshold triggers early enough to
+/// 3,000-100,000 P/E cycles; a 100-cycle threshold triggers early enough to
 /// spread wear without excessive churn.
 const STATIC_WL_THRESHOLD: u32 = 100;
 

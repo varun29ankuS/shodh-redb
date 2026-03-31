@@ -8007,7 +8007,7 @@ fn ephemeral_savepoint_restore() {
         t.insert(&3, &30).unwrap();
     }
     w.commit().unwrap();
-    // Txn 3: restore savepoint — rolls back txn 2's writes
+    // Txn 3: restore savepoint -- rolls back txn 2's writes
     let mut w = db.begin_write().unwrap();
     w.restore_savepoint(&sp).unwrap();
     w.commit().unwrap();
@@ -8154,7 +8154,7 @@ fn savepoint_across_multiple_tables() {
         t2.remove(&1).unwrap();
     }
     w.commit().unwrap();
-    // Txn 3: restore savepoint — undoes all txn 2 changes across both tables
+    // Txn 3: restore savepoint -- undoes all txn 2 changes across both tables
     let mut w = db.begin_write().unwrap();
     w.restore_savepoint(&sp).unwrap();
     w.commit().unwrap();
@@ -9210,7 +9210,7 @@ fn in_memory_savepoint() {
         t.insert(&2, &2).unwrap();
     }
     w.commit().unwrap();
-    // Txn 3: restore savepoint — undoes key=2
+    // Txn 3: restore savepoint -- undoes key=2
     let mut w = db.begin_write().unwrap();
     w.restore_savepoint(&sp).unwrap();
     w.commit().unwrap();
@@ -10266,7 +10266,7 @@ fn compact_and_integrity_check() {
 }
 
 // ===========================================================================
-// S400 BLOB STORE — CORE STORAGE & RETRIEVAL
+// S400 BLOB STORE -- CORE STORAGE & RETRIEVAL
 // ===========================================================================
 
 #[test]
@@ -10474,7 +10474,7 @@ fn blob_store_persist_across_reopen() {
 }
 
 // ===========================================================================
-// S410 BLOB STORE — STREAMING WRITER
+// S410 BLOB STORE -- STREAMING WRITER
 // ===========================================================================
 
 #[test]
@@ -10538,7 +10538,7 @@ fn blob_writer_single_byte_chunks() {
 }
 
 // ===========================================================================
-// S420 BLOB STORE — RANGE READS
+// S420 BLOB STORE -- RANGE READS
 // ===========================================================================
 
 #[test]
@@ -10599,7 +10599,7 @@ fn blob_range_read_out_of_bounds() {
 }
 
 // ===========================================================================
-// S430 BLOB STORE — TAGS & NAMESPACE
+// S430 BLOB STORE -- TAGS & NAMESPACE
 // ===========================================================================
 
 #[test]
@@ -10732,7 +10732,7 @@ fn blob_namespace_query() {
 }
 
 // ===========================================================================
-// S440 BLOB STORE — CAUSAL LINKS
+// S440 BLOB STORE -- CAUSAL LINKS
 // ===========================================================================
 
 #[test]
@@ -10872,7 +10872,7 @@ fn blob_causal_all_relation_types() {
 }
 
 // ===========================================================================
-// S450 BLOB STORE — STATS & DEDUP
+// S450 BLOB STORE -- STATS & DEDUP
 // ===========================================================================
 
 #[test]
@@ -12232,7 +12232,7 @@ fn stress_rapid_open_close_with_data() {
 }
 
 // ===========================================================================
-// S600 BLOB STORE — ADVANCED PATTERNS
+// S600 BLOB STORE -- ADVANCED PATTERNS
 // ===========================================================================
 
 #[test]

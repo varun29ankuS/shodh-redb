@@ -219,8 +219,11 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
             let raw = &page.memory()[value_range.clone()];
             match decompress_value(raw) {
                 Ok(Cow::Owned(decompressed)) => Some(decompressed),
-                // Borrowed (uncompressed) or error -- defer to value() call
-                _ => None,
+                Ok(Cow::Borrowed(_)) => None,
+                Err(_e) => {
+                    debug_assert!(false, "value decompression failed: {_e}");
+                    None
+                }
             }
         } else {
             None

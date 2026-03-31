@@ -13,10 +13,19 @@ use super::wear_leveling::EraseCountTable;
 /// Sentinel value indicating an unmapped logical block.
 const UNMAPPED: u32 = 0xFFFF_FFFF;
 
-/// Trigger static wear leveling check every N erase operations.
+/// Trigger static wear leveling check every 256 erase operations.
+///
+/// Balances wear-leveling responsiveness against the overhead of scanning
+/// the full erase-count table. 256 is a common industry default for
+/// small-to-medium flash geometries (≤4 GiB).
 const STATIC_WL_INTERVAL: u32 = 256;
 
-/// Swap blocks if the max-min erase count delta exceeds this threshold.
+/// Swap hot/cold blocks when the max-min erase count delta exceeds 100 cycles.
+///
+/// Prevents erase concentration on heavily-used blocks while avoiding
+/// unnecessary block moves for small variations. Typical NAND endurance is
+/// 3 000–100 000 P/E cycles; a 100-cycle threshold triggers early enough to
+/// spread wear without excessive churn.
 const STATIC_WL_THRESHOLD: u32 = 100;
 
 /// Logical-to-physical block mapping table.
@@ -141,9 +150,6 @@ struct FtlState<H: FlashHardware> {
     journal: FtlJournal,
     /// Current logical storage length in bytes.
     logical_len: u64,
-    /// Number of logical blocks available for data.
-    #[allow(dead_code)]
-    logical_block_count: u32,
     /// First physical block index used for data (after reserved region).
     data_region_start: u32,
     /// Erase operations since last static wear-level check.
@@ -199,8 +205,6 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             Some(data) => {
                 let (block_map, erase_counts, bad_blocks, logical_len) =
                     Self::deserialize_metadata(&data, data_physical_blocks, geo.total_blocks)?;
-                let logical_block_count =
-                    u32::try_from(block_map.forward.len()).unwrap_or(u32::MAX);
 
                 Ok(Self {
                     state: Mutex::new(FtlState {
@@ -211,7 +215,6 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                         bad_blocks,
                         journal,
                         logical_len,
-                        logical_block_count,
                         data_region_start,
                         ops_since_static_wl: 0,
                     }),
@@ -282,7 +285,6 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             bad_blocks,
             journal,
             logical_len: 0,
-            logical_block_count,
             data_region_start,
             ops_since_static_wl: 0,
         };

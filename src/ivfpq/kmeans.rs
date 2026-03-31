@@ -1,7 +1,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::vector_ops::{DistanceMetric, euclidean_distance_sq};
+use crate::vector_ops::DistanceMetric;
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG -- no_std compatible
@@ -86,7 +86,13 @@ impl Xorshift64 {
 ///
 /// Each vector is `dim` contiguous f32 values. The total number of vectors is
 /// `vectors.len() / dim`.
-fn kmeans_pp_init(flat_vectors: &[f32], dim: usize, k: usize, rng: &mut Xorshift64) -> Vec<f32> {
+fn kmeans_pp_init(
+    flat_vectors: &[f32],
+    dim: usize,
+    k: usize,
+    rng: &mut Xorshift64,
+    metric: DistanceMetric,
+) -> Vec<f32> {
     let n = flat_vectors.len() / dim;
     debug_assert!(k > 0 && k <= n);
 
@@ -107,7 +113,7 @@ fn kmeans_pp_init(flat_vectors: &[f32], dim: usize, k: usize, rng: &mut Xorshift
         let mut total: f64 = 0.0;
         for i in 0..n {
             let v = &flat_vectors[i * dim..(i + 1) * dim];
-            let d = euclidean_distance_sq(v, prev_centroid);
+            let d = metric.compute(v, prev_centroid);
             if d < min_dists[i] {
                 min_dists[i] = d;
             }
@@ -257,10 +263,12 @@ pub fn kmeans(
     }
 
     let mut rng = Xorshift64::from_data(&flat_vectors[..dim.min(flat_vectors.len())]);
-    let mut centroids = kmeans_pp_init(flat_vectors, dim, k, &mut rng);
+    let mut centroids = kmeans_pp_init(flat_vectors, dim, k, &mut rng, metric);
 
     let mut assignments = Vec::with_capacity(n);
     let mut prev_dist = f64::INFINITY;
+    let mut old_centroids = vec![0.0f32; k * dim];
+    let mut counts = vec![0u32; k];
 
     for iter in 0..max_iter {
         let total_dist = assign_all(flat_vectors, dim, &centroids, k, &mut assignments, metric);
@@ -273,11 +281,11 @@ pub fn kmeans(
         prev_dist = total_dist;
 
         // Save current centroids for empty-cluster fallback.
-        let old_centroids = centroids.clone();
+        old_centroids.copy_from_slice(&centroids);
         recompute_centroids(flat_vectors, dim, k, &assignments, &mut centroids);
 
         // Restore centroids for any cluster that ended up empty.
-        let mut counts = vec![0u32; k];
+        counts.fill(0);
         for &a in &assignments {
             counts[a as usize] += 1;
         }

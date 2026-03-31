@@ -310,10 +310,7 @@ impl<T: Key> Key for Option<T> {
             if d2 == 0 {
                 Ordering::Greater
             } else {
-                T::compare(
-                    data1.get(1..).unwrap_or(&[]),
-                    data2.get(1..).unwrap_or(&[]),
-                )
+                T::compare(data1.get(1..).unwrap_or(&[]), data2.get(1..).unwrap_or(&[]))
             }
         }
     }
@@ -438,9 +435,7 @@ impl<const N: usize, T: Value> Value for [T; N] {
                 // Clamp to data bounds and enforce monotonically non-decreasing offsets
                 let end = end.min(data.len()).max(start);
                 let slice_start = start.min(data.len());
-                result.push(T::from_bytes(
-                    data.get(slice_start..end).unwrap_or(&[]),
-                ));
+                result.push(T::from_bytes(data.get(slice_start..end).unwrap_or(&[])));
                 start = end;
             }
         }

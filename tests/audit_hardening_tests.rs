@@ -11,7 +11,6 @@
 /// - Nearest-clusters empty-centroid guard
 /// - Variable-width [T; N] offset validation
 /// - Scalar/binary quantization edge cases
-
 use shodh_redb::{
     BinaryQuantized, Database, DistanceMetric, DynVec, FixedVec, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, ScalarQuantized, TableDefinition,
@@ -34,18 +33,15 @@ fn neighbor_nan_distance_does_not_corrupt_heap() {
     // NaN distances should be evicted first (sort as largest) so they don't
     // block valid results from entering the top-k heap.
     let vectors: Vec<(u64, Vec<f32>)> = vec![
-        (1, vec![1.0, 0.0, 0.0]),   // close
+        (1, vec![1.0, 0.0, 0.0]),      // close
         (2, vec![f32::NAN, 0.0, 0.0]), // NaN → distance is NaN
-        (3, vec![0.9, 0.1, 0.0]),   // close
-        (4, vec![0.0, 0.0, 1.0]),   // far
+        (3, vec![0.9, 0.1, 0.0]),      // close
+        (4, vec![0.0, 0.0, 1.0]),      // far
     ];
     let query = [1.0f32, 0.0, 0.0];
-    let results = shodh_redb::nearest_k(
-        vectors.into_iter(),
-        &query,
-        2,
-        |a, b| shodh_redb::euclidean_distance_sq(a, b),
-    );
+    let results = shodh_redb::nearest_k(vectors.into_iter(), &query, 2, |a, b| {
+        shodh_redb::euclidean_distance_sq(a, b)
+    });
     // Should return 2 results without panicking. NaN entries should NOT
     // dominate the heap and block valid results.
     assert_eq!(results.len(), 2);
@@ -70,12 +66,9 @@ fn neighbor_all_nan_distances() {
     ];
     let query = [1.0f32];
     // Should not panic. Results may contain NaN entries since there's nothing better.
-    let results = shodh_redb::nearest_k(
-        vectors.into_iter(),
-        &query,
-        2,
-        |a, b| shodh_redb::euclidean_distance_sq(a, b),
-    );
+    let results = shodh_redb::nearest_k(vectors.into_iter(), &query, 2, |a, b| {
+        shodh_redb::euclidean_distance_sq(a, b)
+    });
     assert!(results.len() <= 2);
 }
 
@@ -87,12 +80,9 @@ fn neighbor_inf_distance_handled() {
         (3, vec![0.5, 0.5]),
     ];
     let query = [1.0f32, 0.0];
-    let results = shodh_redb::nearest_k(
-        vectors.into_iter(),
-        &query,
-        2,
-        |a, b| shodh_redb::euclidean_distance_sq(a, b),
-    );
+    let results = shodh_redb::nearest_k(vectors.into_iter(), &query, 2, |a, b| {
+        shodh_redb::euclidean_distance_sq(a, b)
+    });
     assert_eq!(results.len(), 2);
     // key=1 should be closest (dist=0), key=3 next
     assert_eq!(results[0].key, 1);
@@ -101,18 +91,12 @@ fn neighbor_inf_distance_handled() {
 
 #[test]
 fn nearest_k_fixed_nan_handling() {
-    let vectors: Vec<(u64, [f32; 2])> = vec![
-        (1, [1.0, 0.0]),
-        (2, [f32::NAN, f32::NAN]),
-        (3, [0.9, 0.1]),
-    ];
+    let vectors: Vec<(u64, [f32; 2])> =
+        vec![(1, [1.0, 0.0]), (2, [f32::NAN, f32::NAN]), (3, [0.9, 0.1])];
     let query = [1.0f32, 0.0];
-    let results = shodh_redb::nearest_k_fixed(
-        vectors.into_iter(),
-        &query,
-        2,
-        |a, b| shodh_redb::euclidean_distance_sq(a, b),
-    );
+    let results = shodh_redb::nearest_k_fixed(vectors.into_iter(), &query, 2, |a, b| {
+        shodh_redb::euclidean_distance_sq(a, b)
+    });
     assert_eq!(results.len(), 2);
 }
 
@@ -291,10 +275,8 @@ fn quantize_scalar_extreme_range() {
     let sq = shodh_redb::quantize_scalar(&v);
     assert!(sq.min_val < 0.0);
     assert!(sq.max_val > 0.0);
-    // Should not panic; codes should be valid u8 values
-    for &c in &sq.codes {
-        assert!(c <= 255);
-    }
+    // Should not panic; codes are u8 — verify they roundtrip
+    assert_eq!(sq.codes.len(), 4);
 }
 
 #[test]
@@ -499,8 +481,7 @@ fn binary_quantized_large_roundtrip() {
 fn scalar_quantized_store_and_dequantize_accuracy() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
-    const SQ_TABLE: TableDefinition<u64, ScalarQuantized<128>> =
-        TableDefinition::new("sq128");
+    const SQ_TABLE: TableDefinition<u64, ScalarQuantized<128>> = TableDefinition::new("sq128");
 
     let original: [f32; 128] = core::array::from_fn(|i| (i as f32) / 128.0);
     let sq = shodh_redb::quantize_scalar(&original);
@@ -569,7 +550,11 @@ fn option_key_ordering() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(TABLE).unwrap();
-    let keys: Vec<_> = table.iter().unwrap().map(|e| e.unwrap().0.value()).collect();
+    let keys: Vec<_> = table
+        .iter()
+        .unwrap()
+        .map(|e| e.unwrap().0.value())
+        .collect();
     // None < Some(0) < Some(1) < Some(100)
     assert_eq!(keys, vec![None, Some(0), Some(1), Some(100)]);
 }
@@ -606,13 +591,9 @@ fn array_variable_width_roundtrip() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(TABLE).unwrap();
-        table
-            .insert(&1u64, &["hello", "world", "test"])
-            .unwrap();
+        table.insert(&1u64, &["hello", "world", "test"]).unwrap();
         table.insert(&2u64, &["", "", ""]).unwrap();
-        table
-            .insert(&3u64, &["a", "bb", "ccc"])
-            .unwrap();
+        table.insert(&3u64, &["a", "bb", "ccc"]).unwrap();
     }
     write_txn.commit().unwrap();
 
@@ -647,7 +628,11 @@ fn array_key_ordering_fixed_width() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(TABLE).unwrap();
-    let keys: Vec<_> = table.iter().unwrap().map(|e| e.unwrap().0.value()).collect();
+    let keys: Vec<_> = table
+        .iter()
+        .unwrap()
+        .map(|e| e.unwrap().0.value())
+        .collect();
     assert_eq!(keys, vec![[0, 100], [1, 5], [1, 10], [2, 1]]);
 }
 
@@ -714,7 +699,11 @@ fn char_key_ordering() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(TABLE).unwrap();
-    let keys: Vec<_> = table.iter().unwrap().map(|e| e.unwrap().0.value()).collect();
+    let keys: Vec<_> = table
+        .iter()
+        .unwrap()
+        .map(|e| e.unwrap().0.value())
+        .collect();
     assert_eq!(keys, vec!['a', 'm', 'z']);
 }
 
@@ -786,7 +775,11 @@ fn u64_boundary_values() {
     assert_eq!(table.get(&(u64::MAX / 2)).unwrap().unwrap().value(), 42);
 
     // Ordering: keys should be sorted
-    let keys: Vec<u64> = table.iter().unwrap().map(|e| e.unwrap().0.value()).collect();
+    let keys: Vec<u64> = table
+        .iter()
+        .unwrap()
+        .map(|e| e.unwrap().0.value())
+        .collect();
     assert_eq!(keys, vec![0, u64::MAX / 2, u64::MAX]);
 }
 
@@ -811,7 +804,11 @@ fn i64_boundary_values() {
     assert_eq!(table.get(&i64::MIN).unwrap().unwrap().value(), i64::MIN);
     assert_eq!(table.get(&i64::MAX).unwrap().unwrap().value(), i64::MAX);
 
-    let keys: Vec<i64> = table.iter().unwrap().map(|e| e.unwrap().0.value()).collect();
+    let keys: Vec<i64> = table
+        .iter()
+        .unwrap()
+        .map(|e| e.unwrap().0.value())
+        .collect();
     assert_eq!(keys, vec![i64::MIN, -1, 0, i64::MAX]);
 }
 
@@ -858,7 +855,9 @@ fn byte_slice_empty_key_and_value() {
     {
         let mut table = write_txn.open_table(TABLE).unwrap();
         table.insert([].as_slice(), [].as_slice()).unwrap();
-        table.insert([1u8, 2, 3].as_slice(), [4u8, 5, 6].as_slice()).unwrap();
+        table
+            .insert([1u8, 2, 3].as_slice(), [4u8, 5, 6].as_slice())
+            .unwrap();
     }
     write_txn.commit().unwrap();
 
@@ -902,12 +901,9 @@ fn byte_array_roundtrip() {
 fn nearest_k_empty_iterator() {
     let vectors: Vec<(u64, Vec<f32>)> = vec![];
     let query = [1.0f32, 0.0];
-    let results = shodh_redb::nearest_k(
-        vectors.into_iter(),
-        &query,
-        10,
-        |a, b| shodh_redb::euclidean_distance_sq(a, b),
-    );
+    let results = shodh_redb::nearest_k(vectors.into_iter(), &query, 10, |a, b| {
+        shodh_redb::euclidean_distance_sq(a, b)
+    });
     assert!(results.is_empty());
 }
 
@@ -919,12 +915,9 @@ fn nearest_k_k_equals_one() {
         (3, vec![5.0, 0.0]),
     ];
     let query = [0.0f32, 0.0];
-    let results = shodh_redb::nearest_k(
-        vectors.into_iter(),
-        &query,
-        1,
-        |a, b| shodh_redb::euclidean_distance_sq(a, b),
-    );
+    let results = shodh_redb::nearest_k(vectors.into_iter(), &query, 1, |a, b| {
+        shodh_redb::euclidean_distance_sq(a, b)
+    });
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].key, 2); // closest to origin
 }
@@ -939,12 +932,9 @@ fn nearest_k_identical_distances() {
     ];
     let query = [0.0f32, 0.0];
     // All equidistant from origin (distance=1.0). Should return k=2 without issues.
-    let results = shodh_redb::nearest_k(
-        vectors.into_iter(),
-        &query,
-        2,
-        |a, b| shodh_redb::euclidean_distance_sq(a, b),
-    );
+    let results = shodh_redb::nearest_k(vectors.into_iter(), &query, 2, |a, b| {
+        shodh_redb::euclidean_distance_sq(a, b)
+    });
     assert_eq!(results.len(), 2);
     // All distances should be 1.0
     for r in &results {
@@ -954,16 +944,11 @@ fn nearest_k_identical_distances() {
 
 #[test]
 fn nearest_k_large_k_returns_all_sorted() {
-    let vectors: Vec<(u64, Vec<f32>)> = (0..100)
-        .map(|i| (i as u64, vec![i as f32, 0.0]))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..100).map(|i| (i as u64, vec![i as f32, 0.0])).collect();
     let query = [0.0f32, 0.0];
-    let results = shodh_redb::nearest_k(
-        vectors.into_iter(),
-        &query,
-        100,
-        |a, b| shodh_redb::euclidean_distance_sq(a, b),
-    );
+    let results = shodh_redb::nearest_k(vectors.into_iter(), &query, 100, |a, b| {
+        shodh_redb::euclidean_distance_sq(a, b)
+    });
     assert_eq!(results.len(), 100);
     // Results should be sorted by ascending distance
     for i in 1..results.len() {
@@ -1243,8 +1228,8 @@ fn stress_many_entries_delete_half() {
 
 #[test]
 fn flash_backend_many_sequential_writes() {
-    use shodh_redb::{Builder, FlashBackend, FlashGeometry, FlashHardware};
     use shodh_redb::error::BackendError;
+    use shodh_redb::{Builder, FlashBackend, FlashGeometry, FlashHardware};
     use std::sync::{Arc, RwLock};
 
     struct SimpleFlash {

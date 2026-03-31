@@ -113,7 +113,11 @@ impl RangeIterState {
                     child.checked_sub(1)
                 } else {
                     let next = child + 1;
-                    if next < accessor.count_children() { Some(next) } else { None }
+                    if next < accessor.count_children() {
+                        Some(next)
+                    } else {
+                        None
+                    }
                 };
                 if let Some(next_child) = next_child {
                     parent = Some(Box::new(Internal {
@@ -782,7 +786,11 @@ fn find_iter_unbounded<K: Key, V: Value>(
     match page_type {
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
-            let entry = if reverse { accessor.num_pairs().saturating_sub(1) } else { 0 };
+            let entry = if reverse {
+                accessor.num_pairs().saturating_sub(1)
+            } else {
+                0
+            };
             Ok(Some(Leaf {
                 page,
                 fixed_key_size: K::fixed_width(),
@@ -811,7 +819,11 @@ fn find_iter_unbounded<K: Key, V: Value>(
                 child_index.checked_sub(1)
             } else {
                 let next = child_index + 1;
-                if next < accessor.count_children() { Some(next) } else { None }
+                if next < accessor.count_children() {
+                    Some(next)
+                } else {
+                    None
+                }
             };
             if let Some(sibling) = next_child {
                 parent = Some(Box::new(Internal {

@@ -35,8 +35,23 @@ jobs:
         with:
           tool: cargo-fuzz@0.12.0,cargo-deny@0.19.0
 
-      - name: Extended fuzz (10 minutes)
-        run: cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=10000 -max_total_time=600
+      - name: Fuzz redb core (5 minutes)
+        run: cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=10000 -max_total_time=300
+
+      - name: Fuzz vector ops (90s)
+        run: cargo fuzz run --sanitizer=none fuzz_vector_ops -- -max_len=10000 -max_total_time=90
+
+      - name: Fuzz quantization (90s)
+        run: cargo fuzz run --sanitizer=none fuzz_quantization -- -max_len=10000 -max_total_time=90
+
+      - name: Fuzz blob types (60s)
+        run: cargo fuzz run --sanitizer=none fuzz_blob_types -- -max_len=10000 -max_total_time=60
+
+      - name: Fuzz fractal types (60s)
+        run: cargo fuzz run --sanitizer=none fuzz_fractal_types -- -max_len=10000 -max_total_time=60
+
+      - name: Fuzz IVF-PQ kmeans (90s)
+        run: cargo fuzz run --sanitizer=none fuzz_ivfpq_kmeans -- -max_len=10000 -max_total_time=90
 
       - name: Upload corpus on failure
         if: failure()

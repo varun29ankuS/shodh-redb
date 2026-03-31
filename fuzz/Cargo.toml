@@ -3,7 +3,7 @@ name = "redb-fuzz"
 version = "0.0.0"
 authors = ["Automatically generated"]
 publish = false
-edition = "2018"
+edition = "2021"
 
 [package.metadata]
 cargo-fuzz = true
@@ -26,5 +26,35 @@ members = ["."]
 [[bin]]
 name = "fuzz_redb"
 path = "fuzz_targets/fuzz_redb.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_vector_ops"
+path = "fuzz_targets/fuzz_vector_ops.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_quantization"
+path = "fuzz_targets/fuzz_quantization.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_blob_types"
+path = "fuzz_targets/fuzz_blob_types.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_fractal_types"
+path = "fuzz_targets/fuzz_fractal_types.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ivfpq_kmeans"
+path = "fuzz_targets/fuzz_ivfpq_kmeans.rs"
 test = false
 doc = false

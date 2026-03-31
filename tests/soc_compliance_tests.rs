@@ -4,11 +4,10 @@
 /// transactions, distance function properties, HLC, builder config,
 /// blob store types, TTL tables, causal edges, fractal metadata, and more.
 use shodh_redb::{
-    BlobId, BlobMeta, BlobStats, Builder, CausalLink, CdcConfig, ChangeOp, ChangeStream,
-    ContentType, Database, DatabaseStats, DedupStats, Durability, MultimapTableDefinition,
-    MultimapTableHandle, ReadVerification, ReadableDatabase, ReadableMultimapTable, ReadableTable,
-    ReadableTableMetadata, RelationType, StoreOptions, TableDefinition, TableHandle,
-    TtlTableDefinition, VerifyLevel, VerifyReport,
+    BlobId, Builder, CausalLink, CdcConfig, ChangeOp, ContentType, Database, DatabaseStats,
+    Durability, MultimapTableDefinition, MultimapTableHandle, ReadVerification, ReadableDatabase,
+    ReadableMultimapTable, ReadableTable, ReadableTableMetadata, RelationType, StoreOptions,
+    TableDefinition, TableHandle, TtlTableDefinition, VerifyLevel,
 };
 use std::sync::{Arc, Barrier};
 use std::time::Duration;

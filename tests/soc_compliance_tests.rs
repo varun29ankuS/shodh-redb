@@ -3140,8 +3140,8 @@ fn iter_ascending_order_u64() {
     let r = db.begin_read().unwrap();
     let t = r.open_table(T).unwrap();
     let keys: Vec<u64> = t.iter().unwrap().map(|e| e.unwrap().0.value()).collect();
-    for i in 0..100 {
-        assert_eq!(keys[i], i as u64);
+    for (i, key) in keys.iter().enumerate().take(100) {
+        assert_eq!(*key, i as u64);
     }
 }
 
@@ -4586,14 +4586,14 @@ fn f32_roundtrip() {
     let w = db.begin_write().unwrap();
     {
         let mut t = w.open_table(T).unwrap();
-        t.insert(&1u64, &3.14f32).unwrap();
+        t.insert(&1u64, &1.234_f32).unwrap();
         t.insert(&2u64, &f32::MIN).unwrap();
         t.insert(&3u64, &f32::MAX).unwrap();
     }
     w.commit().unwrap();
     let r = db.begin_read().unwrap();
     let t = r.open_table(T).unwrap();
-    assert!((t.get(&1u64).unwrap().unwrap().value() - 3.14).abs() < 1e-6);
+    assert!((t.get(&1u64).unwrap().unwrap().value() - 1.234_f32).abs() < 1e-6);
     assert_eq!(t.get(&2u64).unwrap().unwrap().value(), f32::MIN);
     assert_eq!(t.get(&3u64).unwrap().unwrap().value(), f32::MAX);
 }
@@ -7373,7 +7373,7 @@ fn cdc_config_clone() {
         retention_max_txns: 500,
     };
     let cloned = cfg.clone();
-    assert_eq!(cloned.enabled, true);
+    assert!(cloned.enabled);
     assert_eq!(cloned.retention_max_txns, 500);
 }
 

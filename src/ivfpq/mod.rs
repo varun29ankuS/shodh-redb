@@ -46,8 +46,14 @@
 pub(crate) mod adc;
 pub mod config;
 pub(crate) mod index;
+#[cfg(fuzzing)]
+pub mod kmeans;
+#[cfg(not(fuzzing))]
 pub(crate) mod kmeans;
 pub(crate) mod pq;
+#[cfg(fuzzing)]
+pub mod types;
+#[cfg(not(fuzzing))]
 pub(crate) mod types;
 
 pub use config::{IndexConfig, IvfPqIndexDefinition, SearchParams};

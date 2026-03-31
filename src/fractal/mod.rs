@@ -47,6 +47,9 @@ pub(crate) mod cluster;
 pub mod config;
 pub(crate) mod index;
 pub(crate) mod search;
+#[cfg(fuzzing)]
+pub mod types;
+#[cfg(not(fuzzing))]
 pub(crate) mod types;
 
 pub use config::{FractalIndexConfig, FractalIndexDefinition, FractalSearchParams};

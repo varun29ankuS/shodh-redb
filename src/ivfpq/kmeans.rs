@@ -51,10 +51,30 @@ impl Xorshift64 {
     }
 
     /// Returns a random index in [0, n).
+    ///
+    /// Uses Lemire's nearly divisionless method to eliminate modulo bias.
+    /// Returns 0 if `n == 0`.
     #[inline]
     #[allow(clippy::cast_possible_truncation)]
     pub fn next_usize(&mut self, n: usize) -> usize {
-        (self.next_u64() % n as u64) as usize
+        if n == 0 {
+            return 0;
+        }
+        // Lemire's fast unbiased bounded random: avoids modulo bias for all n.
+        let n = n as u64;
+        let mut x = self.next_u64();
+        let mut hi = ((x as u128 * n as u128) >> 64) as u64;
+        let mut lo = x.wrapping_mul(n);
+        if lo < n {
+            let threshold = n.wrapping_neg() % n; // (2^64 - n) % n
+            while lo < threshold {
+                x = self.next_u64();
+                let full = x as u128 * n as u128;
+                hi = (full >> 64) as u64;
+                lo = full as u64;
+            }
+        }
+        hi as usize
     }
 }
 
@@ -225,9 +245,10 @@ pub fn kmeans(
     max_iter: usize,
     metric: DistanceMetric,
 ) -> Vec<f32> {
-    let n = flat_vectors.len() / dim;
-    assert!(n > 0, "kmeans: empty input");
-    assert!(dim > 0, "kmeans: zero dimension");
+    let n = flat_vectors.len() / dim.max(1);
+    if n == 0 || dim == 0 {
+        return Vec::new();
+    }
 
     // Clamp k to available points.
     let k = k.min(n);
@@ -284,7 +305,12 @@ pub fn assign_nearest(
     let mut best_c = 0u32;
     let mut best_d = f32::INFINITY;
     for c in 0..num_clusters {
-        let centroid = &centroids[c * dim..(c + 1) * dim];
+        let start = c * dim;
+        let end = start + dim;
+        if end > centroids.len() {
+            break;
+        }
+        let centroid = &centroids[start..end];
         let d = metric.compute(vector, centroid);
         if d < best_d {
             best_d = d;
@@ -318,25 +344,36 @@ pub fn nearest_clusters(
 
     #[allow(clippy::cast_possible_truncation)]
     let mut dists: Vec<(u32, f32)> = (0..num_clusters)
-        .map(|c| {
-            let centroid = &centroids[c * dim..(c + 1) * dim];
-            (c as u32, metric.compute(query, centroid))
+        .filter_map(|c| {
+            let start = c * dim;
+            let end = start + dim;
+            if end > centroids.len() {
+                return None;
+            }
+            let centroid = &centroids[start..end];
+            Some((c as u32, metric.compute(query, centroid)))
         })
         .collect();
 
+    // All centroids may have been filtered out if centroid data is truncated.
+    if dists.is_empty() {
+        return Vec::new();
+    }
+
     if !diversity.enabled() {
         // Fast path: identical to previous behavior
-        dists.select_nth_unstable_by(nprobe - 1, |a, b| {
+        let select_idx = (nprobe - 1).min(dists.len() - 1);
+        dists.select_nth_unstable_by(select_idx, |a, b| {
             a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal)
         });
-        dists.truncate(nprobe);
+        dists.truncate(nprobe.min(dists.len()));
         dists.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
         return dists;
     }
 
     // Diversity path: partial sort top 2*nprobe, build centroid shortlist,
     // then delegate to the shared MMR selector.
-    let shortlist_size = (nprobe.saturating_mul(2)).min(num_clusters);
+    let shortlist_size = (nprobe.saturating_mul(2)).min(dists.len());
     dists.select_nth_unstable_by(shortlist_size - 1, |a, b| {
         a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal)
     });
@@ -347,7 +384,11 @@ pub fn nearest_clusters(
     let mut shortlist_centroids: Vec<f32> = Vec::with_capacity(shortlist_size * dim);
     for &(cid, _) in &dists {
         let start = cid as usize * dim;
-        shortlist_centroids.extend_from_slice(&centroids[start..start + dim]);
+        let end = start + dim;
+        if end > centroids.len() {
+            continue;
+        }
+        shortlist_centroids.extend_from_slice(&centroids[start..end]);
     }
 
     crate::probe_select::select_diverse_probes(

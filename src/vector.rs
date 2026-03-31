@@ -54,6 +54,11 @@ impl<const N: usize> Value for FixedVec<N> {
     {
         let mut result = [0.0f32; N];
         let expected = N * core::mem::size_of::<f32>();
+        debug_assert!(
+            data.len() >= expected,
+            "FixedVec<{N}>::from_bytes: truncated data ({} < {expected})",
+            data.len(),
+        );
         let usable = data.len().min(expected);
         let dims = usable / 4;
         for (i, val) in result.iter_mut().enumerate().take(dims) {
@@ -232,7 +237,15 @@ impl<const N: usize> Value for BinaryQuantized<N> {
     where
         Self: 'a,
     {
-        data.try_into().unwrap()
+        if let Ok(arr) = data.try_into() {
+            arr
+        } else {
+            // Corrupted data: copy what we have and zero-pad the rest
+            let mut result = [0u8; N];
+            let copy_len = data.len().min(N);
+            result[..copy_len].copy_from_slice(&data[..copy_len]);
+            result
+        }
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a [u8; N]) -> [u8; N]

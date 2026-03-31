@@ -107,18 +107,13 @@ impl fmt::Display for DistanceMetric {
 
 /// Computes the dot product of two f32 slices.
 ///
-/// # Panics
-///
-/// Panics if `a` and `b` have different lengths.
+/// If lengths differ, computes over the shorter length.
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(
-        a.len(),
-        b.len(),
-        "dot_product: dimension mismatch ({} vs {})",
-        a.len(),
-        b.len()
-    );
+    debug_assert_eq!(a.len(), b.len(), "dot_product: vector dimension mismatch");
+    let len = a.len().min(b.len());
+    let a = &a[..len];
+    let b = &b[..len];
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
@@ -128,18 +123,17 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 /// for the actual Euclidean distance, but the squared form is sufficient for
 /// nearest-neighbor comparisons and avoids the sqrt cost.
 ///
-/// # Panics
-///
-/// Panics if `a` and `b` have different lengths.
+/// If lengths differ, computes over the shorter length.
 #[inline]
 pub fn euclidean_distance_sq(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(
+    debug_assert_eq!(
         a.len(),
         b.len(),
-        "euclidean_distance_sq: dimension mismatch ({} vs {})",
-        a.len(),
-        b.len()
+        "euclidean_distance_sq: vector dimension mismatch"
     );
+    let len = a.len().min(b.len());
+    let a = &a[..len];
+    let b = &b[..len];
     a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
@@ -150,18 +144,17 @@ pub fn euclidean_distance_sq(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Returns 0.0 if either vector has zero magnitude.
 ///
-/// # Panics
-///
-/// Panics if `a` and `b` have different lengths.
+/// If lengths differ, computes over the shorter length.
 #[inline]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(
+    debug_assert_eq!(
         a.len(),
         b.len(),
-        "cosine_similarity: dimension mismatch ({} vs {})",
-        a.len(),
-        b.len()
+        "cosine_similarity: vector dimension mismatch"
     );
+    let len = a.len().min(b.len());
+    let a = &a[..len];
+    let b = &b[..len];
     let mut dot = 0.0f32;
     let mut norm_a = 0.0f32;
     let mut norm_b = 0.0f32;
@@ -182,9 +175,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Returns 1.0 if either vector has zero magnitude.
 ///
-/// # Panics
-///
-/// Panics if `a` and `b` have different lengths.
+/// If lengths differ, computes over the shorter length.
 #[inline]
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     1.0 - cosine_similarity(a, b)
@@ -194,18 +185,17 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Returns the sum of absolute element-wise differences.
 ///
-/// # Panics
-///
-/// Panics if `a` and `b` have different lengths.
+/// If lengths differ, computes over the shorter length.
 #[inline]
 pub fn manhattan_distance(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(
+    debug_assert_eq!(
         a.len(),
         b.len(),
-        "manhattan_distance: dimension mismatch ({} vs {})",
-        a.len(),
-        b.len()
+        "manhattan_distance: vector dimension mismatch"
     );
+    let len = a.len().min(b.len());
+    let a = &a[..len];
+    let b = &b[..len];
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
 }
 
@@ -214,18 +204,12 @@ pub fn manhattan_distance(a: &[f32], b: &[f32]) -> f32 {
 /// Counts the number of bits that differ between `a` and `b`. Useful for binary
 /// embeddings (e.g., Cohere binary, Matryoshka quantized vectors).
 ///
-/// # Panics
-///
-/// Panics if `a` and `b` have different lengths.
+/// If lengths differ, computes over the shorter length.
 #[inline]
 pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
-    assert_eq!(
-        a.len(),
-        b.len(),
-        "hamming_distance: length mismatch ({} vs {})",
-        a.len(),
-        b.len()
-    );
+    let len = a.len().min(b.len());
+    let a = &a[..len];
+    let b = &b[..len];
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| (x ^ y).count_ones())
@@ -432,7 +416,8 @@ pub struct Neighbor<K> {
 
 impl<K> PartialEq for Neighbor<K> {
     fn eq(&self, other: &Self) -> bool {
-        self.distance == other.distance
+        // Treat NaN as equal to NaN for heap consistency (IEEE NaN != NaN breaks Eq).
+        self.distance.to_bits() == other.distance.to_bits()
     }
 }
 
@@ -447,10 +432,9 @@ impl<K> PartialOrd for Neighbor<K> {
 impl<K> Ord for Neighbor<K> {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         // BinaryHeap is a max-heap; we want the *largest* distance at the top
-        // so we can efficiently evict it. This is standard top-k min-heap trick.
-        self.distance
-            .partial_cmp(&other.distance)
-            .unwrap_or(core::cmp::Ordering::Equal)
+        // so we can efficiently evict it. NaN sorts as greater-than everything
+        // so NaN entries sit at the heap root and are evicted first.
+        self.distance.total_cmp(&other.distance)
     }
 }
 
@@ -504,7 +488,10 @@ where
                 key,
                 distance: dist,
             });
-        } else if heap.peek().is_some_and(|worst| dist < worst.distance) {
+        } else if heap
+            .peek()
+            .is_some_and(|worst| dist.total_cmp(&worst.distance).is_lt())
+        {
             heap.pop();
             heap.push(Neighbor {
                 key,
@@ -514,11 +501,7 @@ where
     }
 
     let mut results: Vec<Neighbor<K>> = heap.into_vec();
-    results.sort_by(|a, b| {
-        a.distance
-            .partial_cmp(&b.distance)
-            .unwrap_or(core::cmp::Ordering::Equal)
-    });
+    results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
     results
 }
 
@@ -549,7 +532,10 @@ where
                 key,
                 distance: dist,
             });
-        } else if heap.peek().is_some_and(|worst| dist < worst.distance) {
+        } else if heap
+            .peek()
+            .is_some_and(|worst| dist.total_cmp(&worst.distance).is_lt())
+        {
             heap.pop();
             heap.push(Neighbor {
                 key,
@@ -559,11 +545,8 @@ where
     }
 
     let mut results: Vec<Neighbor<K>> = heap.into_vec();
-    results.sort_by(|a, b| {
-        a.distance
-            .partial_cmp(&b.distance)
-            .unwrap_or(core::cmp::Ordering::Equal)
-    });
+    results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+
     results
 }
 
@@ -575,19 +558,13 @@ where
 ///
 /// Useful for populating `insert_reserve` buffers when using `FixedVec<N>`.
 ///
-/// # Panics
-///
-/// Panics if `dest.len() != values.len() * 4`.
+/// If the buffer is smaller than `values.len() * 4`, writes only as many
+/// complete f32 values as fit. If `values` is shorter, only those values
+/// are written.
 #[inline]
 pub fn write_f32_le(dest: &mut [u8], values: &[f32]) {
-    assert_eq!(
-        dest.len(),
-        values.len() * 4,
-        "write_f32_le: buffer size {} != expected {}",
-        dest.len(),
-        values.len() * 4
-    );
-    for (i, val) in values.iter().enumerate() {
+    let count = (dest.len() / 4).min(values.len());
+    for (i, val) in values.iter().enumerate().take(count) {
         let start = i * 4;
         dest[start..start + 4].copy_from_slice(&val.to_le_bytes());
     }
@@ -595,18 +572,11 @@ pub fn write_f32_le(dest: &mut [u8], values: &[f32]) {
 
 /// Reads little-endian f32 values from a byte slice.
 ///
-/// # Panics
-///
-/// Panics if `src.len()` is not a multiple of 4.
+/// If `src.len()` is not a multiple of 4, trailing bytes are ignored.
 #[inline]
 pub fn read_f32_le(src: &[u8]) -> Vec<f32> {
-    assert_eq!(
-        src.len() % 4,
-        0,
-        "read_f32_le: byte length {} is not a multiple of 4",
-        src.len()
-    );
-    let count = src.len() / 4;
+    let usable = src.len() - (src.len() % 4);
+    let count = usable / 4;
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
         let start = i * 4;

@@ -63,13 +63,13 @@ impl Xorshift64 {
         // Lemire's fast unbiased bounded random: avoids modulo bias for all n.
         let n = n as u64;
         let mut x = self.next_u64();
-        let mut hi = ((x as u128 * n as u128) >> 64) as u64;
+        let mut hi = ((u128::from(x) * u128::from(n)) >> 64) as u64;
         let mut lo = x.wrapping_mul(n);
         if lo < n {
             let threshold = n.wrapping_neg() % n; // (2^64 - n) % n
             while lo < threshold {
                 x = self.next_u64();
-                let full = x as u128 * n as u128;
+                let full = u128::from(x) * u128::from(n);
                 hi = (full >> 64) as u64;
                 lo = full as u64;
             }

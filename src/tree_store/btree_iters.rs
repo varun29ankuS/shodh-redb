@@ -220,8 +220,8 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
             match decompress_value(raw) {
                 Ok(Cow::Owned(decompressed)) => Some(decompressed),
                 Ok(Cow::Borrowed(_)) => None,
-                Err(_e) => {
-                    debug_assert!(false, "value decompression failed: {_e}");
+                Err(e) => {
+                    debug_assert!(false, "value decompression failed: {e}");
                     None
                 }
             }

@@ -967,7 +967,7 @@ fn nearest_k_large_k_returns_all_sorted() {
 
 #[test]
 fn write_read_f32_le_roundtrip() {
-    let values = [1.0f32, -2.5, 3.14159, 0.0, f32::MAX, f32::MIN];
+    let values = [1.0f32, -2.5, core::f32::consts::PI, 0.0, f32::MAX, f32::MIN];
     let mut buf = vec![0u8; values.len() * 4];
     shodh_redb::write_f32_le(&mut buf, &values);
     let recovered = shodh_redb::read_f32_le(&buf);

@@ -461,13 +461,14 @@ impl<const N: usize, T: Value> Value for [T; N] {
             for i in 0..N {
                 result.extend_from_slice(T::as_bytes(&value[i]).as_ref());
                 debug_assert!(
-                    result.len() <= u32::MAX as usize,
+                    u32::try_from(result.len()).is_ok(),
                     "[T; N] as_bytes: serialized size {} exceeds u32::MAX offset limit",
                     result.len(),
                 );
                 // Saturate at u32::MAX rather than panic; reader will see
                 // clamped offsets and produce a shorter-than-expected element.
-                let end = (result.len() as u64).min(u64::from(u32::MAX)) as u32;
+                #[allow(clippy::cast_possible_truncation)]
+                let end = u32::try_from(result.len()).unwrap_or(u32::MAX);
                 result[size_of::<u32>() * i..size_of::<u32>() * (i + 1)]
                     .copy_from_slice(&end.to_le_bytes());
             }

@@ -88,7 +88,7 @@ fn increment_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
 /// The prefix format is `[tbl_len: u16 LE][tbl][uk_len: u32 LE][user_key]`.
 /// When `increment_prefix` overflows (all-0xFF prefix), we construct a tighter
 /// bound by incrementing the `uk_len` field instead of falling back to the
-/// entire table's prefix end — which would incorrectly include entries for
+/// entire table's prefix end -- which would incorrectly include entries for
 /// other user keys.
 fn multimap_scan_end(table_name: &str, user_key: &[u8]) -> Vec<u8> {
     let prefix = multimap_key_prefix(table_name, user_key);
@@ -169,7 +169,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
             BufferLookup::NotInBuffer => self.adapter.contains_key(&encoded),
         };
 
-        // Store empty value — the "value" is encoded in the composite key.
+        // Store empty value -- the "value" is encoded in the composite key.
         buffer.put(encoded, alloc::vec![0u8]);
         drop(buffer);
         self.ops_count.fetch_add(1, Ordering::Relaxed);
@@ -527,7 +527,7 @@ mod tests {
             let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
             mm.insert(&"k", &"gone").unwrap();
             drop(mm);
-            // Drop without commit — rollback.
+            // Drop without commit -- rollback.
         }
 
         let rtxn = db.begin_read();

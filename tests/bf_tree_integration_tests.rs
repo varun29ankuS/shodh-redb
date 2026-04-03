@@ -111,7 +111,7 @@ fn transaction_rollback_on_drop() {
         t.insert(&"x", &999u64).unwrap();
         t.insert(&"y", &42u64).unwrap();
         let _ = t;
-        // wtxn dropped here — implicit rollback
+        // wtxn dropped here -- implicit rollback
     }
 
     // Original value should be intact, new key should not exist
@@ -536,11 +536,11 @@ fn history_snapshot_and_restore() {
     let history = BfTreeHistory::new(db.clone());
     let (snap_id, _snap_path) = history.commit_snapshot().unwrap();
 
-    // Open historical snapshot — should be a valid, readable database
+    // Open historical snapshot -- should be a valid, readable database
     let historical = history.open_historical(snap_id).unwrap();
     let rtxn_hist = historical.begin_read();
     let t_hist = rtxn_hist.open_table(USERS);
-    // The snapshot captured the state at snapshot time — alice should exist
+    // The snapshot captured the state at snapshot time -- alice should exist
     let alice_val = t_hist.get(&"alice").unwrap();
     assert!(alice_val.is_some(), "snapshot should contain alice");
 
@@ -865,7 +865,7 @@ fn knowledge_graph_workflow() {
 
     let _ = bs;
 
-    // Multimap: tag → doc sequence index
+    // Multimap: tag -> doc sequence index
     let mut mm = wtxn.open_multimap_table::<&str, u64>("doc_tags");
     mm.insert(&"rust", &doc1.sequence).unwrap();
     mm.insert(&"programming", &doc1.sequence).unwrap();

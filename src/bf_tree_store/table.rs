@@ -1,4 +1,4 @@
-//! Bf-Tree backed table types providing familiar `open_table` → `insert`/`get`/`remove` API.
+//! Bf-Tree backed table types providing familiar `open_table` -> `insert`/`get`/`remove` API.
 //!
 //! These types mirror the ergonomics of shodh-redb's `Table` and `ReadOnlyTable` but
 //! are backed by the concurrent Bf-Tree engine. Unlike the legacy types:
@@ -32,7 +32,7 @@ use super::error::BfTreeError;
 /// A writable table handle backed by Bf-Tree.
 ///
 /// Obtained via [`BfTreeDatabaseWriteTxn::open_table()`]. Multiple handles
-/// to the same table can coexist across threads — writes are CAS-based.
+/// to the same table can coexist across threads -- writes are CAS-based.
 ///
 /// # Example
 ///
@@ -90,7 +90,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
 
     /// Insert a key-value pair. Returns the previous value if the key existed.
     ///
-    /// Writes are buffered — they become visible within this transaction
+    /// Writes are buffered -- they become visible within this transaction
     /// immediately (read-your-writes) but are only flushed to `BfTree` on commit.
     pub fn insert(
         &mut self,
@@ -218,7 +218,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     ///
     /// Reads the current value (buffer-aware), applies the merge operator, and
     /// writes the result back to the buffer. The merge is atomic within the
-    /// transaction — other transactions see either the old or the new value.
+    /// transaction -- other transactions see either the old or the new value.
     pub fn merge(
         &mut self,
         key: &K::SelfType<'_>,
@@ -332,7 +332,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
 }
 
 // ---------------------------------------------------------------------------
-// BfTreeRangeIter — Iterator adapter for storage trait range scans
+// BfTreeRangeIter -- Iterator adapter for storage trait range scans
 // ---------------------------------------------------------------------------
 
 /// Iterator over entries in a single Bf-Tree table, yielding typed `OwnedKv` pairs.

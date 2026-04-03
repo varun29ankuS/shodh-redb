@@ -20,7 +20,7 @@ use super::types::{
 /// ranked result set using weighted linear combination. Supports optional
 /// pre-filtering by namespace and tags.
 ///
-/// The type parameter `P` is the blob query provider — typically a
+/// The type parameter `P` is the blob query provider -- typically a
 /// `ReadTransaction` (legacy B-tree) or `BfTreeReadOnlyBlobStore` (`BfTree`).
 ///
 /// # Example
@@ -39,7 +39,7 @@ use super::types::{
 pub struct CompositeQuery<'a, P: BlobQueryProvider = ReadTransaction> {
     provider: &'a P,
 
-    /// Legacy transaction reference — needed for vector index search which
+    /// Legacy transaction reference -- needed for vector index search which
     /// takes `&ReadTransaction` directly. `None` when using `BfTree` backend.
     legacy_txn: Option<&'a ReadTransaction>,
 

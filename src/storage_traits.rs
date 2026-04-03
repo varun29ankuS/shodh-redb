@@ -1,8 +1,8 @@
 //! Backend-agnostic storage traits for shodh-redb.
 //!
 //! These traits abstract the storage engine so that higher-level modules
-//! (`IvfPq`, Fractal index, CDC) can work with any backend — legacy B-tree
-//! or Bf-Tree — without code duplication.
+//! (`IvfPq`, Fractal index, CDC) can work with any backend -- legacy B-tree
+//! or Bf-Tree -- without code duplication.
 //!
 //! # Trait Hierarchy
 //!
@@ -10,26 +10,26 @@
 //! StorageWrite              StorageRead
 //!     |                         |
 //!     v                         v
-//! open_table() ──►         open_table() ──►
+//! open_table() -->         open_table() -->
 //!     WriteTable<K,V>        ReadTable<K,V>
-//!       │ get()                │ get()
-//!       │ insert()             │ range()
-//!       │ remove()             │
-//!       │ range()              ▼
-//!       │ drain_all()      OwnedKv (key, value bytes)
-//!       ▼
+//!       | get()                | get()
+//!       | insert()             | range()
+//!       | remove()             |
+//!       | range()              v
+//!       | drain_all()      OwnedKv (key, value bytes)
+//!       v
 //!   OwnedKv (key, value bytes)
 //! ```
 //!
 //! # Design Notes
 //!
-//! - All returned values are **owned** (`Vec<u8>`) — no zero-copy page references.
+//! - All returned values are **owned** (`Vec<u8>`) -- no zero-copy page references.
 //!   This is the common denominator between B-tree (page-backed) and Bf-Tree
 //!   (copy-to-buffer). The `OwnedKv` wrapper provides `.value()` extraction
 //!   matching the `AccessGuard` ergonomics.
 //!
 //! - Error type is `StorageError` throughout, matching existing index code that
-//!   converts `TableError → StorageError` via helper functions.
+//!   converts `TableError -> StorageError` via helper functions.
 //!
 //! - Range iteration yields `Result<(OwnedKv<K>, OwnedKv<V>)>` entries.
 
@@ -42,7 +42,7 @@ use crate::TableDefinition;
 use crate::types::{Key, Value};
 
 // ---------------------------------------------------------------------------
-// OwnedKv — owned-bytes wrapper with .value() extraction
+// OwnedKv -- owned-bytes wrapper with .value() extraction
 // ---------------------------------------------------------------------------
 
 /// Owned key-value guard wrapping raw bytes.
@@ -91,7 +91,7 @@ impl<T: Value + 'static> core::fmt::Debug for OwnedKv<T> {
 }
 
 // ---------------------------------------------------------------------------
-// WriteTable — write-capable table operations
+// WriteTable -- write-capable table operations
 // ---------------------------------------------------------------------------
 
 /// A writable table handle that can get, insert, remove, range-scan, and drain.
@@ -133,7 +133,7 @@ pub trait WriteTable<K: Key + 'static, V: Value + 'static> {
 }
 
 // ---------------------------------------------------------------------------
-// ReadTable — read-only table operations
+// ReadTable -- read-only table operations
 // ---------------------------------------------------------------------------
 
 /// A read-only table handle.
@@ -159,13 +159,13 @@ pub trait ReadTable<K: Key + 'static, V: Value + 'static> {
     ) -> crate::Result<Self::RangeIter<'a>>;
 }
 
-// Note: No blanket `impl<T: WriteTable> ReadTable for T` — Rust's orphan rules
+// Note: No blanket `impl<T: WriteTable> ReadTable for T` -- Rust's orphan rules
 // would prevent downstream crates from adding `WriteTable` impls, causing E0119
 // with explicit `ReadTable` impls for read-only types. Instead, both `WriteTable`
 // and `ReadTable` are implemented explicitly for each table type.
 
 // ---------------------------------------------------------------------------
-// StorageWrite — write transaction that opens typed tables
+// StorageWrite -- write transaction that opens typed tables
 // ---------------------------------------------------------------------------
 
 /// A write transaction that can open typed table handles.
@@ -193,7 +193,7 @@ pub trait StorageWrite {
 }
 
 // ---------------------------------------------------------------------------
-// StorageRead — read transaction that opens typed tables
+// StorageRead -- read transaction that opens typed tables
 // ---------------------------------------------------------------------------
 
 /// A read transaction that can open typed read-only table handles.
@@ -215,7 +215,7 @@ pub trait StorageRead {
 }
 
 // ---------------------------------------------------------------------------
-// Range helper — convert RangeBounds to the (start, end, inclusive) tuple
+// Range helper -- convert RangeBounds to the (start, end, inclusive) tuple
 // ---------------------------------------------------------------------------
 
 /// Decompose a `RangeBounds<K::SelfType<'_>>` into start/end byte boundaries.

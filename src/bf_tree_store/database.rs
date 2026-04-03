@@ -241,7 +241,7 @@ pub struct BfTreeDatabaseWriteTxn {
 impl BfTreeDatabaseWriteTxn {
     /// Open a typed table handle for read-write access.
     ///
-    /// This is the preferred API — it mirrors the legacy `WriteTransaction::open_table()`
+    /// This is the preferred API -- it mirrors the legacy `WriteTransaction::open_table()`
     /// pattern. The returned `BfTreeTable` provides `insert`, `get`, `remove`, and `scan`.
     pub fn open_table<K: Key + 'static, V: Value + 'static>(
         &self,
@@ -396,7 +396,7 @@ impl BfTreeDatabaseWriteTxn {
     /// Stage accumulated CDC events into the write buffer as KV entries.
     ///
     /// This ensures CDC log entries are atomically committed with the data
-    /// they describe — both go into the same buffer flush.
+    /// they describe -- both go into the same buffer flush.
     fn stage_cdc_into_buffer(&self, buffer: &mut WriteBuffer) -> Result<(), BfTreeError> {
         let events = match self.cdc_log {
             Some(ref log) => {
@@ -423,7 +423,7 @@ impl BfTreeDatabaseWriteTxn {
 
     /// Post-commit retention pruning of old CDC log entries.
     ///
-    /// This runs after the commit is finalized. Failures are non-fatal —
+    /// This runs after the commit is finalized. Failures are non-fatal --
     /// old entries accumulate but do not affect correctness.
     fn prune_cdc_retention(&self) {
         if self.cdc_config.retention_max_txns == 0
@@ -692,7 +692,7 @@ impl BfTreeTableScan<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// BfTreeBuilder — ergonomic database construction with optional features
+// BfTreeBuilder -- ergonomic database construction with optional features
 // ---------------------------------------------------------------------------
 
 /// Builder for constructing a `BfTreeDatabase` with optional features.
@@ -967,7 +967,7 @@ mod tests {
 
         let rtxn = db.begin_read();
 
-        // Read since txn1 — should only see txn2's changes.
+        // Read since txn1 -- should only see txn2's changes.
         let changes = rtxn.read_cdc_since(txn1_id).unwrap();
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].transaction_id, txn2_id);
@@ -1083,7 +1083,7 @@ mod tests {
         let rtxn = db.begin_read();
         let all_changes = rtxn.read_cdc_since(0).unwrap();
         // With retention_max_txns=2, older transactions should be pruned.
-        // Transaction IDs 1,2,3,4 — after txn4, cutoff = 4-2=2, so txn1 and txn2 pruned.
+        // Transaction IDs 1,2,3,4 -- after txn4, cutoff = 4-2=2, so txn1 and txn2 pruned.
         // Only txn3 and txn4 remain.
         assert!(all_changes.len() <= 4, "pruning should remove old entries");
         // At least the latest 2 should remain

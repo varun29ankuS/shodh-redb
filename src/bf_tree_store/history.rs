@@ -92,7 +92,7 @@ fn now_ns() -> u64 {
 
 use alloc::string::ToString;
 
-/// History manager for `BfTree` — manages point-in-time snapshots.
+/// History manager for `BfTree` -- manages point-in-time snapshots.
 pub struct BfTreeHistory {
     db: Arc<BfTreeDatabase>,
     next_snapshot_id: core::sync::atomic::AtomicU64,

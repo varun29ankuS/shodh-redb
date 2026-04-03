@@ -3,7 +3,7 @@
 //! Provides atomic commit/rollback semantics over `BfTree`'s immediate-write model.
 //! All writes during a transaction are accumulated in a sorted `BTreeMap` buffer.
 //! On commit, the buffer is flushed to `BfTree` atomically. On abort (or drop without
-//! commit), the buffer is discarded — providing true rollback.
+//! commit), the buffer is discarded -- providing true rollback.
 //!
 //! The `BufferedScanIter` merges buffered entries with `BfTree` scan results in sorted
 //! order, implementing overlay semantics (buffer wins on key collision, tombstones
@@ -22,7 +22,7 @@ use super::database::{BfTreeTableScan, table_prefix, table_prefix_end};
 use super::error::BfTreeError;
 
 // ---------------------------------------------------------------------------
-// BufferLookup — result of checking the write buffer
+// BufferLookup -- result of checking the write buffer
 // ---------------------------------------------------------------------------
 
 /// Result of looking up a key in the write buffer.
@@ -31,12 +31,12 @@ pub(crate) enum BufferLookup {
     Found(Vec<u8>),
     /// Key found as a tombstone (pending delete).
     Tombstone,
-    /// Key not in buffer — caller should check `BfTree`.
+    /// Key not in buffer -- caller should check `BfTree`.
     NotInBuffer,
 }
 
 // ---------------------------------------------------------------------------
-// WriteBuffer — sorted overlay of pending writes
+// WriteBuffer -- sorted overlay of pending writes
 // ---------------------------------------------------------------------------
 
 /// Sorted write buffer that accumulates mutations during a transaction.
@@ -246,7 +246,7 @@ impl WriteBuffer {
 }
 
 // ---------------------------------------------------------------------------
-// BufferedScanIter — merge iterator over buffer + BfTree scan
+// BufferedScanIter -- merge iterator over buffer + BfTree scan
 // ---------------------------------------------------------------------------
 
 /// Merge iterator that overlays write buffer entries onto a `BfTree` scan.
@@ -581,7 +581,7 @@ mod tests {
         // Insert via buffered write.
         WriteTable::st_insert(&mut table, &"hello", &42u64).unwrap();
 
-        // Read back within same transaction — should see buffered value.
+        // Read back within same transaction -- should see buffered value.
         let val = WriteTable::st_get(&table, &"hello").unwrap();
         assert!(val.is_some());
         assert_eq!(val.unwrap().value(), 42u64);
@@ -596,7 +596,7 @@ mod tests {
             let mut table = wtxn.open_table(ITEMS);
             WriteTable::st_insert(&mut table, &"temp", &99u64).unwrap();
             drop(table);
-            // Drop without commit — should rollback.
+            // Drop without commit -- should rollback.
         }
 
         // Verify not visible via read transaction.

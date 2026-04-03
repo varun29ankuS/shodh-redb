@@ -273,7 +273,7 @@ fn wall_clock_ns() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// BfTreeBlobStore — write-path blob operations (within a write transaction)
+// BfTreeBlobStore -- write-path blob operations (within a write transaction)
 // ---------------------------------------------------------------------------
 
 /// Blob store operations bound to a write transaction's buffer and adapter.
@@ -492,7 +492,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 }
             }
 
-            // Delete tag entries — scan tag table for this blob_id.
+            // Delete tag entries -- scan tag table for this blob_id.
             self.delete_tags_for_blob(&mut buf, blob_id);
 
             // Delete namespace entries.
@@ -515,7 +515,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
             let mut dedup = DedupVal::from_le_bytes(arr);
 
             if dedup.ref_count <= 1 {
-                // Last reference — remove the dedup entry entirely.
+                // Last reference -- remove the dedup entry entirely.
                 buf.delete(dedup_key.to_vec());
             } else {
                 dedup.ref_count -= 1;
@@ -881,7 +881,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
 }
 
 // ---------------------------------------------------------------------------
-// BfTreeBlobWriter — streaming chunked writer
+// BfTreeBlobWriter -- streaming chunked writer
 // ---------------------------------------------------------------------------
 
 /// Streaming blob writer that chunks data into `BfTree` KV records.
@@ -976,7 +976,7 @@ impl BfTreeBlobWriter<'_, '_> {
         if usize::try_from(self.total_bytes).unwrap_or(usize::MAX) >= DEDUP_MIN_SIZE
             && let Some(existing_id) = self.store.check_dedup(&sha256_key)?
         {
-            // Content already exists — create metadata pointing to existing data.
+            // Content already exists -- create metadata pointing to existing data.
             // We still create a new BlobId with its own metadata for tracking,
             // but we can skip writing the actual data chunks.
             let wall_ns = wall_clock_ns();
@@ -1173,7 +1173,7 @@ impl BfTreeBlobWriter<'_, '_> {
 }
 
 // ---------------------------------------------------------------------------
-// BfTreeBlobReader — read-only blob access
+// BfTreeBlobReader -- read-only blob access
 // ---------------------------------------------------------------------------
 
 /// Read-only blob store bound to a read transaction's adapter.
@@ -1328,7 +1328,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
     /// `BlobId` encodes the sequence in its first 8 bytes. We scan the meta table
     /// for blobs whose `BlobId::sequence()` matches, returning the first hit.
     pub fn blob_by_sequence(&self, seq: u64) -> Result<Option<(BlobId, BlobMeta)>, BfTreeError> {
-        // BlobId(seq, counter) — scan from BlobId::new(seq, 0) to BlobId::new(seq, u32::MAX)
+        // BlobId(seq, counter) -- scan from BlobId::new(seq, 0) to BlobId::new(seq, u32::MAX)
         let start_id = BlobId::new(seq, 0);
         let end_id = BlobId::new(seq, u64::MAX);
         let start_key = encode_meta_key(start_id);

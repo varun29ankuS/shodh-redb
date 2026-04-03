@@ -8,9 +8,9 @@
 //!
 //! # Verify Modes
 //!
-//! - `None`: No checksum wrapping — values stored as-is.
+//! - `None`: No checksum wrapping -- values stored as-is.
 //! - `Full`: Every read verifies the checksum.
-//! - `Sampled(f32)`: Only a fraction of reads are verified (0.0–1.0).
+//! - `Sampled(f32)`: Only a fraction of reads are verified (0.0-1.0).
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -23,7 +23,7 @@ const CHECKSUM_SIZE: usize = 4;
 /// Verification mode for per-entry checksums.
 #[derive(Clone, Debug)]
 pub enum VerifyMode {
-    /// No verification — values stored without checksums.
+    /// No verification -- values stored without checksums.
     None,
     /// Every read is verified.
     Full,
@@ -38,7 +38,7 @@ impl Default for VerifyMode {
 }
 
 /// Compute a simple 32-bit hash for checksum purposes.
-/// Uses FNV-1a for speed and simplicity — not cryptographic.
+/// Uses FNV-1a for speed and simplicity -- not cryptographic.
 fn compute_checksum(data: &[u8]) -> u32 {
     let mut h: u32 = 0x811c9dc5; // FNV offset basis (32-bit)
     for &b in data {

@@ -24,8 +24,8 @@
 //! - Require every method to handle both variants (massive enum dispatch)
 //!
 //! Instead, this module provides:
-//! 1. `BackendChoice` — declarative backend selection
-//! 2. `UnifiedDatabase` — lightweight enum for database lifecycle
+//! 1. `BackendChoice` -- declarative backend selection
+//! 2. `UnifiedDatabase` -- lightweight enum for database lifecycle
 //! 3. Generic code should use `StorageRead`/`StorageWrite` traits directly
 
 use std::path::Path;

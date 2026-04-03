@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::database::{BfTreeDatabase, BfTreeDatabaseWriteTxn};
 use super::error::BfTreeError;
 
-/// A write batch — a closure that operates on a shared write transaction.
+/// A write batch -- a closure that operates on a shared write transaction.
 pub type WriteBatchFn = Box<dyn FnOnce(&BfTreeDatabaseWriteTxn) -> Result<(), BfTreeError> + Send>;
 
 /// Group commit coordinator.
@@ -18,7 +18,7 @@ pub type WriteBatchFn = Box<dyn FnOnce(&BfTreeDatabaseWriteTxn) -> Result<(), Bf
 /// Collects multiple write batches and executes them atomically:
 /// 1. A single write transaction is created.
 /// 2. Each batch runs against the shared transaction.
-/// 3. A single `commit()` at the end makes all writes atomic — either all
+/// 3. A single `commit()` at the end makes all writes atomic -- either all
 ///    succeed or none are persisted.
 pub struct GroupCommit {
     db: Arc<BfTreeDatabase>,
@@ -103,7 +103,7 @@ pub fn concurrent_group_commit(
             .map_err(|_| BfTreeError::InvalidOperation("batch thread panicked".into()))??;
     }
 
-    // All batches completed successfully — commit atomically.
+    // All batches completed successfully -- commit atomically.
     // unwrap Arc: all thread handles have been joined so we hold the only reference.
     let wtxn = Arc::into_inner(wtxn).ok_or_else(|| {
         BfTreeError::InvalidOperation("outstanding references to write transaction".into())

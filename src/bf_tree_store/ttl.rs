@@ -1,15 +1,15 @@
 //! TTL (Time-To-Live) table support for `BfTree`.
 //!
 //! Wraps standard `BfTree` table operations with an 8-byte expiry header prepended
-//! to each value. Expired entries are transparent to callers — `get()` and range
+//! to each value. Expired entries are transparent to callers -- `get()` and range
 //! scans return `None` for expired keys. Use `purge_expired()` to reclaim storage.
 //!
 //! # Value Encoding
 //!
 //! ```text
 //! [u64 LE expires_at_ms][original value bytes]
-//! ├── 8-byte header: milliseconds since UNIX epoch (0 = never expires)
-//! └── Remaining bytes: the raw V serialized value
+//! +-- 8-byte header: milliseconds since UNIX epoch (0 = never expires)
+//! +-- Remaining bytes: the raw V serialized value
 //! ```
 
 use alloc::string::String;
@@ -42,7 +42,7 @@ const EXPIRY_HEADER_SIZE: usize = 8;
 ///   guarantees should use an external monotonic clock or logical timestamps.
 #[allow(clippy::cast_possible_truncation)]
 fn now_millis() -> u64 {
-    // u128 → u64 truncation is safe: milliseconds since epoch will not
+    // u128 -> u64 truncation is safe: milliseconds since epoch will not
     // overflow u64 for ~584 million years.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -128,7 +128,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         ttl: Duration,
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
         #[allow(clippy::cast_possible_truncation)]
-        // u128 → u64 truncation is safe: TTL durations will not exceed u64::MAX ms.
+        // u128 -> u64 truncation is safe: TTL durations will not exceed u64::MAX ms.
         let expires_at_ms = now_millis().saturating_add(ttl.as_millis() as u64);
         self.insert_internal(key, value, expires_at_ms)
     }

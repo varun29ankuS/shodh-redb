@@ -361,6 +361,7 @@ impl BfTreeDatabaseWriteTxn {
             definition.name(),
             &self.adapter,
             &self.ops_count,
+            self.cdc_log.as_ref(),
             &self.buffer,
         )
     }
@@ -392,8 +393,8 @@ impl BfTreeDatabaseWriteTxn {
         let encoded_key = encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
         self.buffer
             .lock()
-            .unwrap()
-            .put(encoded_key, val_bytes.as_ref().to_vec());
+            .unwrap_or_else(|e| e.into_inner())
+            .put(encoded_key, val_bytes.as_ref().to_vec())?;
         self.ops_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -408,7 +409,7 @@ impl BfTreeDatabaseWriteTxn {
     ) {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
-        self.buffer.lock().unwrap().delete(encoded_key);
+        self.buffer.lock().unwrap_or_else(|e| e.into_inner()).delete(encoded_key);
         self.ops_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -426,7 +427,7 @@ impl BfTreeDatabaseWriteTxn {
 
         // Check write buffer first.
         {
-            let buffer = self.buffer.lock().unwrap();
+            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             match buffer.get(&encoded_key) {
                 super::buffered_txn::BufferLookup::Found(v) => return Ok(Some(v)),
                 super::buffered_txn::BufferLookup::Tombstone => return Ok(None),
@@ -458,7 +459,7 @@ impl BfTreeDatabaseWriteTxn {
 
         // Check write buffer first.
         {
-            let buffer = self.buffer.lock().unwrap();
+            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             match buffer.get(&encoded_key) {
                 super::buffered_txn::BufferLookup::Found(_) => return true,
                 super::buffered_txn::BufferLookup::Tombstone => return false,
@@ -481,11 +482,11 @@ impl BfTreeDatabaseWriteTxn {
     /// a crash after `commit()` returns could lose committed data.
     pub fn commit(self) -> Result<(), BfTreeError> {
         {
-            let mut buffer = self.buffer.lock().unwrap();
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             // Stage CDC log entries into the write buffer before flushing.
             self.stage_cdc_into_buffer(&mut buffer)?;
             // Persist the transaction ID counter so recovery works without CDC.
-            self.stage_txn_id_into_buffer(&mut buffer);
+            self.stage_txn_id_into_buffer(&mut buffer)?;
             // Flush write buffer to BfTree (the atomic commit point).
             buffer.flush(&self.adapter)?;
         }
@@ -506,9 +507,9 @@ impl BfTreeDatabaseWriteTxn {
     /// Commit with explicit snapshot for guaranteed crash recovery.
     pub fn commit_with_snapshot(self) -> Result<std::path::PathBuf, BfTreeError> {
         {
-            let mut buffer = self.buffer.lock().unwrap();
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             self.stage_cdc_into_buffer(&mut buffer)?;
-            self.stage_txn_id_into_buffer(&mut buffer);
+            self.stage_txn_id_into_buffer(&mut buffer)?;
             buffer.flush(&self.adapter)?;
         }
         self.committed.store(true, Ordering::SeqCst);
@@ -534,7 +535,7 @@ impl BfTreeDatabaseWriteTxn {
         let key_bytes = name.as_bytes();
         let encoded = encode_table_key(CDC_CURSOR_TABLE_NAME, TableKind::Regular, key_bytes);
         let val_bytes = up_to_txn.to_le_bytes();
-        self.buffer.lock().unwrap().put(encoded, val_bytes.to_vec());
+        self.buffer.lock().unwrap_or_else(|e| e.into_inner()).put(encoded, val_bytes.to_vec())?;
         Ok(())
     }
 
@@ -545,7 +546,7 @@ impl BfTreeDatabaseWriteTxn {
     fn stage_cdc_into_buffer(&self, buffer: &mut WriteBuffer) -> Result<(), BfTreeError> {
         let events = match self.cdc_log {
             Some(ref log) => {
-                let mut guard = log.lock().unwrap();
+                let mut guard = log.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.is_empty() {
                     return Ok(());
                 }
@@ -567,7 +568,7 @@ impl BfTreeDatabaseWriteTxn {
             let key_bytes = key.to_be_bytes();
             let val_bytes = record.serialize();
             let encoded_key = encode_table_key(CDC_LOG_TABLE_NAME, TableKind::Regular, &key_bytes);
-            buffer.put(encoded_key, val_bytes);
+            buffer.put(encoded_key, val_bytes)?;
         }
 
         Ok(())
@@ -578,10 +579,10 @@ impl BfTreeDatabaseWriteTxn {
     /// Written into the same write buffer so it is atomically committed with
     /// data and CDC entries. On recovery the persisted value guarantees that
     /// transaction IDs are never reused, even when CDC is disabled.
-    fn stage_txn_id_into_buffer(&self, buffer: &mut WriteBuffer) {
+    fn stage_txn_id_into_buffer(&self, buffer: &mut WriteBuffer) -> Result<(), BfTreeError> {
         let next_id = self.txn_id.saturating_add(1);
         let encoded_key = encode_table_key(BF_META_TABLE_NAME, TableKind::Regular, BF_META_TXN_ID_KEY);
-        buffer.put(encoded_key, next_id.to_le_bytes().to_vec());
+        buffer.put(encoded_key, next_id.to_le_bytes().to_vec())
     }
 
     /// Post-commit retention pruning of old CDC log entries.

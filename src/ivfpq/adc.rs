@@ -31,6 +31,13 @@ impl AdcTable {
     pub fn build(query: &[f32], codebooks: &Codebooks, metric: DistanceMetric) -> Self {
         let m = codebooks.num_subvectors;
         let sub_dim = codebooks.sub_dim;
+        let required_len = m.saturating_mul(sub_dim);
+        if query.len() < required_len {
+            return Self {
+                distances: Vec::new(),
+                num_subvectors: 0,
+            };
+        }
         let mut distances = Vec::with_capacity(m * 256);
 
         for sub_idx in 0..m {

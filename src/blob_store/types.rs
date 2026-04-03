@@ -121,17 +121,23 @@ impl BlobId {
         }
     }
 
-    pub fn to_le_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
+    /// Serialize to 16 bytes big-endian.
+    /// Big-endian ensures lexicographic byte order matches numeric order,
+    /// which is required for correct `BfTree` / B-tree range scans.
+    #[allow(clippy::big_endian_bytes)]
+    pub fn to_be_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
         let mut buf = [0u8; Self::SERIALIZED_SIZE];
-        buf[..8].copy_from_slice(&self.sequence.to_le_bytes());
-        buf[8..16].copy_from_slice(&self.content_prefix_hash.to_le_bytes());
+        buf[..8].copy_from_slice(&self.sequence.to_be_bytes());
+        buf[8..16].copy_from_slice(&self.content_prefix_hash.to_be_bytes());
         buf
     }
 
-    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+    /// Deserialize from 16 bytes big-endian.
+    #[allow(clippy::big_endian_bytes)]
+    pub fn from_be_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
         Self {
-            sequence: u64::from_le_bytes(data[..8].try_into().unwrap()),
-            content_prefix_hash: u64::from_le_bytes(data[8..16].try_into().unwrap()),
+            sequence: u64::from_be_bytes(data[..8].try_into().unwrap()),
+            content_prefix_hash: u64::from_be_bytes(data[8..16].try_into().unwrap()),
         }
     }
 }
@@ -184,14 +190,14 @@ impl Value for BlobId {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
+        Self::from_be_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b,
     {
-        value.to_le_bytes()
+        value.to_be_bytes()
     }
 
     fn type_name() -> TypeName {
@@ -201,9 +207,11 @@ impl Value for BlobId {
 
 impl Key for BlobId {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let a = Self::from_bytes(data1);
-        let b = Self::from_bytes(data2);
-        a.cmp(&b)
+        // Big-endian serialization means raw byte comparison is correct.
+        let len = Self::SERIALIZED_SIZE.min(data1.len()).min(data2.len());
+        data1[..len]
+            .cmp(&data2[..len])
+            .then_with(|| data1.len().cmp(&data2.len()))
     }
 }
 
@@ -419,7 +427,7 @@ impl BlobMeta {
         if let Some(parent) = self.causal_parent {
             buf[pos] = 1;
             pos += 1;
-            buf[pos..pos + BlobId::SERIALIZED_SIZE].copy_from_slice(&parent.to_le_bytes());
+            buf[pos..pos + BlobId::SERIALIZED_SIZE].copy_from_slice(&parent.to_be_bytes());
             pos += BlobId::SERIALIZED_SIZE;
         } else {
             buf[pos] = 0;
@@ -459,7 +467,7 @@ impl BlobMeta {
         let has_parent = data[pos];
         pos += 1;
         let causal_parent = if has_parent != 0 {
-            Some(BlobId::from_le_bytes(
+            Some(BlobId::from_be_bytes(
                 data[pos..pos + BlobId::SERIALIZED_SIZE].try_into().unwrap(),
             ))
         } else {
@@ -641,7 +649,7 @@ impl CausalEdge {
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
         let mut buf = [0u8; Self::SERIALIZED_SIZE];
         let mut pos = 0;
-        buf[pos..pos + BlobId::SERIALIZED_SIZE].copy_from_slice(&self.child.to_le_bytes());
+        buf[pos..pos + BlobId::SERIALIZED_SIZE].copy_from_slice(&self.child.to_be_bytes());
         pos += BlobId::SERIALIZED_SIZE;
         buf[pos] = self.relation.as_byte();
         pos += 1;
@@ -654,7 +662,7 @@ impl CausalEdge {
     pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
         let mut pos = 0;
         let child =
-            BlobId::from_le_bytes(data[pos..pos + BlobId::SERIALIZED_SIZE].try_into().unwrap());
+            BlobId::from_be_bytes(data[pos..pos + BlobId::SERIALIZED_SIZE].try_into().unwrap());
         pos += BlobId::SERIALIZED_SIZE;
         let relation = RelationType::from_byte(data[pos]);
         pos += 1;
@@ -759,16 +767,21 @@ impl CausalEdgeKey {
         Self { parent, child }
     }
 
-    pub fn to_le_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
+    /// Serialize to 32 bytes big-endian.
+    /// Big-endian ensures lexicographic byte order matches numeric order.
+    #[allow(clippy::big_endian_bytes)]
+    pub fn to_be_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
         let mut buf = [0u8; Self::SERIALIZED_SIZE];
-        buf[..BlobId::SERIALIZED_SIZE].copy_from_slice(&self.parent.to_le_bytes());
-        buf[BlobId::SERIALIZED_SIZE..].copy_from_slice(&self.child.to_le_bytes());
+        buf[..BlobId::SERIALIZED_SIZE].copy_from_slice(&self.parent.to_be_bytes());
+        buf[BlobId::SERIALIZED_SIZE..].copy_from_slice(&self.child.to_be_bytes());
         buf
     }
 
-    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
-        let parent = BlobId::from_le_bytes(data[..BlobId::SERIALIZED_SIZE].try_into().unwrap());
-        let child = BlobId::from_le_bytes(data[BlobId::SERIALIZED_SIZE..].try_into().unwrap());
+    /// Deserialize from 32 bytes big-endian.
+    #[allow(clippy::big_endian_bytes)]
+    pub fn from_be_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+        let parent = BlobId::from_be_bytes(data[..BlobId::SERIALIZED_SIZE].try_into().unwrap());
+        let child = BlobId::from_be_bytes(data[BlobId::SERIALIZED_SIZE..].try_into().unwrap());
         Self { parent, child }
     }
 }
@@ -811,14 +824,14 @@ impl Value for CausalEdgeKey {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
+        Self::from_be_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b,
     {
-        value.to_le_bytes()
+        value.to_be_bytes()
     }
 
     fn type_name() -> TypeName {
@@ -828,9 +841,11 @@ impl Value for CausalEdgeKey {
 
 impl Key for CausalEdgeKey {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let a = Self::from_bytes(data1);
-        let b = Self::from_bytes(data2);
-        a.cmp(&b)
+        // Big-endian serialization means raw byte comparison is correct.
+        let len = Self::SERIALIZED_SIZE.min(data1.len()).min(data2.len());
+        data1[..len]
+            .cmp(&data2[..len])
+            .then_with(|| data1.len().cmp(&data2.len()))
     }
 }
 
@@ -923,19 +938,24 @@ impl TagKey {
         core::str::from_utf8(&self.tag[..len]).unwrap_or("")
     }
 
-    pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
+    /// Serialize to 49 bytes. Tag and `tag_len` are single-byte values
+    /// (already lexicographically correct); `BlobId` suffix is big-endian.
+    #[allow(clippy::big_endian_bytes)]
+    pub fn to_be_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
         let mut buf = [0u8; Self::SERIALIZED_SIZE];
         buf[..32].copy_from_slice(&self.tag);
         buf[32] = self.tag_len;
-        buf[33..49].copy_from_slice(&self.blob_id.to_le_bytes());
+        buf[33..49].copy_from_slice(&self.blob_id.to_be_bytes());
         buf
     }
 
-    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+    /// Deserialize from 49 bytes.
+    #[allow(clippy::big_endian_bytes)]
+    pub fn from_be_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
         let mut tag = [0u8; 32];
         tag.copy_from_slice(&data[..32]);
         let tag_len = data[32];
-        let blob_id = BlobId::from_le_bytes(data[33..49].try_into().unwrap());
+        let blob_id = BlobId::from_be_bytes(data[33..49].try_into().unwrap());
         Self {
             tag,
             tag_len,
@@ -987,14 +1007,14 @@ impl Value for TagKey {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
+        Self::from_be_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b,
     {
-        value.to_le_bytes()
+        value.to_be_bytes()
     }
 
     fn type_name() -> TypeName {
@@ -1004,9 +1024,12 @@ impl Value for TagKey {
 
 impl Key for TagKey {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let a = Self::from_bytes(data1);
-        let b = Self::from_bytes(data2);
-        a.cmp(&b)
+        // Tag prefix (33 bytes) is already lexicographic; BlobId suffix is big-endian.
+        // Direct byte comparison is correct for the entire key.
+        let len = Self::SERIALIZED_SIZE.min(data1.len()).min(data2.len());
+        data1[..len]
+            .cmp(&data2[..len])
+            .then_with(|| data1.len().cmp(&data2.len()))
     }
 }
 
@@ -1058,19 +1081,24 @@ impl NamespaceKey {
         core::str::from_utf8(&self.namespace[..len]).unwrap_or("")
     }
 
-    pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
+    /// Serialize to 80 bytes. Namespace prefix and `ns_len` are single-byte
+    /// values (already lexicographically correct); `BlobId` suffix is big-endian.
+    #[allow(clippy::big_endian_bytes)]
+    pub fn to_be_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
         let mut buf = [0u8; Self::SERIALIZED_SIZE];
         buf[..63].copy_from_slice(&self.namespace);
         buf[63] = self.ns_len;
-        buf[64..80].copy_from_slice(&self.blob_id.to_le_bytes());
+        buf[64..80].copy_from_slice(&self.blob_id.to_be_bytes());
         buf
     }
 
-    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+    /// Deserialize from 80 bytes.
+    #[allow(clippy::big_endian_bytes)]
+    pub fn from_be_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
         let mut namespace = [0u8; 63];
         namespace.copy_from_slice(&data[..63]);
         let ns_len = data[63];
-        let blob_id = BlobId::from_le_bytes(data[64..80].try_into().unwrap());
+        let blob_id = BlobId::from_be_bytes(data[64..80].try_into().unwrap());
         Self {
             namespace,
             ns_len,
@@ -1122,14 +1150,14 @@ impl Value for NamespaceKey {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
+        Self::from_be_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b,
     {
-        value.to_le_bytes()
+        value.to_be_bytes()
     }
 
     fn type_name() -> TypeName {
@@ -1139,9 +1167,12 @@ impl Value for NamespaceKey {
 
 impl Key for NamespaceKey {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let a = Self::from_bytes(data1);
-        let b = Self::from_bytes(data2);
-        a.cmp(&b)
+        // Namespace prefix (64 bytes) is already lexicographic; BlobId suffix is big-endian.
+        // Direct byte comparison is correct for the entire key.
+        let len = Self::SERIALIZED_SIZE.min(data1.len()).min(data2.len());
+        data1[..len]
+            .cmp(&data2[..len])
+            .then_with(|| data1.len().cmp(&data2.len()))
     }
 }
 
@@ -1349,18 +1380,24 @@ impl TemporalKey {
         }
     }
 
-    pub fn to_le_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
+    /// Serialize to 32 bytes big-endian.
+    /// Big-endian ensures lexicographic byte order matches numeric order
+    /// for all three fields (`wall_clock_ns`, `hlc`, `blob_id`).
+    #[allow(clippy::big_endian_bytes)]
+    pub fn to_be_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
         let mut buf = [0u8; Self::SERIALIZED_SIZE];
-        buf[..8].copy_from_slice(&self.wall_clock_ns.to_le_bytes());
-        buf[8..16].copy_from_slice(&self.hlc.to_raw().to_le_bytes());
-        buf[16..32].copy_from_slice(&self.blob_id.to_le_bytes());
+        buf[..8].copy_from_slice(&self.wall_clock_ns.to_be_bytes());
+        buf[8..16].copy_from_slice(&self.hlc.to_raw().to_be_bytes());
+        buf[16..32].copy_from_slice(&self.blob_id.to_be_bytes());
         buf
     }
 
-    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
-        let wall_clock_ns = u64::from_le_bytes(data[..8].try_into().unwrap());
-        let hlc_raw = u64::from_le_bytes(data[8..16].try_into().unwrap());
-        let blob_id = BlobId::from_le_bytes(data[16..32].try_into().unwrap());
+    /// Deserialize from 32 bytes big-endian.
+    #[allow(clippy::big_endian_bytes)]
+    pub fn from_be_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+        let wall_clock_ns = u64::from_be_bytes(data[..8].try_into().unwrap());
+        let hlc_raw = u64::from_be_bytes(data[8..16].try_into().unwrap());
+        let blob_id = BlobId::from_be_bytes(data[16..32].try_into().unwrap());
         Self {
             wall_clock_ns,
             hlc: HybridLogicalClock::from_raw(hlc_raw),
@@ -1412,14 +1449,14 @@ impl Value for TemporalKey {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
+        Self::from_be_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b,
     {
-        value.to_le_bytes()
+        value.to_be_bytes()
     }
 
     fn type_name() -> TypeName {
@@ -1429,9 +1466,11 @@ impl Value for TemporalKey {
 
 impl Key for TemporalKey {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let a = Self::from_bytes(data1);
-        let b = Self::from_bytes(data2);
-        a.cmp(&b)
+        // Big-endian serialization means raw byte comparison is correct.
+        let len = Self::SERIALIZED_SIZE.min(data1.len()).min(data2.len());
+        data1[..len]
+            .cmp(&data2[..len])
+            .then_with(|| data1.len().cmp(&data2.len()))
     }
 }
 
@@ -1671,8 +1710,8 @@ mod tests {
     #[test]
     fn blob_id_roundtrip() {
         let id = BlobId::new(42, 0xDEAD_BEEF_CAFE_BABE);
-        let bytes = id.to_le_bytes();
-        let recovered = BlobId::from_le_bytes(bytes);
+        let bytes = id.to_be_bytes();
+        let recovered = BlobId::from_be_bytes(bytes);
         assert_eq!(id, recovered);
     }
 
@@ -1798,8 +1837,8 @@ mod tests {
             crate::temporal::HybridLogicalClock::from_parts(1_700_000_000_000, 42),
             BlobId::new(7, 0xCAFE),
         );
-        let bytes = tk.to_le_bytes();
-        let recovered = TemporalKey::from_le_bytes(bytes);
+        let bytes = tk.to_be_bytes();
+        let recovered = TemporalKey::from_be_bytes(bytes);
         assert_eq!(tk, recovered);
     }
 
@@ -1904,8 +1943,8 @@ mod tests {
     #[test]
     fn tag_key_roundtrip() {
         let tk = TagKey::new("lidar", BlobId::new(42, 0xCAFE));
-        let bytes = tk.to_le_bytes();
-        let recovered = TagKey::from_le_bytes(bytes);
+        let bytes = tk.to_be_bytes();
+        let recovered = TagKey::from_be_bytes(bytes);
         assert_eq!(recovered.tag_str(), "lidar");
         assert_eq!(recovered.blob_id, BlobId::new(42, 0xCAFE));
     }
@@ -1930,8 +1969,8 @@ mod tests {
     #[test]
     fn namespace_key_roundtrip() {
         let nk = NamespaceKey::new("agent-session-42", BlobId::new(7, 0xFF));
-        let bytes = nk.to_le_bytes();
-        let recovered = NamespaceKey::from_le_bytes(bytes);
+        let bytes = nk.to_be_bytes();
+        let recovered = NamespaceKey::from_be_bytes(bytes);
         assert_eq!(recovered.namespace_str(), "agent-session-42");
         assert_eq!(recovered.blob_id, BlobId::new(7, 0xFF));
     }

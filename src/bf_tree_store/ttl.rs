@@ -21,6 +21,7 @@ use core::time::Duration;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::cdc::types::{CdcEvent, ChangeOp};
 use crate::types::{Key, Value};
 
 use super::adapter::BfTreeAdapter;
@@ -89,6 +90,7 @@ pub struct BfTreeTtlTable<'txn, K: Key + 'static, V: Value + 'static> {
     name: String,
     adapter: &'txn Arc<BfTreeAdapter>,
     ops_count: &'txn AtomicU64,
+    cdc_log: Option<&'txn Mutex<Vec<CdcEvent>>>,
     buffer: &'txn Mutex<WriteBuffer>,
     _key: PhantomData<K>,
     _val: PhantomData<V>,
@@ -99,15 +101,24 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         name: &str,
         adapter: &'txn Arc<BfTreeAdapter>,
         ops_count: &'txn AtomicU64,
+        cdc_log: Option<&'txn Mutex<Vec<CdcEvent>>>,
         buffer: &'txn Mutex<WriteBuffer>,
     ) -> Self {
         Self {
             name: String::from(name),
             adapter,
             ops_count,
+            cdc_log,
             buffer,
             _key: PhantomData,
             _val: PhantomData,
+        }
+    }
+
+    /// Record a CDC event if CDC is enabled.
+    fn record_cdc(&self, event: CdcEvent) {
+        if let Some(log) = self.cdc_log {
+            log.lock().unwrap().push(event);
         }
     }
 
@@ -154,12 +165,28 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
         let wrapped = encode_ttl_value(expires_at_ms, val_bytes.as_ref());
 
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
 
         let previous_raw = self.read_raw_locked(&buffer, &encoded_key)?;
-        buffer.put(encoded_key, wrapped);
+        buffer.put(encoded_key, wrapped)?;
         drop(buffer);
         self.ops_count.fetch_add(1, Ordering::Relaxed);
+
+        // Record CDC event if enabled.
+        if self.cdc_log.is_some() {
+            let previous_value = Self::unwrap_if_not_expired(previous_raw.clone());
+            self.record_cdc(CdcEvent {
+                table_name: self.name.clone(),
+                op: if previous_value.is_some() {
+                    ChangeOp::Update
+                } else {
+                    ChangeOp::Insert
+                },
+                key: key_bytes.as_ref().to_vec(),
+                new_value: Some(val_bytes.as_ref().to_vec()),
+                old_value: previous_value,
+            });
+        }
 
         Ok(Self::unwrap_if_not_expired(previous_raw))
     }
@@ -169,7 +196,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
-        let buffer = self.buffer.lock().unwrap();
+        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         let raw = self.read_raw_locked(&buffer, &encoded_key)?;
         drop(buffer);
 
@@ -181,7 +208,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
-        let buffer = self.buffer.lock().unwrap();
+        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         let raw = self.read_raw_locked(&buffer, &encoded_key)?;
         drop(buffer);
 
@@ -193,18 +220,29 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         let previous_raw = self.read_raw_locked(&buffer, &encoded_key)?;
 
-        if previous_raw.is_some() {
+        let previous_value = Self::unwrap_if_not_expired(previous_raw);
+
+        if previous_value.is_some() {
             buffer.delete(encoded_key);
             drop(buffer);
             self.ops_count.fetch_add(1, Ordering::Relaxed);
+
+            // Record CDC event if enabled.
+            self.record_cdc(CdcEvent {
+                table_name: self.name.clone(),
+                op: ChangeOp::Delete,
+                key: key_bytes.as_ref().to_vec(),
+                new_value: None,
+                old_value: previous_value.clone(),
+            });
         } else {
             drop(buffer);
         }
 
-        Ok(Self::unwrap_if_not_expired(previous_raw))
+        Ok(previous_value)
     }
 
     /// Purge all expired entries. Returns the number of entries purged.
@@ -221,6 +259,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
     pub fn purge_expired(&mut self) -> Result<u64, BfTreeError> {
         let prefix = table_prefix(&self.name, TableKind::Ttl);
         let prefix_end = table_prefix_end(&self.name, TableKind::Ttl);
+        let prefix_len = prefix.len();
         let max_record_size = self.adapter.inner().config().get_cb_max_record_size();
 
         // Phase 1: Collect all BfTree key candidates (scan must complete before
@@ -236,8 +275,11 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
             result
         };
 
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         let mut purged = 0u64;
+        // Collect CDC events for purged entries to emit after releasing the
+        // buffer lock. Each entry is (user_key_bytes, old_value_bytes).
+        let mut purged_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
 
         // Phase 2: Re-read each entry through the buffer-aware path and
         // re-check expiry before tombstoning. This closes the TOCTOU window:
@@ -260,6 +302,11 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
             if is_expired(read_expiry(&raw)) {
                 buffer.delete(encoded_key.clone());
                 purged += 1;
+                if self.cdc_log.is_some() {
+                    let user_key = encoded_key.get(prefix_len..).unwrap_or(&[]).to_vec();
+                    let old_value = strip_expiry(&raw).to_vec();
+                    purged_entries.push((user_key, old_value));
+                }
             }
         }
 
@@ -279,6 +326,11 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
 
         for (encoded_key, raw_val) in buf_only {
             if is_expired(read_expiry(&raw_val)) {
+                if self.cdc_log.is_some() {
+                    let user_key = encoded_key.get(prefix_len..).unwrap_or(&[]).to_vec();
+                    let old_value = strip_expiry(&raw_val).to_vec();
+                    purged_entries.push((user_key, old_value));
+                }
                 buffer.delete(encoded_key);
                 purged += 1;
             }
@@ -286,6 +338,18 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
 
         drop(buffer);
         self.ops_count.fetch_add(purged, Ordering::Relaxed);
+
+        // Record CDC delete events for all purged entries.
+        for (user_key, old_value) in purged_entries {
+            self.record_cdc(CdcEvent {
+                table_name: self.name.clone(),
+                op: ChangeOp::Delete,
+                key: user_key,
+                new_value: None,
+                old_value: Some(old_value),
+            });
+        }
+
         Ok(purged)
     }
 

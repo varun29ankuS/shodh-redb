@@ -84,7 +84,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     /// Record a CDC event if CDC is enabled.
     fn record_cdc(&self, event: CdcEvent) {
         if let Some(log) = self.cdc_log {
-            log.lock().unwrap().push(event);
+            log.lock().unwrap_or_else(|e| e.into_inner()).push(event);
         }
     }
 
@@ -105,7 +105,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         // Release the buffer lock before performing BfTree I/O to avoid
         // holding the mutex across potentially slow disk reads.
         let previous = {
-            let buffer = self.buffer.lock().unwrap();
+            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
@@ -125,8 +125,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
 
         // Re-acquire the lock to write the new value into the buffer.
         {
-            let mut buffer = self.buffer.lock().unwrap();
-            buffer.put(encoded_key, val_bytes.as_ref().to_vec());
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            buffer.put(encoded_key, val_bytes.as_ref().to_vec())?;
         }
 
         self.ops_count.fetch_add(1, Ordering::Relaxed);
@@ -161,7 +161,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         // Release the buffer lock before performing BfTree I/O to avoid
         // holding the mutex across potentially slow disk reads.
         let previous = {
-            let buffer = self.buffer.lock().unwrap();
+            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
@@ -181,7 +181,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
 
         if previous.is_some() {
             // Re-acquire buffer lock to write tombstone.
-            self.buffer.lock().unwrap().delete(encoded_key);
+            self.buffer.lock().unwrap_or_else(|e| e.into_inner()).delete(encoded_key);
             self.ops_count.fetch_add(1, Ordering::Relaxed);
 
             // Record CDC event if enabled.
@@ -207,7 +207,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
 
-        let buffer = self.buffer.lock().unwrap();
+        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         match buffer.get(&encoded_key) {
             BufferLookup::Found(v) => return Ok(Some(v)),
             BufferLookup::Tombstone => return Ok(None),
@@ -242,7 +242,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         // Release the buffer lock before performing BfTree I/O to avoid
         // holding the mutex across potentially slow disk reads.
         let existing = {
-            let buffer = self.buffer.lock().unwrap();
+            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
@@ -261,9 +261,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
 
         // Re-acquire buffer lock to apply the merge result.
         {
-            let mut buffer = self.buffer.lock().unwrap();
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             match operator.merge(key_bytes.as_ref(), existing.as_deref(), operand) {
-                Some(new_val) => buffer.put(encoded_key, new_val),
+                Some(new_val) => buffer.put(encoded_key, new_val)?,
                 None => buffer.delete(encoded_key),
             }
         }
@@ -279,7 +279,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
 
-        let buffer = self.buffer.lock().unwrap();
+        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         match buffer.get(&encoded_key) {
             BufferLookup::Found(_) => return true,
             BufferLookup::Tombstone => return false,
@@ -537,7 +537,7 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     let max_record_size = adapter.inner().config().get_cb_max_record_size();
 
     // Collect buffer entries for this range (prefix-stripped keys).
-    let buf = buffer_mutex.lock().unwrap();
+    let buf = buffer_mutex.lock().unwrap_or_else(|e| e.into_inner());
     let buf_entries = collect_buffer_entries_for_table(&buf, name, TableKind::Regular, &scan_start, &scan_end);
     drop(buf);
 
@@ -628,7 +628,7 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
             keys
         };
 
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         let count = buffer.drain_table(&bftree_encoded_keys, &prefix, &prefix_end);
         drop(buffer);
 

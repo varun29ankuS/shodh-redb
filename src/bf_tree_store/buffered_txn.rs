@@ -39,6 +39,13 @@ pub(crate) enum BufferLookup {
 // WriteBuffer -- sorted overlay of pending writes
 // ---------------------------------------------------------------------------
 
+/// Default maximum number of entries allowed in a single write buffer.
+///
+/// Prevents unbounded memory growth from adversarial or runaway write loops.
+/// Each entry consumes at least one `BTreeMap` node plus the key/value
+/// allocations, so 1 million entries already represents significant memory.
+const DEFAULT_MAX_BUFFER_ENTRIES: usize = 1_000_000;
+
 /// Sorted write buffer that accumulates mutations during a transaction.
 ///
 /// Uses `BTreeMap` (not `HashMap`) to maintain sorted key order, which is
@@ -48,19 +55,46 @@ pub(crate) struct WriteBuffer {
     /// Key = full encoded table key (with namespace prefix).
     /// Value = `Some(bytes)` for insert/update, `None` for delete (tombstone).
     entries: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    /// Maximum number of entries permitted in this buffer. Writes that would
+    /// exceed this limit are rejected with `BfTreeError::InvalidKV`.
+    max_buffer_entries: usize,
 }
 
 impl WriteBuffer {
-    /// Create an empty write buffer.
+    /// Create an empty write buffer with the default entry limit.
     pub(crate) fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            max_buffer_entries: DEFAULT_MAX_BUFFER_ENTRIES,
+        }
+    }
+
+    /// Create an empty write buffer with a custom entry limit.
+    #[allow(dead_code)]
+    pub(crate) fn with_max_entries(max_buffer_entries: usize) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            max_buffer_entries,
         }
     }
 
     /// Buffer an insert or update.
-    pub(crate) fn put(&mut self, encoded_key: Vec<u8>, value: Vec<u8>) {
+    ///
+    /// Returns an error if the buffer already contains `max_buffer_entries`
+    /// entries and the key is not already present (i.e., this would be a net
+    /// new entry, not an overwrite of an existing buffered key).
+    pub(crate) fn put(&mut self, encoded_key: Vec<u8>, value: Vec<u8>) -> Result<(), BfTreeError> {
+        if self.entries.len() >= self.max_buffer_entries
+            && !self.entries.contains_key(&encoded_key)
+        {
+            return Err(BfTreeError::InvalidKV(alloc::format!(
+                "write buffer full: {} entries (limit {})",
+                self.entries.len(),
+                self.max_buffer_entries
+            )));
+        }
         self.entries.insert(encoded_key, Some(value));
+        Ok(())
     }
 
     /// Buffer a delete (tombstone).
@@ -493,14 +527,14 @@ mod tests {
         assert!(matches!(buf.get(&key), BufferLookup::NotInBuffer));
 
         // Put and get.
-        buf.put(key.clone(), b"value1".to_vec());
+        buf.put(key.clone(), b"value1".to_vec()).unwrap();
         match buf.get(&key) {
             BufferLookup::Found(v) => assert_eq!(v, b"value1"),
             _ => panic!("expected Found"),
         }
 
         // Overwrite.
-        buf.put(key.clone(), b"value2".to_vec());
+        buf.put(key.clone(), b"value2".to_vec()).unwrap();
         match buf.get(&key) {
             BufferLookup::Found(v) => assert_eq!(v, b"value2"),
             _ => panic!("expected Found"),
@@ -512,7 +546,7 @@ mod tests {
         let mut buf = WriteBuffer::new();
         let key = b"key".to_vec();
 
-        buf.put(key.clone(), b"val".to_vec());
+        buf.put(key.clone(), b"val".to_vec()).unwrap();
         buf.delete(key.clone());
         assert!(matches!(buf.get(&key), BufferLookup::Tombstone));
     }
@@ -525,8 +559,8 @@ mod tests {
         let mut buf = WriteBuffer::new();
         let key1 = encode_table_key("test", TableKind::Regular, b"k1");
         let key2 = encode_table_key("test", TableKind::Regular, b"k2");
-        buf.put(key1.clone(), b"v1".to_vec());
-        buf.put(key2.clone(), b"v2".to_vec());
+        buf.put(key1.clone(), b"v1".to_vec()).unwrap();
+        buf.put(key2.clone(), b"v2".to_vec()).unwrap();
 
         buf.flush(adapter).unwrap();
 
@@ -544,7 +578,7 @@ mod tests {
 
         let mut buf = WriteBuffer::new();
         let key = encode_table_key("test", TableKind::Regular, b"k1");
-        buf.put(key.clone(), b"val".to_vec());
+        buf.put(key.clone(), b"val".to_vec()).unwrap();
         buf.discard();
 
         assert!(buf.is_empty());

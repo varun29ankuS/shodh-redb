@@ -60,6 +60,7 @@ impl Value for SavepointId {
         Some(size_of::<u64>())
     }
 
+    #[allow(clippy::big_endian_bytes)]
     fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
     where
         Self: 'a,
@@ -67,16 +68,17 @@ impl Value for SavepointId {
         if data.len() < size_of::<u64>() {
             return SavepointId(0);
         }
-        SavepointId(u64::from_le_bytes([
+        SavepointId(u64::from_be_bytes([
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]))
     }
 
+    #[allow(clippy::big_endian_bytes)]
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b,
     {
-        value.0.to_le_bytes()
+        value.0.to_be_bytes()
     }
 
     fn type_name() -> TypeName {
@@ -86,7 +88,8 @@ impl Value for SavepointId {
 
 impl Key for SavepointId {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        Self::from_bytes(data1).0.cmp(&Self::from_bytes(data2).0)
+        // Big-endian serialization means raw byte comparison is correct.
+        data1[..size_of::<u64>()].cmp(&data2[..size_of::<u64>()])
     }
 }
 

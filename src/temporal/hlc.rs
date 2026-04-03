@@ -16,7 +16,7 @@ use core::fmt;
 /// Properties:
 /// - Monotonically increasing within a process
 /// - Causally ordered across processes via `merge()`
-/// - Natural byte ordering (LE `u64`) = causal ordering
+/// - Big-endian serialization ensures lexicographic byte order = causal ordering
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HybridLogicalClock(u64);
 
@@ -196,18 +196,20 @@ impl Value for HybridLogicalClock {
         Some(8)
     }
 
+    #[allow(clippy::big_endian_bytes)]
     fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
     where
         Self: 'a,
     {
-        Self(u64::from_le_bytes(data[..8].try_into().unwrap()))
+        Self(u64::from_be_bytes(data[..8].try_into().unwrap()))
     }
 
+    #[allow(clippy::big_endian_bytes)]
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b,
     {
-        value.0.to_le_bytes()
+        value.0.to_be_bytes()
     }
 
     fn type_name() -> TypeName {
@@ -217,9 +219,9 @@ impl Value for HybridLogicalClock {
 
 impl Key for HybridLogicalClock {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let a = u64::from_le_bytes(data1[..8].try_into().unwrap());
-        let b = u64::from_le_bytes(data2[..8].try_into().unwrap());
-        a.cmp(&b)
+        // Big-endian serialization means raw byte comparison gives correct
+        // causal ordering (physical-ms in high bits, logical in low bits).
+        data1[..8].cmp(&data2[..8])
     }
 }
 

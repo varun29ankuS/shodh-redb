@@ -53,6 +53,10 @@ impl Codebooks {
     /// `Vec<u8>` of length `num_subvectors`, where each byte is the index
     /// of the nearest codebook centroid for that sub-vector position.
     pub fn encode(&self, vector: &[f32]) -> Vec<u8> {
+        let required_len = self.num_subvectors.saturating_mul(self.sub_dim);
+        if vector.len() < required_len {
+            return Vec::new();
+        }
         let mut codes = Vec::with_capacity(self.num_subvectors);
         for m in 0..self.num_subvectors {
             let sub = &vector[m * self.sub_dim..(m + 1) * self.sub_dim];

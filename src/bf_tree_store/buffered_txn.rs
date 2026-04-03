@@ -1,0 +1,710 @@
+//! Write buffer overlay for `BfTree` transactions.
+//!
+//! Provides atomic commit/rollback semantics over `BfTree`'s immediate-write model.
+//! All writes during a transaction are accumulated in a sorted `BTreeMap` buffer.
+//! On commit, the buffer is flushed to `BfTree` atomically. On abort (or drop without
+//! commit), the buffer is discarded — providing true rollback.
+//!
+//! The `BufferedScanIter` merges buffered entries with `BfTree` scan results in sorted
+//! order, implementing overlay semantics (buffer wins on key collision, tombstones
+//! hide underlying entries).
+
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::marker::PhantomData;
+
+use crate::storage_traits::OwnedKv;
+use crate::types::{Key, Value};
+
+use super::adapter::BfTreeAdapter;
+use super::database::{table_prefix, table_prefix_end, BfTreeTableScan};
+use super::error::BfTreeError;
+
+// ---------------------------------------------------------------------------
+// BufferLookup — result of checking the write buffer
+// ---------------------------------------------------------------------------
+
+/// Result of looking up a key in the write buffer.
+pub(crate) enum BufferLookup {
+    /// Key found with a value (insert or update).
+    Found(Vec<u8>),
+    /// Key found as a tombstone (pending delete).
+    Tombstone,
+    /// Key not in buffer — caller should check `BfTree`.
+    NotInBuffer,
+}
+
+// ---------------------------------------------------------------------------
+// WriteBuffer — sorted overlay of pending writes
+// ---------------------------------------------------------------------------
+
+/// Sorted write buffer that accumulates mutations during a transaction.
+///
+/// Uses `BTreeMap` (not `HashMap`) to maintain sorted key order, which is
+/// essential for the merge iterator that combines buffer entries with `BfTree`
+/// scan results.
+pub(crate) struct WriteBuffer {
+    /// Key = full encoded table key (with namespace prefix).
+    /// Value = `Some(bytes)` for insert/update, `None` for delete (tombstone).
+    entries: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+}
+
+impl WriteBuffer {
+    /// Create an empty write buffer.
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    /// Buffer an insert or update.
+    pub(crate) fn put(&mut self, encoded_key: Vec<u8>, value: Vec<u8>) {
+        self.entries.insert(encoded_key, Some(value));
+    }
+
+    /// Buffer a delete (tombstone).
+    pub(crate) fn delete(&mut self, encoded_key: Vec<u8>) {
+        self.entries.insert(encoded_key, None);
+    }
+
+    /// Look up a key in the buffer.
+    pub(crate) fn get(&self, encoded_key: &[u8]) -> BufferLookup {
+        match self.entries.get(encoded_key) {
+            Some(Some(value)) => BufferLookup::Found(value.clone()),
+            Some(None) => BufferLookup::Tombstone,
+            None => BufferLookup::NotInBuffer,
+        }
+    }
+
+    /// Get a sorted range of buffered entries within the given key bounds.
+    ///
+    /// Returns entries where `start <= key <= end` (inclusive both sides).
+    /// Callers that need exclusive end semantics pass `prefix_end` (prefix + 1)
+    /// as the upper bound, which naturally excludes keys past the prefix.
+    /// For range scans with user-specified inclusive end, the exact encoded end
+    /// key is passed and must be included.
+    pub(crate) fn range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> alloc::collections::btree_map::Range<'_, Vec<u8>, Option<Vec<u8>>> {
+        use core::ops::Bound;
+        self.entries
+            .range::<Vec<u8>, _>((Bound::Included(start.to_vec()), Bound::Included(end.to_vec())))
+    }
+
+    /// Number of buffered entries.
+    #[allow(dead_code)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the buffer is empty.
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Flush all buffered entries to `BfTree`.
+    ///
+    /// Pre-validates all insert entries against `BfTree`'s key/value size limits
+    /// before writing anything. If validation fails, no entries are written.
+    ///
+    /// On partial write failure (adapter error mid-flush), compensating actions
+    /// undo already-applied operations: inserts are rolled back via delete, and
+    /// deletes are rolled back via re-insert of the previously-read value.
+    pub(crate) fn flush(&mut self, adapter: &BfTreeAdapter) -> Result<(), BfTreeError> {
+        let max_record_size = adapter.inner().config().get_cb_max_record_size();
+
+        // Phase 1: Pre-validate all insert entries against BfTree's value size limit.
+        // Reject the entire flush upfront if any entry would exceed limits, avoiding
+        // partial writes. Key size validation is handled by adapter.insert() with
+        // compensating rollback as a safety net.
+        for (key, value) in &self.entries {
+            if let Some(val) = value {
+                if val.len() > max_record_size {
+                    return Err(BfTreeError::InvalidKV(
+                        alloc::format!("value size {} exceeds max {}", val.len(), max_record_size),
+                    ));
+                }
+                if key.is_empty() {
+                    return Err(BfTreeError::InvalidKV(
+                        alloc::string::String::from("key must not be empty"),
+                    ));
+                }
+            }
+        }
+
+        // Phase 2: Apply entries, tracking flushed operations for rollback.
+        //
+        // flushed_inserts: keys that were inserted (undo = delete).
+        // flushed_deletes: (key, Option<prev_value>) for keys that were deleted
+        //   (undo = re-insert prev_value if it existed).
+        let mut flushed_inserts: Vec<Vec<u8>> = Vec::new();
+        let mut flushed_deletes: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+
+        for (key, value) in &self.entries {
+            if let Some(val) = value {
+                if let Err(e) = adapter.insert(key, val) {
+                    // Compensate: undo all previously flushed entries.
+                    Self::compensate_rollback(adapter, &flushed_inserts, &flushed_deletes);
+                    return Err(e);
+                }
+                flushed_inserts.push(key.clone());
+            } else {
+                // Snapshot the current value before deleting for rollback.
+                let prev = {
+                    let mut buf = vec![0u8; max_record_size];
+                    match adapter.read(key, &mut buf) {
+                        Ok(len) => Some(buf[..len as usize].to_vec()),
+                        Err(_) => None,
+                    }
+                };
+                adapter.delete(key);
+                flushed_deletes.push((key.clone(), prev));
+            }
+        }
+
+        self.entries.clear();
+        Ok(())
+    }
+
+    /// Compensating rollback: undo already-flushed entries on partial failure.
+    ///
+    /// Best-effort: individual compensation failures are silently ignored since
+    /// the original error is already being propagated to the caller. This gives
+    /// stronger atomicity than the previous no-rollback approach.
+    fn compensate_rollback(
+        adapter: &BfTreeAdapter,
+        flushed_inserts: &[Vec<u8>],
+        flushed_deletes: &[(Vec<u8>, Option<Vec<u8>>)],
+    ) {
+        // Undo inserts by deleting the keys.
+        for key in flushed_inserts {
+            adapter.delete(key);
+        }
+        // Undo deletes by re-inserting the previous values.
+        for (key, prev) in flushed_deletes {
+            if let Some(val) = prev {
+                let _ = adapter.insert(key, val);
+            }
+        }
+    }
+
+    /// Discard all buffered entries (rollback).
+    pub(crate) fn discard(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Drain a table: tombstone all visible entries in `[prefix, prefix_end)`.
+    ///
+    /// - `BfTree` keys get tombstoned so they'll be deleted on flush.
+    /// - Buffer-only inserts get replaced with tombstones.
+    /// - Returns the count of visible entries that were drained.
+    pub(crate) fn drain_table(
+        &mut self,
+        bftree_encoded_keys: &[Vec<u8>],
+        prefix: &[u8],
+        prefix_end: &[u8],
+    ) -> u64 {
+        use core::ops::Bound;
+
+        let mut count = 0u64;
+
+        // Step 1: Count and tombstone `BfTree` keys.
+        for key in bftree_encoded_keys {
+            match self.get(key) {
+                BufferLookup::Tombstone => {} // already hidden
+                _ => count += 1,
+            }
+            self.delete(key.clone());
+        }
+
+        // Step 2: Count and tombstone buffer-only inserts.
+        // After step 1, all `BfTree` keys are tombstoned. Remaining inserts in range
+        // are buffer-only entries.
+        let buffer_only: Vec<Vec<u8>> = self
+            .entries
+            .range::<Vec<u8>, _>((
+                Bound::Included(prefix.to_vec()),
+                Bound::Excluded(prefix_end.to_vec()),
+            ))
+            .filter_map(|(k, v)| if v.is_some() { Some(k.clone()) } else { None })
+            .collect();
+        count += buffer_only.len() as u64;
+        for key in buffer_only {
+            self.entries.insert(key, None);
+        }
+
+        count
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BufferedScanIter — merge iterator over buffer + BfTree scan
+// ---------------------------------------------------------------------------
+
+/// Merge iterator that overlays write buffer entries onto a `BfTree` scan.
+///
+/// Produces entries in sorted key order. When a key exists in both the buffer
+/// and the scan, the buffer entry wins (overlay semantics). Buffer tombstones
+/// (`None` values) hide the corresponding scan entry.
+pub struct BufferedScanIter<'a, K: Key + 'static, V: Value + 'static> {
+    /// Buffered entries for the table's key range, collected into a vec for
+    /// iteration. Each entry is `(encoded_key_without_prefix, Option<value>)`.
+    buf_entries: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    buf_idx: usize,
+
+    /// `BfTree` scan iterator.
+    scan: BfTreeTableScan<'a>,
+    scan_buf: Vec<u8>,
+
+    /// Current peeked scan entry: `(key_bytes, val_bytes)` with prefix stripped.
+    scan_peek: Option<(Vec<u8>, Vec<u8>)>,
+    scan_exhausted: bool,
+
+    /// If set, skip entries whose user key matches this (exclusive start bound).
+    exclude_start: Option<Vec<u8>>,
+    /// If set, stop when user key matches this (exclusive end bound).
+    exclude_end: Option<Vec<u8>>,
+
+    _key: PhantomData<K>,
+    _val: PhantomData<V>,
+}
+
+impl<'a, K: Key + 'static, V: Value + 'static> BufferedScanIter<'a, K, V> {
+    /// Create a new merge iterator.
+    ///
+    /// `buf_entries` must be sorted by key and have the table prefix stripped.
+    /// `scan` is the `BfTree` range scan with prefix already set.
+    pub(crate) fn new(
+        buf_entries: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        scan: BfTreeTableScan<'a>,
+        max_record_size: usize,
+        exclude_start: Option<Vec<u8>>,
+        exclude_end: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            buf_entries,
+            buf_idx: 0,
+            scan,
+            scan_buf: vec![0u8; max_record_size * 2],
+            scan_peek: None,
+            scan_exhausted: false,
+            exclude_start,
+            exclude_end,
+            _key: PhantomData,
+            _val: PhantomData,
+        }
+    }
+
+    /// Advance the scan iterator and store the next entry in `scan_peek`.
+    fn advance_scan(&mut self) {
+        if self.scan_exhausted {
+            return;
+        }
+        if let Some((key_bytes, val_bytes)) = self.scan.next(&mut self.scan_buf) {
+            self.scan_peek = Some((key_bytes.to_vec(), val_bytes.to_vec()));
+        } else {
+            self.scan_peek = None;
+            self.scan_exhausted = true;
+        }
+    }
+
+    /// Peek at the current buffer entry (key bytes without prefix).
+    fn buf_peek(&self) -> Option<(&[u8], &Option<Vec<u8>>)> {
+        if self.buf_idx < self.buf_entries.len() {
+            let (ref k, ref v) = self.buf_entries[self.buf_idx];
+            Some((k.as_slice(), v))
+        } else {
+            None
+        }
+    }
+
+    /// Advance the buffer index.
+    fn advance_buf(&mut self) {
+        self.buf_idx += 1;
+    }
+}
+
+impl<K: Key + 'static, V: Value + 'static> Iterator for BufferedScanIter<'_, K, V> {
+    type Item = crate::Result<(OwnedKv<K>, OwnedKv<V>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Initialize scan peek on first call.
+        if self.scan_peek.is_none() && !self.scan_exhausted {
+            self.advance_scan();
+        }
+
+        loop {
+            let buf = self.buf_peek();
+            let scan = self.scan_peek.as_ref();
+
+            // Two-way merge: pick the entry with the smaller key.
+            // On equal keys, buffer wins (overlay semantics).
+            // Tombstones (None values) hide the entry.
+            let entry: Option<(Vec<u8>, Vec<u8>)> = match (buf, scan) {
+                (None, None) => return None,
+
+                (Some((bk, bv)), None) => {
+                    let key = bk.to_vec();
+                    let val = bv.clone();
+                    self.advance_buf();
+                    val.map(|v| (key, v))
+                }
+
+                (None, Some((sk, sv))) => {
+                    let key = sk.clone();
+                    let val = sv.clone();
+                    self.advance_scan();
+                    Some((key, val))
+                }
+
+                (Some((bk, bv)), Some((sk, sv))) => {
+                    use core::cmp::Ordering;
+                    match bk.cmp(sk.as_slice()) {
+                        Ordering::Less => {
+                            let key = bk.to_vec();
+                            let val = bv.clone();
+                            self.advance_buf();
+                            val.map(|v| (key, v))
+                        }
+                        Ordering::Equal => {
+                            let key = bk.to_vec();
+                            let val = bv.clone();
+                            self.advance_buf();
+                            self.advance_scan();
+                            val.map(|v| (key, v))
+                        }
+                        Ordering::Greater => {
+                            let key = sk.clone();
+                            let val = sv.clone();
+                            self.advance_scan();
+                            Some((key, val))
+                        }
+                    }
+                }
+            };
+
+            // Tombstone: entry is None, skip to next.
+            let Some((key, val)) = entry else {
+                continue;
+            };
+
+            // Exclusive start bound: skip the matching entry.
+            // Only clear the filter when we see the excluded key itself or a
+            // key that sorts after it (meaning we've passed the boundary).
+            // Keys that sort before exclude_start pass through without clearing.
+            if let Some(ref excl) = self.exclude_start {
+                match key.as_slice().cmp(excl.as_slice()) {
+                    core::cmp::Ordering::Equal => {
+                        self.exclude_start = None;
+                        continue;
+                    }
+                    core::cmp::Ordering::Greater => {
+                        self.exclude_start = None;
+                    }
+                    core::cmp::Ordering::Less => {
+                        // Key is before exclude_start; pass through, keep filter active.
+                    }
+                }
+            }
+
+            // Exclusive end bound: stop iteration.
+            if self.exclude_end.as_ref().is_some_and(|excl| key == *excl) {
+                return None;
+            }
+
+            return Some(Ok((OwnedKv::new(key), OwnedKv::new(val))));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: collect buffer entries for a table's key range
+// ---------------------------------------------------------------------------
+
+/// Collect buffer entries that fall within a table's key range, stripping the
+/// table prefix from keys.
+///
+/// Returns entries sorted by user key (prefix-stripped), suitable for
+/// `BufferedScanIter`.
+pub(crate) fn collect_buffer_entries_for_table(
+    buffer: &WriteBuffer,
+    table_name: &str,
+    start_encoded: &[u8],
+    end_encoded: &[u8],
+) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    let prefix = table_prefix(table_name);
+    let prefix_len = prefix.len();
+
+    buffer
+        .range(start_encoded, end_encoded)
+        .filter_map(|(key, val)| {
+            if key.len() > prefix_len && key.starts_with(&prefix) {
+                let user_key = key[prefix_len..].to_vec();
+                Some((user_key, val.clone()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Collect ALL buffer entries for a given table (full scan).
+#[allow(dead_code)]
+pub(crate) fn collect_all_buffer_entries_for_table(
+    buffer: &WriteBuffer,
+    table_name: &str,
+) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    let prefix = table_prefix(table_name);
+    let prefix_end = table_prefix_end(table_name);
+    collect_buffer_entries_for_table(buffer, table_name, &prefix, &prefix_end)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bf_tree_store::config::BfTreeConfig;
+    use crate::bf_tree_store::database::{encode_table_key, BfTreeDatabase};
+    use crate::storage_traits::WriteTable;
+    use crate::TableDefinition;
+
+    const ITEMS: TableDefinition<&str, u64> = TableDefinition::new("items");
+
+    #[test]
+    fn buffer_put_get() {
+        let mut buf = WriteBuffer::new();
+        let key = b"test_key".to_vec();
+
+        // Initially not in buffer.
+        assert!(matches!(buf.get(&key), BufferLookup::NotInBuffer));
+
+        // Put and get.
+        buf.put(key.clone(), b"value1".to_vec());
+        match buf.get(&key) {
+            BufferLookup::Found(v) => assert_eq!(v, b"value1"),
+            _ => panic!("expected Found"),
+        }
+
+        // Overwrite.
+        buf.put(key.clone(), b"value2".to_vec());
+        match buf.get(&key) {
+            BufferLookup::Found(v) => assert_eq!(v, b"value2"),
+            _ => panic!("expected Found"),
+        }
+    }
+
+    #[test]
+    fn buffer_delete_tombstone() {
+        let mut buf = WriteBuffer::new();
+        let key = b"key".to_vec();
+
+        buf.put(key.clone(), b"val".to_vec());
+        buf.delete(key.clone());
+        assert!(matches!(buf.get(&key), BufferLookup::Tombstone));
+    }
+
+    #[test]
+    fn buffer_flush_applies_to_adapter() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+        let adapter = db.adapter();
+
+        let mut buf = WriteBuffer::new();
+        let key1 = encode_table_key("test", b"k1");
+        let key2 = encode_table_key("test", b"k2");
+        buf.put(key1.clone(), b"v1".to_vec());
+        buf.put(key2.clone(), b"v2".to_vec());
+
+        buf.flush(adapter).unwrap();
+
+        // Verify in adapter.
+        let max = adapter.inner().config().get_cb_max_record_size();
+        let mut rbuf = vec![0u8; max];
+        let len = adapter.read(&key1, &mut rbuf).unwrap();
+        assert_eq!(&rbuf[..len as usize], b"v1");
+    }
+
+    #[test]
+    fn buffer_discard_rollback() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+        let adapter = db.adapter();
+
+        let mut buf = WriteBuffer::new();
+        let key = encode_table_key("test", b"k1");
+        buf.put(key.clone(), b"val".to_vec());
+        buf.discard();
+
+        assert!(buf.is_empty());
+
+        // Key should NOT be in adapter.
+        let max = adapter.inner().config().get_cb_max_record_size();
+        let mut rbuf = vec![0u8; max];
+        assert!(adapter.read(&key, &mut rbuf).is_err());
+    }
+
+    #[test]
+    fn buffer_flush_with_deletes() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+        let adapter = db.adapter();
+
+        // Pre-populate BfTree.
+        let key = encode_table_key("test", b"existing");
+        adapter.insert(&key, b"old_val").unwrap();
+
+        // Buffer a delete for the existing key.
+        let mut buf = WriteBuffer::new();
+        buf.delete(key.clone());
+        buf.flush(adapter).unwrap();
+
+        // Key should be gone.
+        let max = adapter.inner().config().get_cb_max_record_size();
+        let mut rbuf = vec![0u8; max];
+        assert!(adapter.read(&key, &mut rbuf).is_err());
+    }
+
+    #[test]
+    fn buffered_write_txn_read_your_writes() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(ITEMS);
+
+        // Insert via buffered write.
+        WriteTable::st_insert(&mut table, &"hello", &42u64).unwrap();
+
+        // Read back within same transaction — should see buffered value.
+        let val = WriteTable::st_get(&table, &"hello").unwrap();
+        assert!(val.is_some());
+        assert_eq!(val.unwrap().value(), 42u64);
+    }
+
+    #[test]
+    fn buffered_write_txn_abort_on_drop() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        {
+            let wtxn = db.begin_write();
+            let mut table = wtxn.open_table(ITEMS);
+            WriteTable::st_insert(&mut table, &"temp", &99u64).unwrap();
+            drop(table);
+            // Drop without commit — should rollback.
+        }
+
+        // Verify not visible via read transaction.
+        let rtxn = db.begin_read();
+        let ro = rtxn.open_table(ITEMS);
+        assert!(ro.get(&"temp").unwrap().is_none());
+    }
+
+    #[test]
+    fn buffered_write_txn_commit_visible() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(ITEMS);
+        WriteTable::st_insert(&mut table, &"committed", &77u64).unwrap();
+        drop(table);
+        wtxn.commit().unwrap();
+
+        // Should be visible.
+        let rtxn = db.begin_read();
+        let ro = rtxn.open_table(ITEMS);
+        let val = ro.get(&"committed").unwrap().unwrap();
+        assert_eq!(u64::from_le_bytes(val.as_slice().try_into().unwrap()), 77);
+    }
+
+    #[test]
+    fn buffered_scan_merges_buffer_and_bftree() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        // Pre-populate BfTree with some data.
+        {
+            let wtxn = db.begin_write();
+            let mut table = wtxn.open_table(ITEMS);
+            WriteTable::st_insert(&mut table, &"a", &1u64).unwrap();
+            WriteTable::st_insert(&mut table, &"c", &3u64).unwrap();
+            WriteTable::st_insert(&mut table, &"e", &5u64).unwrap();
+            drop(table);
+            wtxn.commit().unwrap();
+        }
+
+        // New transaction: add "b" and "d" in buffer, delete "c".
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(ITEMS);
+        WriteTable::st_insert(&mut table, &"b", &2u64).unwrap();
+        WriteTable::st_insert(&mut table, &"d", &4u64).unwrap();
+        WriteTable::st_remove(&mut table, &"c").unwrap();
+
+        // Full range scan should merge correctly: a, b, d, e.
+        let iter = WriteTable::st_range(&table, None, None, true, true).unwrap();
+        let entries: Vec<_> = iter.collect::<Result<Vec<_>, _>>().unwrap();
+        let keys: Vec<&str> = entries.iter().map(|(k, _)| k.value()).collect();
+        assert_eq!(keys, vec!["a", "b", "d", "e"]);
+
+        let vals: Vec<u64> = entries.iter().map(|(_, v)| v.value()).collect();
+        assert_eq!(vals, vec![1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn buffered_overwrite_supersedes_bftree() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        // Pre-populate.
+        {
+            let wtxn = db.begin_write();
+            let mut table = wtxn.open_table(ITEMS);
+            WriteTable::st_insert(&mut table, &"key", &100u64).unwrap();
+            drop(table);
+            wtxn.commit().unwrap();
+        }
+
+        // Overwrite in buffer.
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(ITEMS);
+        WriteTable::st_insert(&mut table, &"key", &200u64).unwrap();
+
+        let val = WriteTable::st_get(&table, &"key").unwrap().unwrap();
+        assert_eq!(val.value(), 200u64);
+
+        // Scan should also see 200.
+        let iter = WriteTable::st_range(&table, None, None, true, true).unwrap();
+        let entries: Vec<_> = iter.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.value(), 200u64);
+    }
+
+    #[test]
+    fn buffered_delete_hides_bftree_entry() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        // Pre-populate.
+        {
+            let wtxn = db.begin_write();
+            let mut table = wtxn.open_table(ITEMS);
+            WriteTable::st_insert(&mut table, &"visible", &1u64).unwrap();
+            WriteTable::st_insert(&mut table, &"hidden", &2u64).unwrap();
+            drop(table);
+            wtxn.commit().unwrap();
+        }
+
+        // Delete "hidden" in buffer.
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(ITEMS);
+        WriteTable::st_remove(&mut table, &"hidden").unwrap();
+
+        // Point lookup.
+        assert!(WriteTable::st_get(&table, &"hidden").unwrap().is_none());
+
+        // Scan should only show "visible".
+        let iter = WriteTable::st_range(&table, None, None, true, true).unwrap();
+        let entries: Vec<_> = iter.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(entries.len(), 1);
+        let keys: Vec<&str> = entries.iter().map(|(k, _)| k.value()).collect();
+        assert_eq!(keys, vec!["visible"]);
+    }
+}

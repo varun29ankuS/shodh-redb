@@ -91,14 +91,14 @@ impl CdcKey {
         }
     }
 
-    fn to_le_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
+    pub(crate) fn to_le_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
         let mut buf = [0u8; Self::SERIALIZED_SIZE];
         buf[..8].copy_from_slice(&self.transaction_id.to_le_bytes());
         buf[8..12].copy_from_slice(&self.sequence.to_le_bytes());
         buf
     }
 
-    fn from_le_bytes(data: &[u8]) -> Self {
+    pub(crate) fn from_le_bytes(data: &[u8]) -> Self {
         if data.len() < Self::SERIALIZED_SIZE {
             return Self {
                 transaction_id: 0,
@@ -243,7 +243,7 @@ impl CdcRecord {
         }
     }
 
-    fn serialized_size(&self) -> usize {
+    pub(crate) fn serialized_size(&self) -> usize {
         1 // op
         + 2 + self.table_name.len() // table_name_len + table_name
         + 4 + self.key.len() // key_len + key
@@ -251,7 +251,7 @@ impl CdcRecord {
         + 4 + self.old_value.as_ref().map_or(0, Vec::len) // old_val_len + old_val
     }
 
-    fn serialize(&self) -> Vec<u8> {
+    pub(crate) fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.serialized_size());
 
         buf.push(self.op as u8);

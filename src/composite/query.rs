@@ -8,6 +8,7 @@ use alloc::collections::BinaryHeap;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
+use super::provider::BlobQueryProvider;
 use super::scoring::{causal_bfs, normalize_causal, normalize_semantic, normalize_temporal};
 use super::types::{
     CandidateEntry, HeapEntry, ScoredBlob, SignalScores, SignalWeights, heap_to_sorted,
@@ -19,10 +20,13 @@ use super::types::{
 /// ranked result set using weighted linear combination. Supports optional
 /// pre-filtering by namespace and tags.
 ///
+/// The type parameter `P` is the blob query provider — typically a
+/// `ReadTransaction` (legacy B-tree) or `BfTreeReadOnlyBlobStore` (`BfTree`).
+///
 /// # Example
 ///
 /// ```rust,ignore
-/// let results = txn.composite_query()
+/// let results = CompositeQuery::new(&txn)
 ///     .semantic(&index, &query_vec, 0.6)
 ///     .temporal(0.3)
 ///     .time_range(start_ns, end_ns)
@@ -32,8 +36,12 @@ use super::types::{
 ///     .top_k(10)
 ///     .execute()?;
 /// ```
-pub struct CompositeQuery<'a> {
-    txn: &'a ReadTransaction,
+pub struct CompositeQuery<'a, P: BlobQueryProvider = ReadTransaction> {
+    provider: &'a P,
+
+    /// Legacy transaction reference — needed for vector index search which
+    /// takes `&ReadTransaction` directly. `None` when using `BfTree` backend.
+    legacy_txn: Option<&'a ReadTransaction>,
 
     // Semantic signal (IVF-PQ or Fractal)
     vector_index: Option<&'a ReadOnlyIvfPqIndex>,
@@ -59,11 +67,13 @@ pub struct CompositeQuery<'a> {
     top_k: usize,
 }
 
-impl<'a> CompositeQuery<'a> {
-    /// Start building a composite query on the given read transaction.
+/// Convenience constructor for legacy `ReadTransaction`.
+impl<'a> CompositeQuery<'a, ReadTransaction> {
+    /// Start building a composite query on the given legacy read transaction.
     pub fn new(txn: &'a ReadTransaction) -> Self {
         Self {
-            txn,
+            provider: txn,
+            legacy_txn: Some(txn),
             vector_index: None,
             fractal_index: None,
             query_vector: None,
@@ -78,6 +88,42 @@ impl<'a> CompositeQuery<'a> {
             weights: SignalWeights::default(),
             top_k: 10,
         }
+    }
+}
+
+impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
+    /// Start building a composite query on any `BlobQueryProvider`.
+    ///
+    /// For the legacy backend, prefer [`CompositeQuery::new()`] which
+    /// automatically sets up vector index search support.
+    pub fn with_provider(provider: &'a P) -> Self {
+        Self {
+            provider,
+            legacy_txn: None,
+            vector_index: None,
+            fractal_index: None,
+            query_vector: None,
+            search_params: None,
+            fractal_search_params: None,
+            semantic_candidates: None,
+            time_range: None,
+            causal_root: None,
+            causal_max_hops: 32,
+            namespace: None,
+            tags: Vec::new(),
+            weights: SignalWeights::default(),
+            top_k: 10,
+        }
+    }
+
+    /// Attach a legacy `ReadTransaction` for vector index search.
+    ///
+    /// Required when using `BfTree` provider with IVF-PQ or Fractal vector
+    /// indices, since those indices currently require a `ReadTransaction`.
+    #[must_use]
+    pub fn with_legacy_txn(mut self, txn: &'a ReadTransaction) -> Self {
+        self.legacy_txn = Some(txn);
+        self
     }
 
     /// Set the semantic similarity signal with the given weight.
@@ -213,6 +259,13 @@ impl<'a> CompositeQuery<'a> {
             })?;
             let k = self.semantic_candidates.unwrap_or(self.top_k.max(1) * 5);
 
+            // Vector index search requires a legacy ReadTransaction.
+            let txn = self.legacy_txn.ok_or_else(|| {
+                StorageError::Corrupted(
+                    "semantic search requires a ReadTransaction (use with_legacy_txn)".to_string(),
+                )
+            })?;
+
             let results = if let Some(fi) = self.fractal_index {
                 let params = self.fractal_search_params.unwrap_or(FractalSearchParams {
                     nprobe: 8,
@@ -222,7 +275,7 @@ impl<'a> CompositeQuery<'a> {
                     min_hlc: 0,
                     diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
                 });
-                fi.search(self.txn, query, &params)?
+                fi.search(txn, query, &params)?
             } else {
                 let index = self.vector_index.ok_or_else(|| {
                     StorageError::Corrupted(
@@ -236,11 +289,14 @@ impl<'a> CompositeQuery<'a> {
                     rerank: true,
                     diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
                 });
-                index.search(self.txn, query, &params)?
+                index.search(txn, query, &params)?
             };
 
             for neighbor in &results {
-                if let Some((id, meta)) = self.txn.blob_by_sequence(neighbor.key)? {
+                if let Some((id, meta)) = self.provider
+                    .blob_by_sequence(neighbor.key)
+                    .map_err(Into::into)?
+                {
                     let entry = candidates.entry(id).or_insert_with(|| CandidateEntry {
                         blob_id: id,
                         meta: None,
@@ -257,7 +313,9 @@ impl<'a> CompositeQuery<'a> {
 
         // 1b: Temporal candidates
         if tmp_active && let Some((start, end)) = self.time_range {
-            let temporal_results = self.txn.blobs_in_time_range(start, end)?;
+            let temporal_results = self.provider
+                .blobs_in_time_range(start, end)
+                .map_err(Into::into)?;
             for (tkey, meta) in &temporal_results {
                 let id = tkey.blob_id;
                 let entry = candidates.entry(id).or_insert_with(|| CandidateEntry {
@@ -278,7 +336,7 @@ impl<'a> CompositeQuery<'a> {
         // 1c: Causal candidates
         let causal_distances = if cau_active {
             if let Some(ref root) = self.causal_root {
-                let distances = causal_bfs(self.txn, root, self.causal_max_hops)?;
+                let distances = causal_bfs(self.provider, root, self.causal_max_hops)?;
                 for (id, hops) in &distances {
                     let entry = candidates.entry(*id).or_insert_with(|| CandidateEntry {
                         blob_id: *id,
@@ -300,7 +358,10 @@ impl<'a> CompositeQuery<'a> {
         // Fill in missing metadata and timestamps
         for entry in candidates.values_mut() {
             if entry.meta.is_none() {
-                if let Some(meta) = self.txn.get_blob_meta(&entry.blob_id)? {
+                if let Some(meta) = self.provider
+                    .get_blob_meta(&entry.blob_id)
+                    .map_err(Into::into)?
+                {
                     entry.wall_clock_ns = Some(meta.wall_clock_ns);
                     entry.meta = Some(meta);
                 }
@@ -315,8 +376,9 @@ impl<'a> CompositeQuery<'a> {
         // Phase 2: Pre-filtering
         if let Some(ns) = self.namespace {
             let ns_blobs: crate::compat::HashSet<BlobId> = self
-                .txn
-                .blobs_in_namespace(ns)?
+                .provider
+                .blobs_in_namespace(ns)
+                .map_err(Into::into)?
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect();
@@ -324,8 +386,12 @@ impl<'a> CompositeQuery<'a> {
         }
 
         for tag in &self.tags {
-            let tag_blobs: crate::compat::HashSet<BlobId> =
-                self.txn.blobs_by_tag(tag)?.into_iter().collect();
+            let tag_blobs: crate::compat::HashSet<BlobId> = self
+                .provider
+                .blobs_by_tag(tag)
+                .map_err(Into::into)?
+                .into_iter()
+                .collect();
             candidates.retain(|id, _| tag_blobs.contains(id));
         }
 
@@ -426,6 +492,12 @@ impl<'a> CompositeQuery<'a> {
         {
             return Err(StorageError::Corrupted(
                 "CompositeQuery: semantic signal requires an index (IVF-PQ or fractal)".to_string(),
+            ));
+        }
+        if self.weights.semantic > 0.0 && self.legacy_txn.is_none() {
+            return Err(StorageError::Corrupted(
+                "CompositeQuery: semantic signal requires a ReadTransaction (use with_legacy_txn)"
+                    .to_string(),
             ));
         }
         if self.weights.causal > 0.0 && self.causal_root.is_none() {

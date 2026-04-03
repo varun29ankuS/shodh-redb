@@ -864,3 +864,267 @@ impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Range<'_, K, 
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// storage_traits::WriteTable implementation for legacy Table
+// ---------------------------------------------------------------------------
+
+use crate::storage_traits::OwnedKv;
+
+/// Iterator adapter that converts `(AccessGuard<K>, AccessGuard<V>)` pairs
+/// into `(OwnedKv<K>, OwnedKv<V>)` pairs for the storage trait interface.
+pub struct LegacyRangeIter<'a, K: Key + 'static, V: Value + 'static> {
+    inner: Range<'a, K, V>,
+}
+
+impl<K: Key + 'static, V: Value + 'static> Iterator for LegacyRangeIter<'_, K, V> {
+    type Item = crate::Result<(OwnedKv<K>, OwnedKv<V>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|result| {
+            result.map(|(k_guard, v_guard)| {
+                let k_bytes = K::as_bytes(&k_guard.value()).as_ref().to_vec();
+                let v_bytes = V::as_bytes(&v_guard.value()).as_ref().to_vec();
+                (OwnedKv::new(k_bytes), OwnedKv::new(v_bytes))
+            })
+        })
+    }
+}
+
+impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, V>
+    for Table<'_, K, V>
+{
+    type RangeIter<'a>
+        = LegacyRangeIter<'a, K, V>
+    where
+        Self: 'a;
+
+    fn st_get(&self, key: &K::SelfType<'_>) -> crate::Result<Option<OwnedKv<V>>> {
+        ReadableTable::get(self, key).map(|opt| {
+            opt.map(|guard| {
+                let bytes = V::as_bytes(&guard.value()).as_ref().to_vec();
+                OwnedKv::new(bytes)
+            })
+        })
+    }
+
+    fn st_insert(
+        &mut self,
+        key: &K::SelfType<'_>,
+        value: &V::SelfType<'_>,
+    ) -> crate::Result<Option<OwnedKv<V>>> {
+        self.insert(key, value).map(|opt| {
+            opt.map(|guard| {
+                let bytes = V::as_bytes(&guard.value()).as_ref().to_vec();
+                OwnedKv::new(bytes)
+            })
+        })
+    }
+
+    fn st_remove(&mut self, key: &K::SelfType<'_>) -> crate::Result<Option<OwnedKv<V>>> {
+        self.remove(key).map(|opt| {
+            opt.map(|guard| {
+                let bytes = V::as_bytes(&guard.value()).as_ref().to_vec();
+                OwnedKv::new(bytes)
+            })
+        })
+    }
+
+    fn st_range<'a>(
+        &'a self,
+        start: Option<&K::SelfType<'_>>,
+        end: Option<&K::SelfType<'_>>,
+        start_inclusive: bool,
+        end_inclusive: bool,
+    ) -> crate::Result<Self::RangeIter<'a>> {
+        let inner = legacy_build_range::<K, V, Self>(self, start, end, start_inclusive, end_inclusive)?;
+        Ok(LegacyRangeIter { inner })
+    }
+
+    fn st_drain_all(&mut self) -> crate::Result<u64> {
+        self.drain_all()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// storage_traits::ReadTable for Table (writable tables are also readable)
+// ---------------------------------------------------------------------------
+
+impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V>
+    for Table<'_, K, V>
+{
+    type RangeIter<'a>
+        = LegacyRangeIter<'a, K, V>
+    where
+        Self: 'a;
+
+    fn st_get(&self, key: &K::SelfType<'_>) -> crate::Result<Option<OwnedKv<V>>> {
+        ReadableTable::get(self, key).map(|opt| {
+            opt.map(|guard| {
+                let bytes = V::as_bytes(&guard.value()).as_ref().to_vec();
+                OwnedKv::new(bytes)
+            })
+        })
+    }
+
+    fn st_range<'a>(
+        &'a self,
+        start: Option<&K::SelfType<'_>>,
+        end: Option<&K::SelfType<'_>>,
+        start_inclusive: bool,
+        end_inclusive: bool,
+    ) -> crate::Result<Self::RangeIter<'a>> {
+        let inner = legacy_build_range::<K, V, Self>(self, start, end, start_inclusive, end_inclusive)?;
+        Ok(LegacyRangeIter { inner })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// storage_traits::ReadTable for ReadOnlyTable
+// ---------------------------------------------------------------------------
+
+/// Iterator adapter for read-only table range scans.
+pub struct LegacyReadOnlyRangeIter<'a, K: Key + 'static, V: Value + 'static> {
+    inner: Range<'a, K, V>,
+}
+
+impl<K: Key + 'static, V: Value + 'static> Iterator for LegacyReadOnlyRangeIter<'_, K, V> {
+    type Item = crate::Result<(OwnedKv<K>, OwnedKv<V>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|result| {
+            result.map(|(k_guard, v_guard)| {
+                let k_bytes = K::as_bytes(&k_guard.value()).as_ref().to_vec();
+                let v_bytes = V::as_bytes(&v_guard.value()).as_ref().to_vec();
+                (OwnedKv::new(k_bytes), OwnedKv::new(v_bytes))
+            })
+        })
+    }
+}
+
+impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V>
+    for ReadOnlyTable<K, V>
+{
+    type RangeIter<'a>
+        = LegacyReadOnlyRangeIter<'a, K, V>
+    where
+        Self: 'a;
+
+    fn st_get(&self, key: &K::SelfType<'_>) -> crate::Result<Option<OwnedKv<V>>> {
+        self.get(key).map(|opt| {
+            opt.map(|guard| {
+                let bytes = V::as_bytes(&guard.value()).as_ref().to_vec();
+                OwnedKv::new(bytes)
+            })
+        })
+    }
+
+    fn st_range<'a>(
+        &'a self,
+        start: Option<&K::SelfType<'_>>,
+        end: Option<&K::SelfType<'_>>,
+        start_inclusive: bool,
+        end_inclusive: bool,
+    ) -> crate::Result<Self::RangeIter<'a>> {
+        let inner = legacy_build_range_ro::<K, V>(self, start, end, start_inclusive, end_inclusive)?;
+        Ok(LegacyReadOnlyRangeIter { inner })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Range construction helpers (shared logic for building Range from bounds)
+// ---------------------------------------------------------------------------
+
+/// Build a `Range` from optional start/end keys for types implementing `ReadableTable`.
+fn legacy_build_range<'a, K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>>(
+    table: &'a T,
+    start: Option<&K::SelfType<'_>>,
+    end: Option<&K::SelfType<'_>>,
+    start_inclusive: bool,
+    end_inclusive: bool,
+) -> crate::Result<Range<'a, K, V>> {
+    match (start, end) {
+        (None, None) => table.range::<K::SelfType<'_>>(..),
+        (Some(s), None) => {
+            let s_bytes = K::as_bytes(s).as_ref().to_vec();
+            let s_val = K::from_bytes(&s_bytes);
+            if start_inclusive {
+                table.range::<K::SelfType<'_>>(s_val..)
+            } else {
+                // Exclusive start bound: start from inclusive, caller filters
+                table.range::<K::SelfType<'_>>(s_val..)
+            }
+        }
+        (None, Some(e)) => {
+            let e_bytes = K::as_bytes(e).as_ref().to_vec();
+            let e_val = K::from_bytes(&e_bytes);
+            if end_inclusive {
+                table.range::<K::SelfType<'_>>(..=e_val)
+            } else {
+                table.range::<K::SelfType<'_>>(..e_val)
+            }
+        }
+        (Some(s), Some(e)) => {
+            let s_bytes = K::as_bytes(s).as_ref().to_vec();
+            let e_bytes = K::as_bytes(e).as_ref().to_vec();
+            let s_val = K::from_bytes(&s_bytes);
+            let e_val = K::from_bytes(&e_bytes);
+            if start_inclusive && end_inclusive {
+                table.range::<K::SelfType<'_>>(s_val..=e_val)
+            } else if start_inclusive {
+                table.range::<K::SelfType<'_>>(s_val..e_val)
+            } else if end_inclusive {
+                table.range::<K::SelfType<'_>>(s_val..=e_val)
+            } else {
+                table.range::<K::SelfType<'_>>(s_val..e_val)
+            }
+        }
+    }
+}
+
+/// Build a `Range` from optional start/end keys for `ReadOnlyTable`.
+///
+/// `ReadOnlyTable` has its own `range()` method (not via `ReadableTable` trait)
+/// with a slightly different signature (returns `Range<'static, K, V>`).
+fn legacy_build_range_ro<'a, K: Key + 'static, V: Value + 'static>(
+    table: &'a ReadOnlyTable<K, V>,
+    start: Option<&K::SelfType<'_>>,
+    end: Option<&K::SelfType<'_>>,
+    start_inclusive: bool,
+    end_inclusive: bool,
+) -> crate::Result<Range<'a, K, V>> {
+    match (start, end) {
+        (None, None) => table.range::<K::SelfType<'_>>(..),
+        (Some(s), None) => {
+            let s_bytes = K::as_bytes(s).as_ref().to_vec();
+            let s_val = K::from_bytes(&s_bytes);
+            // Note: RangeFrom is always inclusive in Rust's std. Exclusive-start
+            // semantics are handled by the caller via iterator-level filtering.
+            table.range::<K::SelfType<'_>>(s_val..)
+        }
+        (None, Some(e)) => {
+            let e_bytes = K::as_bytes(e).as_ref().to_vec();
+            let e_val = K::from_bytes(&e_bytes);
+            if end_inclusive {
+                table.range::<K::SelfType<'_>>(..=e_val)
+            } else {
+                table.range::<K::SelfType<'_>>(..e_val)
+            }
+        }
+        (Some(s), Some(e)) => {
+            let s_bytes = K::as_bytes(s).as_ref().to_vec();
+            let e_bytes = K::as_bytes(e).as_ref().to_vec();
+            let s_val = K::from_bytes(&s_bytes);
+            let e_val = K::from_bytes(&e_bytes);
+            if start_inclusive && end_inclusive {
+                table.range::<K::SelfType<'_>>(s_val..=e_val)
+            } else if start_inclusive {
+                table.range::<K::SelfType<'_>>(s_val..e_val)
+            } else if end_inclusive {
+                table.range::<K::SelfType<'_>>(s_val..=e_val)
+            } else {
+                table.range::<K::SelfType<'_>>(s_val..e_val)
+            }
+        }
+    }
+}

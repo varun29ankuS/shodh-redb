@@ -118,7 +118,7 @@ pub use blob_store::{
     StoreOptions,
 };
 pub use cdc::{CdcConfig, ChangeOp, ChangeStream};
-pub use composite::{CompositeQuery, ScoredBlob, SignalScores, SignalWeights};
+pub use composite::{BlobQueryProvider, CompositeQuery, ScoredBlob, SignalScores, SignalWeights};
 pub use fractal::{
     FractalIndex, FractalIndexConfig, FractalIndexDefinition, FractalSearchParams,
     ReadOnlyFractalIndex,
@@ -145,6 +145,8 @@ pub use vector_ops::{
 pub type Result<T = (), E = StorageError> = core::result::Result<T, E>;
 
 pub mod backends;
+#[cfg(feature = "bf_tree")]
+pub mod bf_tree_store;
 pub mod blob_store;
 pub mod cdc;
 mod compat;
@@ -165,6 +167,7 @@ pub mod merge;
 mod multimap_table;
 pub mod probe_select;
 mod sealed;
+pub mod storage_traits;
 mod table;
 pub mod temporal;
 mod transaction_tracker;

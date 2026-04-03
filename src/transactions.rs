@@ -1486,16 +1486,18 @@ impl WriteTransaction {
     pub fn open_ivfpq_index(
         &self,
         definition: &crate::ivfpq::config::IvfPqIndexDefinition,
-    ) -> Result<crate::ivfpq::index::IvfPqIndex<'_>, TableError> {
+    ) -> Result<crate::ivfpq::index::IvfPqIndex<'_, Self>, TableError> {
         crate::ivfpq::index::IvfPqIndex::open(self, definition)
+            .map_err(TableError::Storage)
     }
 
     /// Open or create a fractal vector index for writing.
     pub fn open_fractal_index(
         &self,
         definition: &crate::fractal::config::FractalIndexDefinition,
-    ) -> Result<crate::fractal::index::FractalIndex<'_>, TableError> {
+    ) -> Result<crate::fractal::index::FractalIndex<'_, Self>, TableError> {
         crate::fractal::index::FractalIndex::open(self, definition)
+            .map_err(TableError::Storage)
     }
 
     /// Open the given table
@@ -3276,6 +3278,7 @@ impl ReadTransaction {
         definition: &crate::ivfpq::config::IvfPqIndexDefinition,
     ) -> Result<crate::ivfpq::index::ReadOnlyIvfPqIndex, TableError> {
         crate::ivfpq::index::ReadOnlyIvfPqIndex::open(self, definition)
+            .map_err(TableError::Storage)
     }
 
     /// Open a fractal vector index for reading.
@@ -3284,6 +3287,7 @@ impl ReadTransaction {
         definition: &crate::fractal::config::FractalIndexDefinition,
     ) -> Result<crate::fractal::index::ReadOnlyFractalIndex, TableError> {
         crate::fractal::index::ReadOnlyFractalIndex::open(self, definition)
+            .map_err(TableError::Storage)
     }
 
     /// Open the given table without a type
@@ -4122,6 +4126,44 @@ impl ReadTransaction {
 impl Debug for ReadTransaction {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.write_str("ReadTransaction")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// storage_traits::StorageWrite for WriteTransaction
+// ---------------------------------------------------------------------------
+
+impl crate::storage_traits::StorageWrite for WriteTransaction {
+    type Table<'txn, K: Key + 'static, V: Value + 'static>
+        = Table<'txn, K, V>
+    where
+        Self: 'txn;
+
+    fn open_storage_table<K: Key + 'static, V: Value + 'static>(
+        &self,
+        definition: TableDefinition<K, V>,
+    ) -> Result<Self::Table<'_, K, V>> {
+        self.open_table(definition)
+            .map_err(|e| e.into_storage_error_or_corrupted("open_storage_table"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// storage_traits::StorageRead for ReadTransaction
+// ---------------------------------------------------------------------------
+
+impl crate::storage_traits::StorageRead for ReadTransaction {
+    type Table<'txn, K: Key + 'static, V: Value + 'static>
+        = ReadOnlyTable<K, V>
+    where
+        Self: 'txn;
+
+    fn open_storage_table<K: Key + 'static, V: Value + 'static>(
+        &self,
+        definition: TableDefinition<K, V>,
+    ) -> Result<Self::Table<'_, K, V>> {
+        self.open_table(definition)
+            .map_err(|e| e.into_storage_error_or_corrupted("open_storage_table"))
     }
 }
 

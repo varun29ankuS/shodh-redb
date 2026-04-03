@@ -18,9 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::config::BfTreeConfig;
-use super::database::{
-    encode_table_key, table_prefix, table_prefix_end, BfTreeDatabase,
-};
+use super::database::{BfTreeDatabase, encode_table_key, table_prefix, table_prefix_end};
 use super::error::BfTreeError;
 
 /// System table for history metadata.
@@ -72,8 +70,9 @@ impl HistoryEntry {
         let timestamp_ns = u64::from_le_bytes(data[8..16].try_into().unwrap());
         let path_len = u16::from_le_bytes(data[16..18].try_into().unwrap()) as usize;
         let path_len = path_len.min(MAX_PATH_LEN).min(data.len() - 18);
-        let snapshot_path =
-            core::str::from_utf8(&data[18..18 + path_len]).unwrap_or("").to_string();
+        let snapshot_path = core::str::from_utf8(&data[18..18 + path_len])
+            .unwrap_or("")
+            .to_string();
         Self {
             txn_id,
             timestamp_ns,
@@ -141,7 +140,9 @@ impl BfTreeHistory {
         let snapshot_id = self.next_snapshot_id.fetch_add(1, Ordering::SeqCst);
         let txn_id = {
             let rtxn = self.db.begin_read();
-            rtxn.latest_cdc_transaction_id().unwrap_or(None).unwrap_or(0)
+            rtxn.latest_cdc_transaction_id()
+                .unwrap_or(None)
+                .unwrap_or(0)
         };
 
         // Take the BfTree snapshot.
@@ -255,8 +256,8 @@ impl BfTreeHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bf_tree_store::config::BfTreeConfig;
     use crate::TableDefinition;
+    use crate::bf_tree_store::config::BfTreeConfig;
 
     const DATA: TableDefinition<&str, u64> = TableDefinition::new("hist_data");
 
@@ -278,9 +279,7 @@ mod tests {
     fn commit_and_list_snapshots() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("hist.bftree");
-        let db = Arc::new(
-            BfTreeDatabase::create(BfTreeConfig::new_file(&db_path, 4)).unwrap(),
-        );
+        let db = Arc::new(BfTreeDatabase::create(BfTreeConfig::new_file(&db_path, 4)).unwrap());
 
         let wtxn = db.begin_write();
         let mut t = wtxn.open_table(DATA);
@@ -303,9 +302,7 @@ mod tests {
     fn get_specific_entry() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("hist2.bftree");
-        let db = Arc::new(
-            BfTreeDatabase::create(BfTreeConfig::new_file(&db_path, 4)).unwrap(),
-        );
+        let db = Arc::new(BfTreeDatabase::create(BfTreeConfig::new_file(&db_path, 4)).unwrap());
         let history = BfTreeHistory::new(db);
         let (id, _) = history.commit_snapshot().unwrap();
 
@@ -320,9 +317,7 @@ mod tests {
     fn prune_old_entries() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("hist3.bftree");
-        let db = Arc::new(
-            BfTreeDatabase::create(BfTreeConfig::new_file(&db_path, 4)).unwrap(),
-        );
+        let db = Arc::new(BfTreeDatabase::create(BfTreeConfig::new_file(&db_path, 4)).unwrap());
         let history = BfTreeHistory::new(db);
 
         for _ in 0..5 {

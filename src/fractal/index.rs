@@ -67,10 +67,7 @@ pub struct FractalIndex<'txn, T: StorageWrite> {
 
 impl<'txn, T: StorageWrite> FractalIndex<'txn, T> {
     /// Open or create. Called by `WriteTransaction::open_fractal_index`.
-    pub(crate) fn open(
-        txn: &'txn T,
-        def: &FractalIndexDefinition,
-    ) -> crate::Result<Self> {
+    pub(crate) fn open(txn: &'txn T, def: &FractalIndexDefinition) -> crate::Result<Self> {
         let names = TableNames::new(def.name());
 
         // Open or create meta table
@@ -94,9 +91,11 @@ impl<'txn, T: StorageWrite> FractalIndex<'txn, T> {
         let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&names.clusters))?;
         let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&names.centroids))?;
         let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&names.centroid_sums))?;
-        let _ = txn.open_storage_table(TableDefinition::<HierarchyKey, ()>::new(&names.hierarchy))?;
+        let _ =
+            txn.open_storage_table(TableDefinition::<HierarchyKey, ()>::new(&names.hierarchy))?;
         let _ = txn.open_storage_table(TableDefinition::<PostingKey, &[u8]>::new(&names.buffer))?;
-        let _ = txn.open_storage_table(TableDefinition::<PostingKey, &[u8]>::new(&names.postings))?;
+        let _ =
+            txn.open_storage_table(TableDefinition::<PostingKey, &[u8]>::new(&names.postings))?;
         let _ = txn.open_storage_table(TableDefinition::<u64, u32>::new(&names.assignments))?;
         if config.store_raw_vectors {
             let _ = txn.open_storage_table(TableDefinition::<u64, &[u8]>::new(&names.vectors))?;
@@ -612,7 +611,8 @@ impl<'txn, T: StorageWrite> FractalIndex<'txn, T> {
         let in_buffer = {
             let buffer_def = TableDefinition::<PostingKey, &[u8]>::new(&self.names.buffer);
             let btbl = self.txn.open_storage_table(buffer_def)?;
-            btbl.st_get(&PostingKey::new(cluster_id, vector_id))?.is_some()
+            btbl.st_get(&PostingKey::new(cluster_id, vector_id))?
+                .is_some()
         };
 
         // Try to load vector from any source for centroid update

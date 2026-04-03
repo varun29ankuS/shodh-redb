@@ -210,10 +210,7 @@ fn scan_range_buffered(
 ///
 /// The entire read-increment-write is performed under a single mutex acquisition
 /// to prevent concurrent callers from observing the same sequence value.
-fn next_sequence(
-    buffer: &Mutex<WriteBuffer>,
-    adapter: &BfTreeAdapter,
-) -> Result<u64, BfTreeError> {
+fn next_sequence(buffer: &Mutex<WriteBuffer>, adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
     use super::buffered_txn::BufferLookup;
 
     let seq_key = encode_seq_key();
@@ -231,9 +228,7 @@ fn next_sequence(
     };
 
     let seq = match current {
-        Some(bytes) if bytes.len() >= 8 => {
-            u64::from_le_bytes(bytes[..8].try_into().unwrap())
-        }
+        Some(bytes) if bytes.len() >= 8 => u64::from_le_bytes(bytes[..8].try_into().unwrap()),
         _ => 1,
     };
     let next = seq.saturating_add(1);
@@ -400,8 +395,8 @@ impl<'txn> BfTreeBlobStore<'txn> {
 
         for chunk_idx in start_chunk..end_chunk {
             let chunk_key = encode_chunk_key(blob_id, chunk_idx);
-            let chunk_data = read_raw_buffered(self.buffer, self.adapter, &chunk_key)?
-                .ok_or_else(|| {
+            let chunk_data =
+                read_raw_buffered(self.buffer, self.adapter, &chunk_key)?.ok_or_else(|| {
                     BfTreeError::Corruption(alloc::format!(
                         "missing chunk {chunk_idx} for blob {blob_id:?}"
                     ))
@@ -441,7 +436,11 @@ impl<'txn> BfTreeBlobStore<'txn> {
 
         // Delete data chunks. Zero-length blobs have 0 chunks (no data records).
         let total_len = usize::try_from(meta.blob_ref.length).unwrap_or(usize::MAX);
-        let num_chunks = if total_len == 0 { 0 } else { total_len.div_ceil(MAX_CHUNK_SIZE) };
+        let num_chunks = if total_len == 0 {
+            0
+        } else {
+            total_len.div_ceil(MAX_CHUNK_SIZE)
+        };
 
         // For dedup-eligible blobs, compute SHA-256 from the blob data before deleting chunks.
         let dedup_sha256 = if total_len >= DEDUP_MIN_SIZE {
@@ -450,8 +449,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
             for chunk_idx in 0..num_chunks {
                 let chunk_key =
                     encode_chunk_key(blob_id, u32::try_from(chunk_idx).unwrap_or(u32::MAX));
-                if let Some(chunk_data) =
-                    read_raw_buffered(self.buffer, self.adapter, &chunk_key)?
+                if let Some(chunk_data) = read_raw_buffered(self.buffer, self.adapter, &chunk_key)?
                 {
                     hasher.update(&chunk_data);
                 }
@@ -465,7 +463,8 @@ impl<'txn> BfTreeBlobStore<'txn> {
         {
             let mut buf = self.buffer.lock().unwrap();
             for chunk_idx in 0..num_chunks {
-                let chunk_key = encode_chunk_key(blob_id, u32::try_from(chunk_idx).unwrap_or(u32::MAX));
+                let chunk_key =
+                    encode_chunk_key(blob_id, u32::try_from(chunk_idx).unwrap_or(u32::MAX));
                 buf.delete(chunk_key);
             }
 
@@ -509,11 +508,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
     }
 
     /// Decrement a dedup entry's ref-count, removing it entirely if it reaches zero.
-    fn apply_dedup_decrement(
-        buf: &mut WriteBuffer,
-        dedup_key: &[u8],
-        bytes: &[u8],
-    ) {
+    fn apply_dedup_decrement(buf: &mut WriteBuffer, dedup_key: &[u8], bytes: &[u8]) {
         if bytes.len() >= DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE {
             let mut arr = [0u8; DedupVal::SERIALIZED_SIZE];
             arr.copy_from_slice(&bytes[..DedupVal::SERIALIZED_SIZE]);
@@ -524,8 +519,8 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 buf.delete(dedup_key.to_vec());
             } else {
                 dedup.ref_count -= 1;
-                let blob_id_bytes =
-                    &bytes[DedupVal::SERIALIZED_SIZE..DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE];
+                let blob_id_bytes = &bytes[DedupVal::SERIALIZED_SIZE
+                    ..DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE];
                 let mut val =
                     Vec::with_capacity(DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE);
                 val.extend_from_slice(&dedup.to_le_bytes());
@@ -538,17 +533,13 @@ impl<'txn> BfTreeBlobStore<'txn> {
     /// List all blobs in temporal order (newest first).
     ///
     /// Buffer-aware: sees blobs stored in the current transaction before commit.
-    pub fn list_temporal(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<(BlobId, BlobMeta)>, BfTreeError> {
+    pub fn list_temporal(&self, limit: usize) -> Result<Vec<(BlobId, BlobMeta)>, BfTreeError> {
         let prefix = table_prefix(BLOB_META_TABLE);
         let prefix_end = table_prefix_end(BLOB_META_TABLE);
         let prefix_len = prefix.len();
 
-        let entries = scan_range_buffered(
-            self.buffer, self.adapter, &prefix, &prefix_end, prefix_len,
-        )?;
+        let entries =
+            scan_range_buffered(self.buffer, self.adapter, &prefix, &prefix_end, prefix_len)?;
 
         let mut results = Vec::new();
         for (key_bytes, val_bytes) in &entries {
@@ -585,15 +576,18 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let prefix_len = table_prefix(BLOB_TAG_TABLE).len();
 
         let entries = scan_range_buffered(
-            self.buffer, self.adapter, &start_encoded, &end_encoded, prefix_len,
+            self.buffer,
+            self.adapter,
+            &start_encoded,
+            &end_encoded,
+            prefix_len,
         )?;
 
         let mut results = Vec::new();
         for (key_bytes, _) in &entries {
             if key_bytes.len() >= TagKey::SERIALIZED_SIZE {
-                let tk = TagKey::from_le_bytes(
-                    key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap(),
-                );
+                let tk =
+                    TagKey::from_le_bytes(key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap());
                 results.push(tk.blob_id);
             }
         }
@@ -611,14 +605,20 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let prefix_len = table_prefix(BLOB_NS_TABLE).len();
 
         let entries = scan_range_buffered(
-            self.buffer, self.adapter, &start_encoded, &end_encoded, prefix_len,
+            self.buffer,
+            self.adapter,
+            &start_encoded,
+            &end_encoded,
+            prefix_len,
         )?;
 
         let mut results = Vec::new();
         for (key_bytes, _) in &entries {
             if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
                 let nk = NamespaceKey::from_le_bytes(
-                    key_bytes[..NamespaceKey::SERIALIZED_SIZE].try_into().unwrap(),
+                    key_bytes[..NamespaceKey::SERIALIZED_SIZE]
+                        .try_into()
+                        .unwrap(),
                 );
                 results.push(nk.blob_id);
             }
@@ -637,7 +637,11 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let prefix_len = table_prefix(BLOB_CAUSAL_TABLE).len();
 
         let entries = scan_range_buffered(
-            self.buffer, self.adapter, &start_encoded, &end_encoded, prefix_len,
+            self.buffer,
+            self.adapter,
+            &start_encoded,
+            &end_encoded,
+            prefix_len,
         )?;
 
         let mut results = Vec::new();
@@ -700,8 +704,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 if bytes.len() >= DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE {
                     let blob_id_bytes = &bytes[DedupVal::SERIALIZED_SIZE
                         ..DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE];
-                    let blob_id =
-                        BlobId::from_le_bytes(blob_id_bytes.try_into().unwrap());
+                    let blob_id = BlobId::from_le_bytes(blob_id_bytes.try_into().unwrap());
                     Ok(Some(blob_id))
                 } else {
                     Ok(None)
@@ -718,17 +721,15 @@ impl<'txn> BfTreeBlobStore<'txn> {
     fn increment_dedup_ref_count(&self, sha256: &Sha256Key) -> Result<(), BfTreeError> {
         let key = encode_dedup_key(sha256);
         match read_raw_buffered(self.buffer, self.adapter, &key)? {
-            Some(bytes)
-                if bytes.len() >= DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE =>
-            {
+            Some(bytes) if bytes.len() >= DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE => {
                 let mut arr = [0u8; DedupVal::SERIALIZED_SIZE];
                 arr.copy_from_slice(&bytes[..DedupVal::SERIALIZED_SIZE]);
                 let mut dedup = DedupVal::from_le_bytes(arr);
                 dedup.ref_count = dedup.ref_count.saturating_add(1);
 
-                let blob_id_bytes =
-                    bytes[DedupVal::SERIALIZED_SIZE..DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE]
-                        .to_vec();
+                let blob_id_bytes = bytes[DedupVal::SERIALIZED_SIZE
+                    ..DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE]
+                    .to_vec();
 
                 let mut val =
                     Vec::with_capacity(DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE);
@@ -819,7 +820,9 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 let key_bytes = &scan_buf[prefix_len..key_len];
                 if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
                     let nk = NamespaceKey::from_le_bytes(
-                        key_bytes[..NamespaceKey::SERIALIZED_SIZE].try_into().unwrap(),
+                        key_bytes[..NamespaceKey::SERIALIZED_SIZE]
+                            .try_into()
+                            .unwrap(),
                     );
                     if nk.blob_id == blob_id {
                         keys_to_delete.push(scan_buf[..key_len].to_vec());
@@ -837,7 +840,9 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 let key_bytes = &key[prefix_len..];
                 if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
                     let nk = NamespaceKey::from_le_bytes(
-                        key_bytes[..NamespaceKey::SERIALIZED_SIZE].try_into().unwrap(),
+                        key_bytes[..NamespaceKey::SERIALIZED_SIZE]
+                            .try_into()
+                            .unwrap(),
                     );
                     if nk.blob_id == blob_id && !keys_to_delete.contains(key) {
                         keys_to_delete.push(key.clone());
@@ -907,9 +912,7 @@ impl BfTreeBlobWriter<'_, '_> {
     /// Write data to the blob. Can be called multiple times for streaming writes.
     pub fn write(&mut self, data: &[u8]) -> Result<(), BfTreeError> {
         if self.finished {
-            return Err(BfTreeError::InvalidOperation(
-                "write after finish".into(),
-            ));
+            return Err(BfTreeError::InvalidOperation("write after finish".into()));
         }
 
         // Feed prefix buffer.
@@ -932,10 +935,8 @@ impl BfTreeBlobWriter<'_, '_> {
             offset += to_copy;
 
             if self.current_chunk.len() >= MAX_CHUNK_SIZE {
-                let full_chunk = core::mem::replace(
-                    &mut self.current_chunk,
-                    Vec::with_capacity(MAX_CHUNK_SIZE),
-                );
+                let full_chunk =
+                    core::mem::replace(&mut self.current_chunk, Vec::with_capacity(MAX_CHUNK_SIZE));
                 self.chunks.push(full_chunk);
             }
         }
@@ -1288,9 +1289,8 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
             }
             let key_bytes = &scan_buf[prefix_len..key_len];
             if key_bytes.len() >= TagKey::SERIALIZED_SIZE {
-                let tk = TagKey::from_le_bytes(
-                    key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap(),
-                );
+                let tk =
+                    TagKey::from_le_bytes(key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap());
                 results.push(tk.blob_id);
             }
         }
@@ -1384,7 +1384,9 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
             let key_bytes = &scan_buf[prefix_len..key_len];
             if key_bytes.len() >= TemporalKey::SERIALIZED_SIZE {
                 let tk = TemporalKey::from_le_bytes(
-                    key_bytes[..TemporalKey::SERIALIZED_SIZE].try_into().unwrap(),
+                    key_bytes[..TemporalKey::SERIALIZED_SIZE]
+                        .try_into()
+                        .unwrap(),
                 );
                 if let Ok(Some(meta)) = self.get_meta(tk.blob_id) {
                     results.push((tk, meta));
@@ -1416,7 +1418,9 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
             let key_bytes = &scan_buf[prefix_len..key_len];
             if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
                 let nk = NamespaceKey::from_le_bytes(
-                    key_bytes[..NamespaceKey::SERIALIZED_SIZE].try_into().unwrap(),
+                    key_bytes[..NamespaceKey::SERIALIZED_SIZE]
+                        .try_into()
+                        .unwrap(),
                 );
                 if let Ok(Some(meta)) = self.get_meta(nk.blob_id) {
                     results.push((nk.blob_id, meta));
@@ -1450,7 +1454,12 @@ mod tests {
 
         let data = b"Hello, blob world!";
         let blob_id = blob_store
-            .store(data, ContentType::OctetStream, "test-blob", StoreOptions::default())
+            .store(
+                data,
+                ContentType::OctetStream,
+                "test-blob",
+                StoreOptions::default(),
+            )
             .unwrap();
 
         let read_data = blob_store.read(blob_id).unwrap().unwrap();
@@ -1472,7 +1481,12 @@ mod tests {
 
         let data: Vec<u8> = (0..5000u32).map(|i| (i % 256) as u8).collect();
         let blob_id = blob_store
-            .store(&data, ContentType::Embedding, "large-blob", StoreOptions::default())
+            .store(
+                &data,
+                ContentType::Embedding,
+                "large-blob",
+                StoreOptions::default(),
+            )
             .unwrap();
 
         let read_data = blob_store.read(blob_id).unwrap().unwrap();
@@ -1512,7 +1526,12 @@ mod tests {
 
         let data = b"0123456789abcdef";
         let blob_id = blob_store
-            .store(data, ContentType::OctetStream, "range-test", StoreOptions::default())
+            .store(
+                data,
+                ContentType::OctetStream,
+                "range-test",
+                StoreOptions::default(),
+            )
             .unwrap();
 
         let range = blob_store.read_range(blob_id, 4, 8).unwrap();
@@ -1534,7 +1553,12 @@ mod tests {
         let blob_store = wtxn.open_blob_store();
 
         let blob_id = blob_store
-            .store(b"delete-me", ContentType::OctetStream, "temp", StoreOptions::default())
+            .store(
+                b"delete-me",
+                ContentType::OctetStream,
+                "temp",
+                StoreOptions::default(),
+            )
             .unwrap();
 
         assert!(blob_store.read(blob_id).unwrap().is_some());
@@ -1606,7 +1630,12 @@ mod tests {
         let blob_store = wtxn.open_blob_store();
 
         let parent_id = blob_store
-            .store(b"parent", ContentType::OctetStream, "parent", StoreOptions::default())
+            .store(
+                b"parent",
+                ContentType::OctetStream,
+                "parent",
+                StoreOptions::default(),
+            )
             .unwrap();
 
         let opts = StoreOptions {
@@ -1666,10 +1695,20 @@ mod tests {
         let blob_store = wtxn.open_blob_store();
 
         let id1 = blob_store
-            .store(b"first", ContentType::OctetStream, "b1", StoreOptions::default())
+            .store(
+                b"first",
+                ContentType::OctetStream,
+                "b1",
+                StoreOptions::default(),
+            )
             .unwrap();
         let id2 = blob_store
-            .store(b"second", ContentType::OctetStream, "b2", StoreOptions::default())
+            .store(
+                b"second",
+                ContentType::OctetStream,
+                "b2",
+                StoreOptions::default(),
+            )
             .unwrap();
 
         drop(blob_store);
@@ -1691,7 +1730,12 @@ mod tests {
         let blob_store = wtxn.open_blob_store();
 
         let root = blob_store
-            .store(b"root", ContentType::OctetStream, "root", StoreOptions::default())
+            .store(
+                b"root",
+                ContentType::OctetStream,
+                "root",
+                StoreOptions::default(),
+            )
             .unwrap();
 
         let child1 = blob_store
@@ -1736,7 +1780,12 @@ mod tests {
         let blob_store = wtxn.open_blob_store();
 
         let blob_id = blob_store
-            .store(b"", ContentType::OctetStream, "empty", StoreOptions::default())
+            .store(
+                b"",
+                ContentType::OctetStream,
+                "empty",
+                StoreOptions::default(),
+            )
             .unwrap();
 
         let data = blob_store.read(blob_id).unwrap().unwrap();

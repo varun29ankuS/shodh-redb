@@ -18,7 +18,7 @@ use crate::storage_traits::OwnedKv;
 use crate::types::{Key, Value};
 
 use super::adapter::BfTreeAdapter;
-use super::database::{table_prefix, table_prefix_end, BfTreeTableScan};
+use super::database::{BfTreeTableScan, table_prefix, table_prefix_end};
 use super::error::BfTreeError;
 
 // ---------------------------------------------------------------------------
@@ -90,8 +90,10 @@ impl WriteBuffer {
         end: &[u8],
     ) -> alloc::collections::btree_map::Range<'_, Vec<u8>, Option<Vec<u8>>> {
         use core::ops::Bound;
-        self.entries
-            .range::<Vec<u8>, _>((Bound::Included(start.to_vec()), Bound::Included(end.to_vec())))
+        self.entries.range::<Vec<u8>, _>((
+            Bound::Included(start.to_vec()),
+            Bound::Included(end.to_vec()),
+        ))
     }
 
     /// Number of buffered entries.
@@ -124,14 +126,16 @@ impl WriteBuffer {
         for (key, value) in &self.entries {
             if let Some(val) = value {
                 if val.len() > max_record_size {
-                    return Err(BfTreeError::InvalidKV(
-                        alloc::format!("value size {} exceeds max {}", val.len(), max_record_size),
-                    ));
+                    return Err(BfTreeError::InvalidKV(alloc::format!(
+                        "value size {} exceeds max {}",
+                        val.len(),
+                        max_record_size
+                    )));
                 }
                 if key.is_empty() {
-                    return Err(BfTreeError::InvalidKV(
-                        alloc::string::String::from("key must not be empty"),
-                    ));
+                    return Err(BfTreeError::InvalidKV(alloc::string::String::from(
+                        "key must not be empty",
+                    )));
                 }
             }
         }
@@ -470,10 +474,10 @@ pub(crate) fn collect_all_buffer_entries_for_table(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bf_tree_store::config::BfTreeConfig;
-    use crate::bf_tree_store::database::{encode_table_key, BfTreeDatabase};
-    use crate::storage_traits::WriteTable;
     use crate::TableDefinition;
+    use crate::bf_tree_store::config::BfTreeConfig;
+    use crate::bf_tree_store::database::{BfTreeDatabase, encode_table_key};
+    use crate::storage_traits::WriteTable;
 
     const ITEMS: TableDefinition<&str, u64> = TableDefinition::new("items");
 

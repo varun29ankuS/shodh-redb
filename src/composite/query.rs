@@ -293,7 +293,8 @@ impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
             };
 
             for neighbor in &results {
-                if let Some((id, meta)) = self.provider
+                if let Some((id, meta)) = self
+                    .provider
                     .blob_by_sequence(neighbor.key)
                     .map_err(Into::into)?
                 {
@@ -313,7 +314,8 @@ impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
 
         // 1b: Temporal candidates
         if tmp_active && let Some((start, end)) = self.time_range {
-            let temporal_results = self.provider
+            let temporal_results = self
+                .provider
                 .blobs_in_time_range(start, end)
                 .map_err(Into::into)?;
             for (tkey, meta) in &temporal_results {
@@ -358,7 +360,8 @@ impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
         // Fill in missing metadata and timestamps
         for entry in candidates.values_mut() {
             if entry.meta.is_none() {
-                if let Some(meta) = self.provider
+                if let Some(meta) = self
+                    .provider
                     .get_blob_meta(&entry.blob_id)
                     .map_err(Into::into)?
                 {

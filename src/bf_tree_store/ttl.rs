@@ -394,9 +394,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTtlTable<'txn, K,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TableDefinition;
     use crate::bf_tree_store::config::BfTreeConfig;
     use crate::bf_tree_store::database::BfTreeDatabase;
-    use crate::TableDefinition;
 
     const TTL_TABLE: TableDefinition<&str, u64> = TableDefinition::new("ttl_items");
 
@@ -429,7 +429,9 @@ mod tests {
         let wtxn = db.begin_write();
         let mut table = wtxn.open_ttl_table(TTL_TABLE);
 
-        table.insert_with_ttl(&"future", &77u64, Duration::from_secs(3600)).unwrap();
+        table
+            .insert_with_ttl(&"future", &77u64, Duration::from_secs(3600))
+            .unwrap();
         let val = table.get(&"future").unwrap().unwrap();
         assert_eq!(u64::from_le_bytes(val.as_slice().try_into().unwrap()), 77);
     }
@@ -443,7 +445,9 @@ mod tests {
         table.insert(&"no_exp", &1u64).unwrap();
         assert_eq!(table.expires_at_ms(&"no_exp").unwrap(), Some(0));
 
-        table.insert_with_expiry(&"with_exp", &2u64, 999_999).unwrap();
+        table
+            .insert_with_expiry(&"with_exp", &2u64, 999_999)
+            .unwrap();
         assert_eq!(table.expires_at_ms(&"with_exp").unwrap(), Some(999_999));
     }
 
@@ -483,7 +487,9 @@ mod tests {
         {
             let wtxn = db.begin_write();
             let mut table = wtxn.open_ttl_table(TTL_TABLE);
-            table.insert_with_ttl(&"durable", &55u64, Duration::from_secs(3600)).unwrap();
+            table
+                .insert_with_ttl(&"durable", &55u64, Duration::from_secs(3600))
+                .unwrap();
             drop(table);
             wtxn.commit().unwrap();
         }

@@ -81,7 +81,10 @@ impl BfTreeDatabase {
     }
 
     /// Create a new Bf-Tree database with the given configuration and CDC settings.
-    pub fn create_with_cdc(config: BfTreeConfig, cdc_config: CdcConfig) -> Result<Self, BfTreeError> {
+    pub fn create_with_cdc(
+        config: BfTreeConfig,
+        cdc_config: CdcConfig,
+    ) -> Result<Self, BfTreeError> {
         let adapter = BfTreeAdapter::open(config)?;
         Ok(Self {
             adapter: Arc::new(adapter),
@@ -244,7 +247,13 @@ impl BfTreeDatabaseWriteTxn {
         &self,
         definition: TableDefinition<K, V>,
     ) -> BfTreeTable<'_, K, V> {
-        BfTreeTable::new(definition.name(), &self.adapter, &self.ops_count, self.cdc_log.as_ref(), &self.buffer)
+        BfTreeTable::new(
+            definition.name(),
+            &self.adapter,
+            &self.ops_count,
+            self.cdc_log.as_ref(),
+            &self.buffer,
+        )
     }
 
     /// Open a TTL table for read-write access.
@@ -252,7 +261,12 @@ impl BfTreeDatabaseWriteTxn {
         &self,
         definition: TableDefinition<K, V>,
     ) -> BfTreeTtlTable<'_, K, V> {
-        BfTreeTtlTable::new(definition.name(), &self.adapter, &self.ops_count, &self.buffer)
+        BfTreeTtlTable::new(
+            definition.name(),
+            &self.adapter,
+            &self.ops_count,
+            &self.buffer,
+        )
     }
 
     /// Open a multimap table for read-write access.
@@ -280,7 +294,10 @@ impl BfTreeDatabaseWriteTxn {
         let key_bytes = K::as_bytes(key);
         let val_bytes = V::as_bytes(value);
         let encoded_key = encode_table_key(definition.name(), key_bytes.as_ref());
-        self.buffer.lock().unwrap().put(encoded_key, val_bytes.as_ref().to_vec());
+        self.buffer
+            .lock()
+            .unwrap()
+            .put(encoded_key, val_bytes.as_ref().to_vec());
         self.ops_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -409,7 +426,9 @@ impl BfTreeDatabaseWriteTxn {
     /// This runs after the commit is finalized. Failures are non-fatal —
     /// old entries accumulate but do not affect correctness.
     fn prune_cdc_retention(&self) {
-        if self.cdc_config.retention_max_txns == 0 || self.txn_id <= self.cdc_config.retention_max_txns {
+        if self.cdc_config.retention_max_txns == 0
+            || self.txn_id <= self.cdc_config.retention_max_txns
+        {
             return;
         }
 
@@ -550,7 +569,11 @@ impl BfTreeDatabaseReadTxn {
     }
 
     /// Read CDC changes within a transaction ID range (inclusive on both ends).
-    pub fn read_cdc_range(&self, start_txn: u64, end_txn: u64) -> Result<Vec<ChangeStream>, BfTreeError> {
+    pub fn read_cdc_range(
+        &self,
+        start_txn: u64,
+        end_txn: u64,
+    ) -> Result<Vec<ChangeStream>, BfTreeError> {
         if start_txn > end_txn {
             return Ok(Vec::new());
         }
@@ -608,7 +631,11 @@ impl BfTreeDatabaseReadTxn {
         Ok(max_txn_id)
     }
 
-    fn read_cdc_range_inner(&self, start_key: CdcKey, end_key: CdcKey) -> Result<Vec<ChangeStream>, BfTreeError> {
+    fn read_cdc_range_inner(
+        &self,
+        start_key: CdcKey,
+        end_key: CdcKey,
+    ) -> Result<Vec<ChangeStream>, BfTreeError> {
         let start_encoded = encode_table_key(CDC_LOG_TABLE_NAME, &start_key.to_le_bytes());
         let end_encoded = encode_table_key(CDC_LOG_TABLE_NAME, &end_key.to_le_bytes());
         let prefix_len = table_prefix(CDC_LOG_TABLE_NAME).len();
@@ -803,8 +830,7 @@ mod tests {
                         // Insert using raw bytes since we can't easily use &str generics across threads
                         let key_bytes = key_str.as_bytes();
                         let val_bytes = (t * 1000 + i).to_le_bytes();
-                        let encoded =
-                            encode_table_key(SCORES.name(), key_bytes);
+                        let encoded = encode_table_key(SCORES.name(), key_bytes);
                         wtxn.adapter.insert(&encoded, &val_bytes).unwrap();
                     }
                     wtxn.commit().unwrap();
@@ -860,8 +886,12 @@ mod tests {
     fn cdc_db() -> BfTreeDatabase {
         BfTreeDatabase::create_with_cdc(
             BfTreeConfig::new_memory(4),
-            CdcConfig { enabled: true, retention_max_txns: 0 },
-        ).unwrap()
+            CdcConfig {
+                enabled: true,
+                retention_max_txns: 0,
+            },
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1033,8 +1063,12 @@ mod tests {
     fn cdc_retention_pruning() {
         let db = BfTreeDatabase::create_with_cdc(
             BfTreeConfig::new_memory(4),
-            CdcConfig { enabled: true, retention_max_txns: 2 },
-        ).unwrap();
+            CdcConfig {
+                enabled: true,
+                retention_max_txns: 2,
+            },
+        )
+        .unwrap();
 
         // Write 4 transactions
         for i in 0u64..4 {
@@ -1060,7 +1094,10 @@ mod tests {
     #[test]
     fn cdc_builder_api() {
         let db = BfTreeBuilder::new()
-            .set_cdc(CdcConfig { enabled: true, retention_max_txns: 0 })
+            .set_cdc(CdcConfig {
+                enabled: true,
+                retention_max_txns: 0,
+            })
             .create(BfTreeConfig::new_memory(4))
             .unwrap();
 

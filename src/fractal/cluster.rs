@@ -315,8 +315,8 @@ pub(crate) fn split_cluster<T: StorageWrite>(
     // 8. Move postings to children
     {
         let mut ptbl = txn.open_storage_table(postings_def)?;
-        let mut atbl = txn
-            .open_storage_table(TableDefinition::<u64, u32>::new(&table_names.assignments))?;
+        let mut atbl =
+            txn.open_storage_table(TableDefinition::<u64, u32>::new(&table_names.assignments))?;
 
         // First collect old postings to avoid borrow conflicts
         let mut old_entries: Vec<(u64, Vec<u8>)> = Vec::new();

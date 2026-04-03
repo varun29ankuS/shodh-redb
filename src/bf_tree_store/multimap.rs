@@ -308,11 +308,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
     }
 
     /// Check if a specific (key, value) pair exists.
-    pub fn contains(
-        &self,
-        key: &K::SelfType<'_>,
-        value: &V::SelfType<'_>,
-    ) -> bool {
+    pub fn contains(&self, key: &K::SelfType<'_>, value: &V::SelfType<'_>) -> bool {
         let user_key = K::as_bytes(key);
         let val_key = V::as_bytes(value);
         let encoded = encode_multimap_key(&self.name, user_key.as_ref(), val_key.as_ref());
@@ -375,11 +371,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeReadOnlyMultimapTable<'txn,
     }
 
     /// Check if a specific (key, value) pair exists.
-    pub fn contains(
-        &self,
-        key: &K::SelfType<'_>,
-        value: &V::SelfType<'_>,
-    ) -> bool {
+    pub fn contains(&self, key: &K::SelfType<'_>, value: &V::SelfType<'_>) -> bool {
         let user_key = K::as_bytes(key);
         let val_key = V::as_bytes(value);
         let encoded = encode_multimap_key(&self.name, user_key.as_ref(), val_key.as_ref());

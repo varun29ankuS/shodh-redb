@@ -34,10 +34,7 @@ pub trait BlobQueryProvider {
     ) -> Result<Vec<(TemporalKey, BlobMeta)>, Self::Error>;
 
     /// Query blobs in a namespace, returning `(BlobId, BlobMeta)` pairs.
-    fn blobs_in_namespace(
-        &self,
-        namespace: &str,
-    ) -> Result<Vec<(BlobId, BlobMeta)>, Self::Error>;
+    fn blobs_in_namespace(&self, namespace: &str) -> Result<Vec<(BlobId, BlobMeta)>, Self::Error>;
 
     /// Query blobs that have the given tag.
     fn blobs_by_tag(&self, tag: &str) -> Result<Vec<BlobId>, Self::Error>;
@@ -69,10 +66,7 @@ impl BlobQueryProvider for crate::transactions::ReadTransaction {
         self.blobs_in_time_range(start_ns, end_ns)
     }
 
-    fn blobs_in_namespace(
-        &self,
-        namespace: &str,
-    ) -> Result<Vec<(BlobId, BlobMeta)>, Self::Error> {
+    fn blobs_in_namespace(&self, namespace: &str) -> Result<Vec<(BlobId, BlobMeta)>, Self::Error> {
         self.blobs_in_namespace(namespace)
     }
 
@@ -109,10 +103,7 @@ impl BlobQueryProvider for crate::bf_tree_store::BfTreeReadOnlyBlobStore<'_> {
         self.blobs_in_time_range(start_ns, end_ns)
     }
 
-    fn blobs_in_namespace(
-        &self,
-        namespace: &str,
-    ) -> Result<Vec<(BlobId, BlobMeta)>, Self::Error> {
+    fn blobs_in_namespace(&self, namespace: &str) -> Result<Vec<(BlobId, BlobMeta)>, Self::Error> {
         self.blobs_in_namespace(namespace)
     }
 

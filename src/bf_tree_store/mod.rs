@@ -45,17 +45,17 @@ mod unified;
 mod verification;
 
 pub use adapter::BfTreeAdapter;
+pub use blob::{BfTreeBlobStore, BfTreeBlobWriter, BfTreeReadOnlyBlobStore};
 pub use config::{BfTreeBackend, BfTreeConfig};
 pub use database::{
     BfTreeBuilder, BfTreeDatabase, BfTreeDatabaseReadTxn, BfTreeDatabaseWriteTxn, BfTreeTableScan,
 };
 pub use error::BfTreeError;
+pub use group_commit::{GroupCommit, WriteBatchFn, concurrent_group_commit};
+pub use history::{BfTreeHistory, HistoryEntry};
 pub use multimap::{BfTreeMultimapTable, BfTreeReadOnlyMultimapTable};
 pub use table::{BfTreeReadOnlyTable, BfTreeTable};
 pub use transaction::{BfTreeReadTxn, BfTreeWriteTxn};
-pub use blob::{BfTreeBlobStore, BfTreeBlobWriter, BfTreeReadOnlyBlobStore};
-pub use group_commit::{concurrent_group_commit, GroupCommit, WriteBatchFn};
-pub use history::{BfTreeHistory, HistoryEntry};
 pub use ttl::{BfTreeReadOnlyTtlTable, BfTreeTtlTable};
 pub use unified::{BackendChoice, UnifiedDatabase, UnifiedError};
-pub use verification::{VerifyMode, wrap_value, unwrap_value, should_verify};
+pub use verification::{VerifyMode, should_verify, unwrap_value, wrap_value};

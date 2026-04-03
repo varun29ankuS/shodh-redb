@@ -38,8 +38,8 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ops::RangeBounds;
 
-use crate::types::{Key, Value};
 use crate::TableDefinition;
+use crate::types::{Key, Value};
 
 // ---------------------------------------------------------------------------
 // OwnedKv — owned-bytes wrapper with .value() extraction

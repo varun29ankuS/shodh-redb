@@ -209,7 +209,9 @@ mod tests {
             let rtxn = db.begin_read();
             assert!(rtxn.get::<&str, u64>(&TABLE_A, &"keep").unwrap().is_some());
             assert!(
-                rtxn.get::<&str, u64>(&TABLE_A, &"remove").unwrap().is_none(),
+                rtxn.get::<&str, u64>(&TABLE_A, &"remove")
+                    .unwrap()
+                    .is_none(),
                 "deleted key should not survive snapshot/recovery"
             );
         }

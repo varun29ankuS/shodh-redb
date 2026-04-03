@@ -19,12 +19,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use shodh_redb::ReadableDatabase;
+use shodh_redb::TableDefinition;
 use shodh_redb::bf_tree_store::*;
 use shodh_redb::blob_store::{CausalLink, ContentType, RelationType, StoreOptions};
 use shodh_redb::cdc::CdcConfig;
-use shodh_redb::ReadableDatabase;
 use shodh_redb::storage_traits::{ReadTable, StorageRead, StorageWrite, WriteTable};
-use shodh_redb::TableDefinition;
 
 // ---------------------------------------------------------------------------
 // Table definitions
@@ -265,7 +265,12 @@ fn blob_store_and_read() {
         let wtxn = db.begin_write();
         let bs = wtxn.open_blob_store();
         blob_id = bs
-            .store(payload, ContentType::OctetStream, "greeting", StoreOptions::default())
+            .store(
+                payload,
+                ContentType::OctetStream,
+                "greeting",
+                StoreOptions::default(),
+            )
             .unwrap();
         drop(bs);
         wtxn.commit().unwrap();
@@ -294,7 +299,12 @@ fn blob_large_chunked() {
         let wtxn = db.begin_write();
         let bs = wtxn.open_blob_store();
         blob_id = bs
-            .store(&payload, ContentType::Embedding, "vectors", StoreOptions::default())
+            .store(
+                &payload,
+                ContentType::Embedding,
+                "vectors",
+                StoreOptions::default(),
+            )
             .unwrap();
         drop(bs);
         wtxn.commit().unwrap();
@@ -326,7 +336,12 @@ fn blob_tags_and_namespace() {
         ..Default::default()
     };
     let id1 = bs
-        .store(b"lidar-scan-001", ContentType::OctetStream, "scan1", opts_sensor)
+        .store(
+            b"lidar-scan-001",
+            ContentType::OctetStream,
+            "scan1",
+            opts_sensor,
+        )
         .unwrap();
 
     let opts_camera = StoreOptions {
@@ -335,7 +350,12 @@ fn blob_tags_and_namespace() {
         ..Default::default()
     };
     let id2 = bs
-        .store(b"image-frame-001", ContentType::OctetStream, "frame1", opts_camera)
+        .store(
+            b"image-frame-001",
+            ContentType::OctetStream,
+            "frame1",
+            opts_camera,
+        )
         .unwrap();
 
     let opts_other = StoreOptions {
@@ -358,7 +378,11 @@ fn blob_tags_and_namespace() {
     assert_eq!(lidar_blobs[0], id1);
 
     let sensor_blobs = bs.query_by_namespace("sensors").unwrap();
-    assert_eq!(sensor_blobs.len(), 2, "should see namespace entries before commit");
+    assert_eq!(
+        sensor_blobs.len(),
+        2,
+        "should see namespace entries before commit"
+    );
 
     drop(bs);
     wtxn.commit().unwrap();
@@ -380,7 +404,12 @@ fn blob_causal_graph() {
 
     // Parent blob
     let parent_id = bs
-        .store(b"parent", ContentType::OctetStream, "root", StoreOptions::default())
+        .store(
+            b"parent",
+            ContentType::OctetStream,
+            "root",
+            StoreOptions::default(),
+        )
         .unwrap();
 
     // Child blob with causal link
@@ -415,7 +444,11 @@ fn blob_causal_graph() {
     let rtxn = db.begin_read();
     let bs = rtxn.open_blob_store();
     let children = bs.causal_children(parent_id).unwrap();
-    assert_eq!(children.len(), 1, "causal edges should persist after commit");
+    assert_eq!(
+        children.len(),
+        1,
+        "causal edges should persist after commit"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -490,9 +523,7 @@ fn group_commit_concurrent() {
 fn history_snapshot_and_restore() {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("history_test.bftree");
-    let db = Arc::new(
-        BfTreeDatabase::create(BfTreeConfig::new_file(&db_path, 4)).unwrap(),
-    );
+    let db = Arc::new(BfTreeDatabase::create(BfTreeConfig::new_file(&db_path, 4)).unwrap());
 
     // Write V1 data
     let wtxn = db.begin_write();
@@ -770,7 +801,8 @@ fn iot_sensor_pipeline() {
         let wtxn = db.begin_write();
         let mut ttl = wtxn.open_ttl_table(READINGS);
 
-        ttl.insert_with_ttl(&99999u64, &12345u64, Duration::from_secs(3600)).unwrap();
+        ttl.insert_with_ttl(&99999u64, &12345u64, Duration::from_secs(3600))
+            .unwrap();
         drop(ttl);
         wtxn.commit().unwrap();
 
@@ -784,7 +816,11 @@ fn iot_sensor_pipeline() {
         let rtxn = db.begin_read();
         let t = rtxn.open_table(READINGS);
         let all = collect_scan(t.scan().unwrap());
-        assert!(all.len() >= 50, "should have at least 50 sensor readings, got {}", all.len());
+        assert!(
+            all.len() >= 50,
+            "should have at least 50 sensor readings, got {}",
+            all.len()
+        );
     }
 }
 

@@ -90,10 +90,7 @@ pub struct IvfPqIndex<'txn, T: StorageWrite> {
 
 impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     /// Open or create. Called by `WriteTransaction::open_ivfpq_index`.
-    pub(crate) fn open(
-        txn: &'txn T,
-        definition: &IvfPqIndexDefinition,
-    ) -> crate::Result<Self> {
+    pub(crate) fn open(txn: &'txn T, definition: &IvfPqIndexDefinition) -> crate::Result<Self> {
         let name = String::from(definition.name());
 
         let mn = meta_name(&name);
@@ -331,7 +328,10 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
             let mut table = self.txn.open_storage_table(def)?;
-            table.st_insert(&PostingKey::new(cluster_id, vector_id), &pq_codes.as_slice())?;
+            table.st_insert(
+                &PostingKey::new(cluster_id, vector_id),
+                &pq_codes.as_slice(),
+            )?;
         }
         {
             let tn = assignments_name(&self.name);
@@ -414,7 +414,10 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                 pt.st_remove(&PostingKey::new(old_cid, vector_id))?;
             }
 
-            pt.st_insert(&PostingKey::new(cluster_id, vector_id), &pq_codes.as_slice())?;
+            pt.st_insert(
+                &PostingKey::new(cluster_id, vector_id),
+                &pq_codes.as_slice(),
+            )?;
             at.st_insert(&vector_id, &cluster_id)?;
 
             if let Some(ref mut vt) = vt_opt {
@@ -781,9 +784,9 @@ impl ReadOnlyIvfPqIndex {
             for c in 0..num_clusters {
                 #[allow(clippy::cast_possible_truncation)]
                 let guard = table.st_get(&(c as u32))?.ok_or_else(|| {
-                    StorageError::Corrupted(alloc::format!(
-                        "IVF-PQ '{name}': missing centroid {c}",
-                    ))
+                    StorageError::Corrupted(
+                        alloc::format!("IVF-PQ '{name}': missing centroid {c}",),
+                    )
                 })?;
                 for chunk in guard.value().chunks_exact(4) {
                     if let Ok(bytes) = chunk.try_into() {
@@ -804,9 +807,9 @@ impl ReadOnlyIvfPqIndex {
             for m in 0..num_subvectors {
                 #[allow(clippy::cast_possible_truncation)]
                 let guard = table.st_get(&(m as u32))?.ok_or_else(|| {
-                    StorageError::Corrupted(alloc::format!(
-                        "IVF-PQ '{name}': missing codebook {m}",
-                    ))
+                    StorageError::Corrupted(
+                        alloc::format!("IVF-PQ '{name}': missing codebook {m}",),
+                    )
                 })?;
                 data.extend_from_slice(&Codebooks::deserialize_codebook(guard.value(), sub_dim));
             }

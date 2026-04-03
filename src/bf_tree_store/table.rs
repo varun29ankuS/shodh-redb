@@ -16,18 +16,17 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::TableHandle;
 use crate::cdc::types::{CdcEvent, ChangeOp};
 use crate::sealed::Sealed;
 use crate::storage_traits::OwnedKv;
 use crate::types::{Key, Value};
-use crate::TableHandle;
 
 use super::adapter::BfTreeAdapter;
 use super::buffered_txn::{
-    BufferLookup, BufferedScanIter, WriteBuffer,
-    collect_buffer_entries_for_table,
+    BufferLookup, BufferedScanIter, WriteBuffer, collect_buffer_entries_for_table,
 };
-use super::database::{encode_table_key, table_prefix, table_prefix_end, BfTreeTableScan};
+use super::database::{BfTreeTableScan, encode_table_key, table_prefix, table_prefix_end};
 use super::error::BfTreeError;
 
 /// A writable table handle backed by Bf-Tree.
@@ -129,7 +128,11 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         if self.cdc_log.is_some() {
             self.record_cdc(CdcEvent {
                 table_name: self.name.clone(),
-                op: if previous.is_some() { ChangeOp::Update } else { ChangeOp::Insert },
+                op: if previous.is_some() {
+                    ChangeOp::Update
+                } else {
+                    ChangeOp::Insert
+                },
                 key: key_bytes.as_ref().to_vec(),
                 new_value: Some(val_bytes.as_ref().to_vec()),
                 old_value: previous.clone(),
@@ -143,10 +146,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     ///
     /// Writes a tombstone to the buffer. On commit, the tombstone deletes the
     /// entry from `BfTree`. On abort, the tombstone is discarded.
-    pub fn remove(
-        &mut self,
-        key: &K::SelfType<'_>,
-    ) -> Result<Option<Vec<u8>>, BfTreeError> {
+    pub fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
 
@@ -193,10 +193,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     ///
     /// Checks the write buffer first (for read-your-writes), then falls through
     /// to `BfTree` if the key is not in the buffer.
-    pub fn get(
-        &self,
-        key: &K::SelfType<'_>,
-    ) -> Result<Option<Vec<u8>>, BfTreeError> {
+    pub fn get(&self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
 
@@ -305,10 +302,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
     }
 
     /// Read the value for a key.
-    pub fn get(
-        &self,
-        key: &K::SelfType<'_>,
-    ) -> Result<Option<Vec<u8>>, BfTreeError> {
+    pub fn get(&self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
@@ -404,7 +398,11 @@ impl<K: Key + 'static, V: Value + 'static> Iterator for BfTreeRangeIter<'_, K, V
                     }
                 }
             }
-            if self.exclude_end.as_ref().is_some_and(|excl| key_owned == *excl) {
+            if self
+                .exclude_end
+                .as_ref()
+                .is_some_and(|excl| key_owned == *excl)
+            {
                 return None; // Past the end boundary
             }
 
@@ -464,7 +462,12 @@ fn build_bf_range_scan<'a, K: Key + 'static, V: Value + 'static>(
         .map_err(crate::StorageError::from)?;
     let scan = BfTreeTableScan { iter, prefix_len };
     let max_record_size = adapter.inner().config().get_cb_max_record_size();
-    Ok(BfTreeRangeIter::new(scan, max_record_size, exclude_start, exclude_end))
+    Ok(BfTreeRangeIter::new(
+        scan,
+        max_record_size,
+        exclude_start,
+        exclude_end,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -521,7 +524,11 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     drop(buf);
 
     Ok(BufferedScanIter::new(
-        buf_entries, scan, max_record_size, exclude_start, exclude_end,
+        buf_entries,
+        scan,
+        max_record_size,
+        exclude_start,
+        exclude_end,
     ))
 }
 
@@ -573,8 +580,13 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
         end_inclusive: bool,
     ) -> crate::Result<Self::RangeIter<'a>> {
         build_buffered_range_scan::<K, V>(
-            &self.name, self.adapter, self.buffer,
-            start, end, start_inclusive, end_inclusive,
+            &self.name,
+            self.adapter,
+            self.buffer,
+            start,
+            end,
+            start_inclusive,
+            end_inclusive,
         )
     }
 
@@ -630,7 +642,13 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V
         start_inclusive: bool,
         end_inclusive: bool,
     ) -> crate::Result<Self::RangeIter<'a>> {
-        crate::storage_traits::WriteTable::st_range(self, start, end, start_inclusive, end_inclusive)
+        crate::storage_traits::WriteTable::st_range(
+            self,
+            start,
+            end,
+            start_inclusive,
+            end_inclusive,
+        )
     }
 }
 
@@ -661,7 +679,14 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V
         start_inclusive: bool,
         end_inclusive: bool,
     ) -> crate::Result<Self::RangeIter<'a>> {
-        build_bf_range_scan::<K, V>(&self.name, self.adapter, start, end, start_inclusive, end_inclusive)
+        build_bf_range_scan::<K, V>(
+            &self.name,
+            self.adapter,
+            start,
+            end,
+            start_inclusive,
+            end_inclusive,
+        )
     }
 }
 
@@ -704,9 +729,9 @@ impl crate::storage_traits::StorageRead for super::database::BfTreeDatabaseReadT
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TableDefinition;
     use crate::bf_tree_store::config::BfTreeConfig;
     use crate::bf_tree_store::database::BfTreeDatabase;
-    use crate::TableDefinition;
 
     const ITEMS: TableDefinition<&str, u64> = TableDefinition::new("items");
 
@@ -877,9 +902,14 @@ mod tests {
         // Inclusive start "b", exclusive end "d"
         let s = "b";
         let e = "d";
-        let iter =
-            WriteTable::st_range(&table, Some(&(&s as &str)), Some(&(&e as &str)), true, false)
-                .unwrap();
+        let iter = WriteTable::st_range(
+            &table,
+            Some(&(&s as &str)),
+            Some(&(&e as &str)),
+            true,
+            false,
+        )
+        .unwrap();
         let entries: Vec<_> = iter.collect::<Result<Vec<_>, _>>().unwrap();
         let keys: Vec<&str> = entries.iter().map(|(k, _)| k.value()).collect();
         assert_eq!(keys, vec!["b", "c"]);

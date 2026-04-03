@@ -80,10 +80,7 @@ impl UnifiedDatabase {
     /// For `BackendChoice::BfTree`, `path` is ignored if the `BfTreeConfig`
     /// already specifies a file path; otherwise it is used.
     #[cfg(feature = "std")]
-    pub fn create(
-        backend: BackendChoice,
-        path: impl AsRef<Path>,
-    ) -> Result<Self, UnifiedError> {
+    pub fn create(backend: BackendChoice, path: impl AsRef<Path>) -> Result<Self, UnifiedError> {
         match backend {
             BackendChoice::Legacy => {
                 let db = crate::Database::create(path)?;
@@ -101,10 +98,7 @@ impl UnifiedDatabase {
     /// For `BackendChoice::Legacy`, opens the file at `path`.
     /// For `BackendChoice::BfTree`, opens using the config's file path.
     #[cfg(feature = "std")]
-    pub fn open(
-        backend: BackendChoice,
-        path: impl AsRef<Path>,
-    ) -> Result<Self, UnifiedError> {
+    pub fn open(backend: BackendChoice, path: impl AsRef<Path>) -> Result<Self, UnifiedError> {
         match backend {
             BackendChoice::Legacy => {
                 let db = crate::Database::open(path)?;
@@ -199,8 +193,8 @@ impl From<BfTreeError> for UnifiedError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::ReadableDatabase;
     use crate::TableDefinition;
+    use crate::db::ReadableDatabase;
 
     const TABLE: TableDefinition<&str, u64> = TableDefinition::new("unified_test");
 

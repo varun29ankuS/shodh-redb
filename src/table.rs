@@ -937,7 +937,8 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
         start_inclusive: bool,
         end_inclusive: bool,
     ) -> crate::Result<Self::RangeIter<'a>> {
-        let inner = legacy_build_range::<K, V, Self>(self, start, end, start_inclusive, end_inclusive)?;
+        let inner =
+            legacy_build_range::<K, V, Self>(self, start, end, start_inclusive, end_inclusive)?;
         Ok(LegacyRangeIter { inner })
     }
 
@@ -974,7 +975,8 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V
         start_inclusive: bool,
         end_inclusive: bool,
     ) -> crate::Result<Self::RangeIter<'a>> {
-        let inner = legacy_build_range::<K, V, Self>(self, start, end, start_inclusive, end_inclusive)?;
+        let inner =
+            legacy_build_range::<K, V, Self>(self, start, end, start_inclusive, end_inclusive)?;
         Ok(LegacyRangeIter { inner })
     }
 }
@@ -1026,7 +1028,8 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V
         start_inclusive: bool,
         end_inclusive: bool,
     ) -> crate::Result<Self::RangeIter<'a>> {
-        let inner = legacy_build_range_ro::<K, V>(self, start, end, start_inclusive, end_inclusive)?;
+        let inner =
+            legacy_build_range_ro::<K, V>(self, start, end, start_inclusive, end_inclusive)?;
         Ok(LegacyReadOnlyRangeIter { inner })
     }
 }

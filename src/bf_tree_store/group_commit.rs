@@ -105,8 +105,9 @@ pub fn concurrent_group_commit(
 
     // All batches completed successfully — commit atomically.
     // unwrap Arc: all thread handles have been joined so we hold the only reference.
-    let wtxn = Arc::into_inner(wtxn)
-        .ok_or_else(|| BfTreeError::InvalidOperation("outstanding references to write transaction".into()))?;
+    let wtxn = Arc::into_inner(wtxn).ok_or_else(|| {
+        BfTreeError::InvalidOperation("outstanding references to write transaction".into())
+    })?;
     wtxn.commit()?;
 
     Ok(count)
@@ -119,8 +120,8 @@ pub fn concurrent_group_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bf_tree_store::config::BfTreeConfig;
     use crate::TableDefinition;
+    use crate::bf_tree_store::config::BfTreeConfig;
 
     const DATA: TableDefinition<&str, u64> = TableDefinition::new("data");
 

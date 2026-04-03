@@ -61,15 +61,15 @@ impl From<BfTreeError> for crate::StorageError {
                 crate::StorageError::Corrupted(alloc::format!("bf-tree: {e}"))
             }
             BfTreeError::InvalidKV(msg) => crate::StorageError::ValueTooLarge(msg.len()),
-            BfTreeError::InvalidKey => crate::StorageError::Corrupted(
-                alloc::string::String::from("bf-tree: invalid key"),
-            ),
-            BfTreeError::Config(e) => crate::StorageError::Corrupted(alloc::format!(
-                "bf-tree config error: {e:?}"
-            )),
-            BfTreeError::Scan(e) => crate::StorageError::Corrupted(alloc::format!(
-                "bf-tree scan error: {e:?}"
-            )),
+            BfTreeError::InvalidKey => {
+                crate::StorageError::Corrupted(alloc::string::String::from("bf-tree: invalid key"))
+            }
+            BfTreeError::Config(e) => {
+                crate::StorageError::Corrupted(alloc::format!("bf-tree config error: {e:?}"))
+            }
+            BfTreeError::Scan(e) => {
+                crate::StorageError::Corrupted(alloc::format!("bf-tree scan error: {e:?}"))
+            }
             BfTreeError::Corruption(msg) => crate::StorageError::Corrupted(msg),
             BfTreeError::InvalidOperation(msg) => {
                 crate::StorageError::Corrupted(alloc::format!("invalid operation: {msg}"))

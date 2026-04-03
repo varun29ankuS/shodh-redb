@@ -1487,8 +1487,7 @@ impl WriteTransaction {
         &self,
         definition: &crate::ivfpq::config::IvfPqIndexDefinition,
     ) -> Result<crate::ivfpq::index::IvfPqIndex<'_, Self>, TableError> {
-        crate::ivfpq::index::IvfPqIndex::open(self, definition)
-            .map_err(TableError::Storage)
+        crate::ivfpq::index::IvfPqIndex::open(self, definition).map_err(TableError::Storage)
     }
 
     /// Open or create a fractal vector index for writing.
@@ -1496,8 +1495,7 @@ impl WriteTransaction {
         &self,
         definition: &crate::fractal::config::FractalIndexDefinition,
     ) -> Result<crate::fractal::index::FractalIndex<'_, Self>, TableError> {
-        crate::fractal::index::FractalIndex::open(self, definition)
-            .map_err(TableError::Storage)
+        crate::fractal::index::FractalIndex::open(self, definition).map_err(TableError::Storage)
     }
 
     /// Open the given table
@@ -3277,8 +3275,7 @@ impl ReadTransaction {
         &self,
         definition: &crate::ivfpq::config::IvfPqIndexDefinition,
     ) -> Result<crate::ivfpq::index::ReadOnlyIvfPqIndex, TableError> {
-        crate::ivfpq::index::ReadOnlyIvfPqIndex::open(self, definition)
-            .map_err(TableError::Storage)
+        crate::ivfpq::index::ReadOnlyIvfPqIndex::open(self, definition).map_err(TableError::Storage)
     }
 
     /// Open a fractal vector index for reading.

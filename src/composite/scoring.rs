@@ -124,9 +124,7 @@ pub(crate) fn causal_bfs<P: BlobQueryProvider>(
         }
 
         // Forward: children of current
-        let children = provider
-            .causal_children(&current)
-            .map_err(Into::into)?;
+        let children = provider.causal_children(&current).map_err(Into::into)?;
         for edge in &children {
             if !distances.contains_key(&edge.child) {
                 let new_depth = depth + 1;
@@ -136,9 +134,7 @@ pub(crate) fn causal_bfs<P: BlobQueryProvider>(
         }
 
         // Backward: parent of current
-        if let Some(meta) = provider
-            .get_blob_meta(&current)
-            .map_err(Into::into)?
+        if let Some(meta) = provider.get_blob_meta(&current).map_err(Into::into)?
             && let Some(parent) = meta.causal_parent
             && !distances.contains_key(&parent)
         {

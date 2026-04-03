@@ -6,16 +6,10 @@ use crate::error::StorageError;
 use crate::ivfpq::kmeans;
 use crate::ivfpq::pq::Codebooks;
 use crate::ivfpq::types::PostingKey;
-use crate::table::ReadableTable;
-use crate::transactions::WriteTransaction;
+use crate::storage_traits::{StorageWrite, WriteTable};
 
 use super::config::{FractalIndexConfig, NO_PARENT};
 use super::types::{ClusterMeta, HierarchyKey};
-
-/// Convert a `TableError` to `StorageError`.
-fn te(e: crate::error::TableError) -> StorageError {
-    e.into_storage_error_or_corrupted("fractal index internal table error")
-}
 
 /// Extract an `f32` from a byte slice at the given offset.
 #[inline]
@@ -46,8 +40,8 @@ fn read_f64(bytes: &[u8], offset: usize) -> Result<f64, StorageError> {
 /// Updates the f64 sum accumulator and recomputes the f32 centroid.
 /// Returns the new population count.
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn centroid_add(
-    txn: &WriteTransaction,
+pub(crate) fn centroid_add<T: StorageWrite>(
+    txn: &T,
     centroid_sums_table: &str,
     centroids_table: &str,
     cluster_id: u32,
@@ -58,11 +52,11 @@ pub(crate) fn centroid_add(
     let new_pop = old_population.saturating_add(1);
 
     let sums_def = TableDefinition::<u32, &[u8]>::new(centroid_sums_table);
-    let mut sums_tbl = txn.open_table(sums_def).map_err(te)?;
+    let mut sums_tbl = txn.open_storage_table(sums_def)?;
 
     // Load or initialize f64 sums
     let mut sums = Vec::with_capacity(dim);
-    if let Some(existing) = sums_tbl.get(cluster_id)? {
+    if let Some(existing) = sums_tbl.st_get(&cluster_id)? {
         let bytes = existing.value();
         for i in 0..dim {
             sums.push(read_f64(bytes, i * 8)?);
@@ -81,7 +75,7 @@ pub(crate) fn centroid_add(
     for &s in &sums {
         sum_bytes.extend_from_slice(&s.to_le_bytes());
     }
-    sums_tbl.insert(cluster_id, sum_bytes.as_slice())?;
+    sums_tbl.st_insert(&cluster_id, &sum_bytes.as_slice())?;
     drop(sums_tbl);
 
     // Recompute centroid
@@ -92,8 +86,8 @@ pub(crate) fn centroid_add(
     }
 
     let centroids_def = TableDefinition::<u32, &[u8]>::new(centroids_table);
-    let mut cent_tbl = txn.open_table(centroids_def).map_err(te)?;
-    cent_tbl.insert(cluster_id, centroid_bytes.as_slice())?;
+    let mut cent_tbl = txn.open_storage_table(centroids_def)?;
+    cent_tbl.st_insert(&cluster_id, &centroid_bytes.as_slice())?;
 
     Ok(new_pop)
 }
@@ -102,8 +96,8 @@ pub(crate) fn centroid_add(
 ///
 /// Returns the new population count. If population reaches 0, centroid is zeroed.
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn centroid_remove(
-    txn: &WriteTransaction,
+pub(crate) fn centroid_remove<T: StorageWrite>(
+    txn: &T,
     centroid_sums_table: &str,
     centroids_table: &str,
     cluster_id: u32,
@@ -117,10 +111,10 @@ pub(crate) fn centroid_remove(
     let new_pop = old_population - 1;
 
     let sums_def = TableDefinition::<u32, &[u8]>::new(centroid_sums_table);
-    let mut sums_tbl = txn.open_table(sums_def).map_err(te)?;
+    let mut sums_tbl = txn.open_storage_table(sums_def)?;
 
     let mut sums = Vec::with_capacity(dim);
-    if let Some(existing) = sums_tbl.get(cluster_id)? {
+    if let Some(existing) = sums_tbl.st_get(&cluster_id)? {
         let bytes = existing.value();
         for i in 0..dim {
             sums.push(read_f64(bytes, i * 8)?);
@@ -137,22 +131,22 @@ pub(crate) fn centroid_remove(
     for &s in &sums {
         sum_bytes.extend_from_slice(&s.to_le_bytes());
     }
-    sums_tbl.insert(cluster_id, sum_bytes.as_slice())?;
+    sums_tbl.st_insert(&cluster_id, &sum_bytes.as_slice())?;
     drop(sums_tbl);
 
     let centroids_def = TableDefinition::<u32, &[u8]>::new(centroids_table);
-    let mut cent_tbl = txn.open_table(centroids_def).map_err(te)?;
+    let mut cent_tbl = txn.open_storage_table(centroids_def)?;
 
     if new_pop == 0 {
         let zeros = alloc::vec![0u8; dim * 4];
-        cent_tbl.insert(cluster_id, zeros.as_slice())?;
+        cent_tbl.st_insert(&cluster_id, &zeros.as_slice())?;
     } else {
         let pop_f64 = f64::from(new_pop);
         let mut centroid_bytes = Vec::with_capacity(dim * 4);
         for &s in &sums {
             centroid_bytes.extend_from_slice(&((s / pop_f64) as f32).to_le_bytes());
         }
-        cent_tbl.insert(cluster_id, centroid_bytes.as_slice())?;
+        cent_tbl.st_insert(&cluster_id, &centroid_bytes.as_slice())?;
     }
 
     Ok(new_pop)
@@ -168,8 +162,8 @@ pub(crate) fn centroid_remove(
 /// When `store_raw_vectors` is disabled, approximate vectors are reconstructed
 /// from PQ codes via the provided codebooks.
 /// Returns `(child_a_id, child_b_id)`.
-pub(crate) fn split_cluster(
-    txn: &WriteTransaction,
+pub(crate) fn split_cluster<T: StorageWrite>(
+    txn: &T,
     config: &mut FractalIndexConfig,
     cluster_id: u32,
     table_names: &TableNames,
@@ -185,9 +179,10 @@ pub(crate) fn split_cluster(
     let mut flat_vectors: Vec<f32> = Vec::new();
 
     {
-        let tbl = txn.open_table(postings_def).map_err(te)?;
-        let range =
-            tbl.range(PostingKey::cluster_start(cluster_id)..=PostingKey::cluster_end(cluster_id))?;
+        let tbl = txn.open_storage_table(postings_def)?;
+        let start = PostingKey::cluster_start(cluster_id);
+        let end = PostingKey::cluster_end(cluster_id);
+        let range = tbl.st_range(Some(&start), Some(&end), true, true)?;
         for entry in range {
             let (key, _pq_codes) = entry?;
             let vid = key.value().vector_id;
@@ -197,9 +192,9 @@ pub(crate) fn split_cluster(
 
     // Load raw vectors from table if available
     if config.store_raw_vectors {
-        let vtbl = txn.open_table(vectors_def).map_err(te)?;
+        let vtbl = txn.open_storage_table(vectors_def)?;
         for &vid in &vector_ids {
-            if let Some(raw) = vtbl.get(vid)? {
+            if let Some(raw) = vtbl.st_get(&vid)? {
                 let bytes = raw.value();
                 if bytes.len() < dim * 4 {
                     continue;
@@ -216,10 +211,10 @@ pub(crate) fn split_cluster(
         && !vector_ids.is_empty()
         && let Some(cb) = codebooks
     {
-        let ptbl = txn.open_table(postings_def).map_err(te)?;
+        let ptbl = txn.open_storage_table(postings_def)?;
         let sub_dim = cb.sub_dim;
         for &vid in &vector_ids {
-            if let Some(pq_guard) = ptbl.get(PostingKey::new(cluster_id, vid))? {
+            if let Some(pq_guard) = ptbl.st_get(&PostingKey::new(cluster_id, vid))? {
                 let pq_codes = pq_guard.value();
                 for (m, &code) in pq_codes.iter().enumerate().take(cb.num_subvectors) {
                     if let Some(base) = (m.checked_mul(256))
@@ -289,16 +284,16 @@ pub(crate) fn split_cluster(
     // 6. Persist child metadata
     let clusters_def = TableDefinition::<u32, &[u8]>::new(&table_names.clusters);
     {
-        let mut ctbl = txn.open_table(clusters_def).map_err(te)?;
-        ctbl.insert(child_a, meta_a.as_bytes().as_slice())?;
-        ctbl.insert(child_b, meta_b.as_bytes().as_slice())?;
+        let mut ctbl = txn.open_storage_table(clusters_def)?;
+        ctbl.st_insert(&child_a, &meta_a.as_bytes().as_slice())?;
+        ctbl.st_insert(&child_b, &meta_b.as_bytes().as_slice())?;
     }
 
     // 7. Persist child centroids and sums
     let centroids_def = TableDefinition::<u32, &[u8]>::new(&table_names.centroids);
     let sums_def = TableDefinition::<u32, &[u8]>::new(&table_names.centroid_sums);
     {
-        let mut cent_tbl = txn.open_table(centroids_def).map_err(te)?;
+        let mut cent_tbl = txn.open_storage_table(centroids_def)?;
         let centroid_a: Vec<u8> = centroids_flat[..dim]
             .iter()
             .flat_map(|f| f.to_le_bytes())
@@ -307,29 +302,28 @@ pub(crate) fn split_cluster(
             .iter()
             .flat_map(|f| f.to_le_bytes())
             .collect();
-        cent_tbl.insert(child_a, centroid_a.as_slice())?;
-        cent_tbl.insert(child_b, centroid_b.as_slice())?;
+        cent_tbl.st_insert(&child_a, &centroid_a.as_slice())?;
+        cent_tbl.st_insert(&child_b, &centroid_b.as_slice())?;
 
-        let mut sum_tbl = txn.open_table(sums_def).map_err(te)?;
+        let mut sum_tbl = txn.open_storage_table(sums_def)?;
         let sums_a_bytes: Vec<u8> = sums_a.iter().flat_map(|f| f.to_le_bytes()).collect();
         let sums_b_bytes: Vec<u8> = sums_b.iter().flat_map(|f| f.to_le_bytes()).collect();
-        sum_tbl.insert(child_a, sums_a_bytes.as_slice())?;
-        sum_tbl.insert(child_b, sums_b_bytes.as_slice())?;
+        sum_tbl.st_insert(&child_a, &sums_a_bytes.as_slice())?;
+        sum_tbl.st_insert(&child_b, &sums_b_bytes.as_slice())?;
     }
 
     // 8. Move postings to children
     {
-        let mut ptbl = txn.open_table(postings_def).map_err(te)?;
-        let mut atbl = txn
-            .open_table(TableDefinition::<u64, u32>::new(&table_names.assignments))
-            .map_err(te)?;
+        let mut ptbl = txn.open_storage_table(postings_def)?;
+        let mut atbl =
+            txn.open_storage_table(TableDefinition::<u64, u32>::new(&table_names.assignments))?;
 
         // First collect old postings to avoid borrow conflicts
         let mut old_entries: Vec<(u64, Vec<u8>)> = Vec::new();
         {
-            let range = ptbl.range(
-                PostingKey::cluster_start(cluster_id)..=PostingKey::cluster_end(cluster_id),
-            )?;
+            let start = PostingKey::cluster_start(cluster_id);
+            let end = PostingKey::cluster_end(cluster_id);
+            let range = ptbl.st_range(Some(&start), Some(&end), true, true)?;
             for entry in range {
                 let (key, val) = entry?;
                 let vid = key.value().vector_id;
@@ -339,37 +333,37 @@ pub(crate) fn split_cluster(
 
         // Remove old entries and insert into children
         for (idx, (vid, pq_codes)) in old_entries.iter().enumerate() {
-            ptbl.remove(PostingKey::new(cluster_id, *vid))?;
+            ptbl.st_remove(&PostingKey::new(cluster_id, *vid))?;
             let target = if assignments[idx] == 0 {
                 child_a
             } else {
                 child_b
             };
-            ptbl.insert(PostingKey::new(target, *vid), pq_codes.as_slice())?;
-            atbl.insert(*vid, target)?;
+            ptbl.st_insert(&PostingKey::new(target, *vid), &pq_codes.as_slice())?;
+            atbl.st_insert(vid, &target)?;
         }
     }
 
     // 9. Insert hierarchy edges
     let hier_def = TableDefinition::<HierarchyKey, ()>::new(&table_names.hierarchy);
     {
-        let mut htbl = txn.open_table(hier_def).map_err(te)?;
-        htbl.insert(HierarchyKey::new(cluster_id, child_a), ())?;
-        htbl.insert(HierarchyKey::new(cluster_id, child_b), ())?;
+        let mut htbl = txn.open_storage_table(hier_def)?;
+        htbl.st_insert(&HierarchyKey::new(cluster_id, child_a), &())?;
+        htbl.st_insert(&HierarchyKey::new(cluster_id, child_b), &())?;
     }
 
     // 10. Convert original cluster to internal
     {
-        let mut ctbl = txn.open_table(clusters_def).map_err(te)?;
+        let mut ctbl = txn.open_storage_table(clusters_def)?;
         let meta_opt = ctbl
-            .get(cluster_id)?
+            .st_get(&cluster_id)?
             .map(|g| ClusterMeta::from_bytes(g.value()));
         if let Some(mut meta) = meta_opt {
             meta.set_level(1);
             meta.set_num_children(2);
             meta.set_population(0); // Vectors moved to children
             meta.set_buffer_count(0);
-            ctbl.insert(cluster_id, meta.as_bytes().as_slice())?;
+            ctbl.st_insert(&cluster_id, &meta.as_bytes().as_slice())?;
         }
     }
 
@@ -386,8 +380,8 @@ pub(crate) fn split_cluster(
 ///
 /// Returns the surviving sibling's cluster ID.
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn merge_cluster(
-    txn: &WriteTransaction,
+pub(crate) fn merge_cluster<T: StorageWrite>(
+    txn: &T,
     config: &mut FractalIndexConfig,
     cluster_id: u32,
     table_names: &TableNames,
@@ -397,8 +391,8 @@ pub(crate) fn merge_cluster(
 
     // Load the cluster to merge
     let meta = {
-        let ctbl = txn.open_table(clusters_def).map_err(te)?;
-        match ctbl.get(cluster_id)? {
+        let ctbl = txn.open_storage_table(clusters_def)?;
+        match ctbl.st_get(&cluster_id)? {
             Some(g) => ClusterMeta::from_bytes(g.value()),
             None => return Ok(None),
         }
@@ -416,10 +410,10 @@ pub(crate) fn merge_cluster(
 
     let mut siblings: Vec<u32> = Vec::new();
     {
-        let htbl = txn.open_table(hier_def).map_err(te)?;
-        let range = htbl.range(
-            HierarchyKey::children_start(parent_id)..=HierarchyKey::children_end(parent_id),
-        )?;
+        let htbl = txn.open_storage_table(hier_def)?;
+        let hstart = HierarchyKey::children_start(parent_id);
+        let hend = HierarchyKey::children_end(parent_id);
+        let range = htbl.st_range(Some(&hstart), Some(&hend), true, true)?;
         for entry in range {
             let (key, _) = entry?;
             let cid = key.value().child_id;
@@ -435,8 +429,8 @@ pub(crate) fn merge_cluster(
 
     // Find nearest sibling by centroid distance
     let my_centroid: Vec<f32> = {
-        let ctbl = txn.open_table(centroids_def).map_err(te)?;
-        match ctbl.get(cluster_id)? {
+        let ctbl = txn.open_storage_table(centroids_def)?;
+        match ctbl.st_get(&cluster_id)? {
             Some(g) => {
                 let bytes = g.value();
                 if bytes.len() < dim * 4 {
@@ -453,9 +447,9 @@ pub(crate) fn merge_cluster(
     let mut best_sibling = siblings[0];
     let mut best_dist = f32::MAX;
     {
-        let ctbl = txn.open_table(centroids_def).map_err(te)?;
+        let ctbl = txn.open_storage_table(centroids_def)?;
         for &sib in &siblings {
-            if let Some(g) = ctbl.get(sib)? {
+            if let Some(g) = ctbl.st_get(&sib)? {
                 let bytes = g.value();
                 if bytes.len() < dim * 4 {
                     continue;
@@ -474,8 +468,8 @@ pub(crate) fn merge_cluster(
 
     // Check if combined population fits
     let sibling_meta = {
-        let ctbl = txn.open_table(clusters_def).map_err(te)?;
-        match ctbl.get(best_sibling)? {
+        let ctbl = txn.open_storage_table(clusters_def)?;
+        match ctbl.st_get(&best_sibling)? {
             Some(g) => ClusterMeta::from_bytes(g.value()),
             None => return Ok(None),
         }
@@ -490,14 +484,14 @@ pub(crate) fn merge_cluster(
     let postings_def = TableDefinition::<PostingKey, &[u8]>::new(&table_names.postings);
     let assignments_def = TableDefinition::<u64, u32>::new(&table_names.assignments);
     {
-        let mut ptbl = txn.open_table(postings_def).map_err(te)?;
-        let mut atbl = txn.open_table(assignments_def).map_err(te)?;
+        let mut ptbl = txn.open_storage_table(postings_def)?;
+        let mut atbl = txn.open_storage_table(assignments_def)?;
 
         let mut entries: Vec<(u64, Vec<u8>)> = Vec::new();
         {
-            let range = ptbl.range(
-                PostingKey::cluster_start(cluster_id)..=PostingKey::cluster_end(cluster_id),
-            )?;
+            let start = PostingKey::cluster_start(cluster_id);
+            let end = PostingKey::cluster_end(cluster_id);
+            let range = ptbl.st_range(Some(&start), Some(&end), true, true)?;
             for entry in range {
                 let (key, val) = entry?;
                 entries.push((key.value().vector_id, val.value().to_vec()));
@@ -505,9 +499,9 @@ pub(crate) fn merge_cluster(
         }
 
         for (vid, pq_codes) in &entries {
-            ptbl.remove(PostingKey::new(cluster_id, *vid))?;
-            ptbl.insert(PostingKey::new(best_sibling, *vid), pq_codes.as_slice())?;
-            atbl.insert(*vid, best_sibling)?;
+            ptbl.st_remove(&PostingKey::new(cluster_id, *vid))?;
+            ptbl.st_insert(&PostingKey::new(best_sibling, *vid), &pq_codes.as_slice())?;
+            atbl.st_insert(vid, &best_sibling)?;
         }
     }
 
@@ -516,29 +510,29 @@ pub(crate) fn merge_cluster(
     // buffer would be silently lost.
     let buffer_def = TableDefinition::<PostingKey, &[u8]>::new(&table_names.buffer);
     {
-        let mut btbl = txn.open_table(buffer_def).map_err(te)?;
+        let mut btbl = txn.open_storage_table(buffer_def)?;
         let mut buf_entries: Vec<(u64, Vec<u8>)> = Vec::new();
         {
-            let range = btbl.range(
-                PostingKey::cluster_start(cluster_id)..=PostingKey::cluster_end(cluster_id),
-            )?;
+            let start = PostingKey::cluster_start(cluster_id);
+            let end = PostingKey::cluster_end(cluster_id);
+            let range = btbl.st_range(Some(&start), Some(&end), true, true)?;
             for entry in range {
                 let (key, val) = entry?;
                 buf_entries.push((key.value().vector_id, val.value().to_vec()));
             }
         }
         for (vid, raw_vec) in &buf_entries {
-            btbl.remove(PostingKey::new(cluster_id, *vid))?;
-            btbl.insert(PostingKey::new(best_sibling, *vid), raw_vec.as_slice())?;
+            btbl.st_remove(&PostingKey::new(cluster_id, *vid))?;
+            btbl.st_insert(&PostingKey::new(best_sibling, *vid), &raw_vec.as_slice())?;
         }
     }
 
     // Update sibling metadata (weighted centroid merge via sums)
     let sums_def = TableDefinition::<u32, &[u8]>::new(&table_names.centroid_sums);
     {
-        let mut sum_tbl = txn.open_table(sums_def).map_err(te)?;
+        let mut sum_tbl = txn.open_storage_table(sums_def)?;
 
-        let my_sums: Vec<f64> = match sum_tbl.get(cluster_id)? {
+        let my_sums: Vec<f64> = match sum_tbl.st_get(&cluster_id)? {
             Some(g) => {
                 let bytes = g.value();
                 (0..dim)
@@ -548,7 +542,7 @@ pub(crate) fn merge_cluster(
             None => alloc::vec![0.0; dim],
         };
 
-        let sib_sums: Vec<f64> = match sum_tbl.get(best_sibling)? {
+        let sib_sums: Vec<f64> = match sum_tbl.st_get(&best_sibling)? {
             Some(g) => {
                 let bytes = g.value();
                 (0..dim)
@@ -564,16 +558,16 @@ pub(crate) fn merge_cluster(
             .map(|(a, b)| a + b)
             .collect();
         let merged_bytes: Vec<u8> = merged_sums.iter().flat_map(|f| f.to_le_bytes()).collect();
-        sum_tbl.insert(best_sibling, merged_bytes.as_slice())?;
+        sum_tbl.st_insert(&best_sibling, &merged_bytes.as_slice())?;
 
         // Remove merged cluster's sums
-        sum_tbl.remove(cluster_id)?;
+        sum_tbl.st_remove(&cluster_id)?;
     }
 
     // Recompute sibling centroid from merged sums
     {
-        let sum_tbl = txn.open_table(sums_def).map_err(te)?;
-        let merged_sums: Vec<f64> = match sum_tbl.get(best_sibling)? {
+        let sum_tbl = txn.open_storage_table(sums_def)?;
+        let merged_sums: Vec<f64> = match sum_tbl.st_get(&best_sibling)? {
             Some(g) => {
                 let bytes = g.value();
                 (0..dim)
@@ -595,46 +589,46 @@ pub(crate) fn merge_cluster(
             alloc::vec![0u8; dim * 4]
         };
 
-        let mut cent_tbl = txn.open_table(centroids_def).map_err(te)?;
-        cent_tbl.insert(best_sibling, centroid_bytes.as_slice())?;
+        let mut cent_tbl = txn.open_storage_table(centroids_def)?;
+        cent_tbl.st_insert(&best_sibling, &centroid_bytes.as_slice())?;
     }
 
     // Update sibling population
     {
-        let mut ctbl = txn.open_table(clusters_def).map_err(te)?;
+        let mut ctbl = txn.open_storage_table(clusters_def)?;
         let sib_opt = ctbl
-            .get(best_sibling)?
+            .st_get(&best_sibling)?
             .map(|g| ClusterMeta::from_bytes(g.value()));
         if let Some(mut sib) = sib_opt {
             sib.set_population(combined_pop);
-            ctbl.insert(best_sibling, sib.as_bytes().as_slice())?;
+            ctbl.st_insert(&best_sibling, &sib.as_bytes().as_slice())?;
         }
     }
 
     // Remove merged cluster from hierarchy and metadata
     {
-        let mut htbl = txn.open_table(hier_def).map_err(te)?;
-        htbl.remove(HierarchyKey::new(parent_id, cluster_id))?;
+        let mut htbl = txn.open_storage_table(hier_def)?;
+        htbl.st_remove(&HierarchyKey::new(parent_id, cluster_id))?;
     }
     {
-        let mut ctbl = txn.open_table(clusters_def).map_err(te)?;
-        ctbl.remove(cluster_id)?;
+        let mut ctbl = txn.open_storage_table(clusters_def)?;
+        ctbl.st_remove(&cluster_id)?;
     }
     {
-        let mut cent_tbl = txn.open_table(centroids_def).map_err(te)?;
-        cent_tbl.remove(cluster_id)?;
+        let mut cent_tbl = txn.open_storage_table(centroids_def)?;
+        cent_tbl.st_remove(&cluster_id)?;
     }
 
     // Update parent's children count
     {
-        let mut ctbl = txn.open_table(clusters_def).map_err(te)?;
+        let mut ctbl = txn.open_storage_table(clusters_def)?;
         let parent_opt = ctbl
-            .get(parent_id)?
+            .st_get(&parent_id)?
             .map(|g| ClusterMeta::from_bytes(g.value()));
         if let Some(mut parent_meta) = parent_opt {
             let new_count = parent_meta.num_children().saturating_sub(1);
             parent_meta.set_num_children(new_count);
-            ctbl.insert(parent_id, parent_meta.as_bytes().as_slice())?;
+            ctbl.st_insert(&parent_id, &parent_meta.as_bytes().as_slice())?;
         }
     }
 
@@ -648,8 +642,8 @@ pub(crate) fn merge_cluster(
 
 /// Flush a leaf cluster's buffer: PQ-encode all buffered vectors and move
 /// them to the posting list.
-pub(crate) fn cascade_leaf_buffer(
-    txn: &WriteTransaction,
+pub(crate) fn cascade_leaf_buffer<T: StorageWrite>(
+    txn: &T,
     cluster_id: u32,
     codebooks: &Codebooks,
     config: &FractalIndexConfig,
@@ -663,9 +657,10 @@ pub(crate) fn cascade_leaf_buffer(
     // Collect buffered entries
     let mut entries: Vec<(u64, Vec<f32>)> = Vec::new();
     {
-        let btbl = txn.open_table(buffer_def).map_err(te)?;
-        let range = btbl
-            .range(PostingKey::cluster_start(cluster_id)..=PostingKey::cluster_end(cluster_id))?;
+        let btbl = txn.open_storage_table(buffer_def)?;
+        let start = PostingKey::cluster_start(cluster_id);
+        let end = PostingKey::cluster_end(cluster_id);
+        let range = btbl.st_range(Some(&start), Some(&end), true, true)?;
         for entry in range {
             let (key, val) = entry?;
             let vid = key.value().vector_id;
@@ -686,42 +681,42 @@ pub(crate) fn cascade_leaf_buffer(
 
     // PQ-encode and insert into posting list
     {
-        let mut ptbl = txn.open_table(postings_def).map_err(te)?;
+        let mut ptbl = txn.open_storage_table(postings_def)?;
         let mut vtbl_opt = if config.store_raw_vectors {
-            Some(txn.open_table(vectors_def).map_err(te)?)
+            Some(txn.open_storage_table(vectors_def)?)
         } else {
             None
         };
 
         for (vid, vec) in &entries {
             let pq_codes = codebooks.encode(vec);
-            ptbl.insert(PostingKey::new(cluster_id, *vid), pq_codes.as_slice())?;
+            ptbl.st_insert(&PostingKey::new(cluster_id, *vid), &pq_codes.as_slice())?;
 
             if let Some(ref mut vtbl) = vtbl_opt {
                 let raw_bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
-                vtbl.insert(*vid, raw_bytes.as_slice())?;
+                vtbl.st_insert(vid, &raw_bytes.as_slice())?;
             }
         }
     }
 
     // Remove from buffer
     {
-        let mut btbl = txn.open_table(buffer_def).map_err(te)?;
+        let mut btbl = txn.open_storage_table(buffer_def)?;
         for (vid, _) in &entries {
-            btbl.remove(PostingKey::new(cluster_id, *vid))?;
+            btbl.st_remove(&PostingKey::new(cluster_id, *vid))?;
         }
     }
 
     // Update cluster meta buffer_count
     let clusters_def = TableDefinition::<u32, &[u8]>::new(&table_names.clusters);
     {
-        let mut ctbl = txn.open_table(clusters_def).map_err(te)?;
+        let mut ctbl = txn.open_storage_table(clusters_def)?;
         let meta_opt = ctbl
-            .get(cluster_id)?
+            .st_get(&cluster_id)?
             .map(|g| ClusterMeta::from_bytes(g.value()));
         if let Some(mut meta) = meta_opt {
             meta.set_buffer_count(0);
-            ctbl.insert(cluster_id, meta.as_bytes().as_slice())?;
+            ctbl.st_insert(&cluster_id, &meta.as_bytes().as_slice())?;
         }
     }
 

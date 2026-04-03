@@ -2,9 +2,8 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use crate::TableDefinition;
-use crate::error::{StorageError, TableError};
-use crate::table::ReadableTable;
-use crate::transactions::{ReadTransaction, WriteTransaction};
+use crate::error::StorageError;
+use crate::storage_traits::{ReadTable, StorageRead, StorageWrite, WriteTable};
 use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
 
 use crate::ivfpq::pq::{self, Codebooks};
@@ -20,11 +19,6 @@ use super::config::{
 };
 use super::search;
 use super::types::{ClusterMeta, HierarchyKey};
-
-/// Convert a `TableError` to `StorageError`.
-fn te(e: TableError) -> StorageError {
-    e.into_storage_error_or_corrupted("fractal index internal table error")
-}
 
 /// Safely read a little-endian `f32` from `data` at `offset`.
 /// Returns `0.0` if the slice is out of bounds or not exactly 4 bytes.
@@ -60,54 +54,53 @@ fn validate_config(config: &FractalIndexConfig) -> crate::Result<()> {
 // FractalIndex -- writable index handle
 // ---------------------------------------------------------------------------
 
-/// A writable fractal vector index bound to a [`WriteTransaction`].
+/// A writable fractal vector index bound to a storage write transaction.
 ///
-/// Obtained via [`WriteTransaction::open_fractal_index`].
-pub struct FractalIndex<'txn> {
-    pub(crate) txn: &'txn WriteTransaction,
+/// Obtained via [`crate::WriteTransaction::open_fractal_index`].
+pub struct FractalIndex<'txn, T: StorageWrite> {
+    pub(crate) txn: &'txn T,
     pub(crate) config: FractalIndexConfig,
     pub(crate) names: TableNames,
     pub(crate) codebooks: Option<Codebooks>,
     config_dirty: bool,
 }
 
-impl<'txn> FractalIndex<'txn> {
+impl<'txn, T: StorageWrite> FractalIndex<'txn, T> {
     /// Open or create. Called by `WriteTransaction::open_fractal_index`.
-    pub(crate) fn open(
-        txn: &'txn WriteTransaction,
-        def: &FractalIndexDefinition,
-    ) -> Result<Self, TableError> {
+    pub(crate) fn open(txn: &'txn T, def: &FractalIndexDefinition) -> crate::Result<Self> {
         let names = TableNames::new(def.name());
 
         // Open or create meta table
         let meta_def = TableDefinition::<&str, &[u8]>::new(&names.meta);
-        let mut meta_tbl = txn.open_table(meta_def)?;
+        let mut meta_tbl = txn.open_storage_table(meta_def)?;
 
-        let config = if let Some(guard) = meta_tbl.get("config")? {
+        let config = if let Some(guard) = meta_tbl.st_get(&"config")? {
             let data = guard.value();
             decode_fractal_config(data)
         } else {
             let cfg = def.to_config();
             let encoded = encode_fractal_config(&cfg);
-            meta_tbl.insert("config", encoded.as_slice())?;
+            meta_tbl.st_insert(&"config", &encoded.as_slice())?;
             cfg
         };
         drop(meta_tbl);
 
-        validate_config(&config).map_err(TableError::Storage)?;
+        validate_config(&config)?;
 
         // Ensure all tables exist by opening them
-        let _ = txn.open_table(TableDefinition::<u32, &[u8]>::new(&names.clusters))?;
-        let _ = txn.open_table(TableDefinition::<u32, &[u8]>::new(&names.centroids))?;
-        let _ = txn.open_table(TableDefinition::<u32, &[u8]>::new(&names.centroid_sums))?;
-        let _ = txn.open_table(TableDefinition::<HierarchyKey, ()>::new(&names.hierarchy))?;
-        let _ = txn.open_table(TableDefinition::<PostingKey, &[u8]>::new(&names.buffer))?;
-        let _ = txn.open_table(TableDefinition::<PostingKey, &[u8]>::new(&names.postings))?;
-        let _ = txn.open_table(TableDefinition::<u64, u32>::new(&names.assignments))?;
+        let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&names.clusters))?;
+        let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&names.centroids))?;
+        let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&names.centroid_sums))?;
+        let _ =
+            txn.open_storage_table(TableDefinition::<HierarchyKey, ()>::new(&names.hierarchy))?;
+        let _ = txn.open_storage_table(TableDefinition::<PostingKey, &[u8]>::new(&names.buffer))?;
+        let _ =
+            txn.open_storage_table(TableDefinition::<PostingKey, &[u8]>::new(&names.postings))?;
+        let _ = txn.open_storage_table(TableDefinition::<u64, u32>::new(&names.assignments))?;
         if config.store_raw_vectors {
-            let _ = txn.open_table(TableDefinition::<u64, &[u8]>::new(&names.vectors))?;
+            let _ = txn.open_storage_table(TableDefinition::<u64, &[u8]>::new(&names.vectors))?;
         }
-        let _ = txn.open_table(TableDefinition::<u32, &[u8]>::new(&names.codebooks))?;
+        let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&names.codebooks))?;
 
         Ok(Self {
             txn,
@@ -122,9 +115,9 @@ impl<'txn> FractalIndex<'txn> {
     pub fn flush(&mut self) -> crate::Result<()> {
         if self.config_dirty {
             let meta_def = TableDefinition::<&str, &[u8]>::new(&self.names.meta);
-            let mut meta_tbl = self.txn.open_table(meta_def).map_err(te)?;
+            let mut meta_tbl = self.txn.open_storage_table(meta_def)?;
             let encoded = encode_fractal_config(&self.config);
-            meta_tbl.insert("config", encoded.as_slice())?;
+            meta_tbl.st_insert(&"config", &encoded.as_slice())?;
             self.config_dirty = false;
         }
         Ok(())
@@ -141,12 +134,12 @@ impl<'txn> FractalIndex<'txn> {
             ));
         }
         let cb_def = TableDefinition::<u32, &[u8]>::new(&self.names.codebooks);
-        let tbl = self.txn.open_table(cb_def).map_err(te)?;
+        let tbl = self.txn.open_storage_table(cb_def)?;
         let num_sub = self.config.num_subvectors as usize;
         let sub_dim = self.config.sub_dim();
         let mut data = alloc::vec![0.0f32; num_sub * 256 * sub_dim];
         for m in 0..num_sub {
-            if let Some(guard) = tbl.get(m as u32)? {
+            if let Some(guard) = tbl.st_get(&(m as u32))? {
                 let bytes = guard.value();
                 let expected_len = 256 * sub_dim * 4;
                 if bytes.len() < expected_len {
@@ -224,7 +217,7 @@ impl<'txn> FractalIndex<'txn> {
 
         // Persist codebooks
         let cb_def = TableDefinition::<u32, &[u8]>::new(&self.names.codebooks);
-        let mut cb_tbl = self.txn.open_table(cb_def).map_err(te)?;
+        let mut cb_tbl = self.txn.open_storage_table(cb_def)?;
         let sub_dim = codebooks.sub_dim;
         for m in 0..num_sub {
             let mut bytes = Vec::with_capacity(256 * sub_dim * 4);
@@ -235,7 +228,7 @@ impl<'txn> FractalIndex<'txn> {
                     );
                 }
             }
-            cb_tbl.insert(m as u32, bytes.as_slice())?;
+            cb_tbl.st_insert(&(m as u32), &bytes.as_slice())?;
         }
         drop(cb_tbl);
 
@@ -265,16 +258,16 @@ impl<'txn> FractalIndex<'txn> {
         let centroids_def = TableDefinition::<u32, &[u8]>::new(&self.names.centroids);
         let sums_def = TableDefinition::<u32, &[u8]>::new(&self.names.centroid_sums);
         {
-            let mut ctbl = self.txn.open_table(clusters_def).map_err(te)?;
-            ctbl.insert(root_id, root_meta.as_bytes().as_slice())?;
+            let mut ctbl = self.txn.open_storage_table(clusters_def)?;
+            ctbl.st_insert(&root_id, &root_meta.as_bytes().as_slice())?;
 
-            let mut cent_tbl = self.txn.open_table(centroids_def).map_err(te)?;
+            let mut cent_tbl = self.txn.open_storage_table(centroids_def)?;
             let centroid_bytes: Vec<u8> = centroid.iter().flat_map(|f| f.to_le_bytes()).collect();
-            cent_tbl.insert(root_id, centroid_bytes.as_slice())?;
+            cent_tbl.st_insert(&root_id, &centroid_bytes.as_slice())?;
 
-            let mut sum_tbl = self.txn.open_table(sums_def).map_err(te)?;
+            let mut sum_tbl = self.txn.open_storage_table(sums_def)?;
             let sum_bytes: Vec<u8> = sums.iter().flat_map(|f| f.to_le_bytes()).collect();
-            sum_tbl.insert(root_id, sum_bytes.as_slice())?;
+            sum_tbl.st_insert(&root_id, &sum_bytes.as_slice())?;
         }
 
         // Bulk-insert all training vectors into root cluster
@@ -287,10 +280,10 @@ impl<'txn> FractalIndex<'txn> {
         let assignments_def = TableDefinition::<u64, u32>::new(&self.names.assignments);
         let vectors_def = TableDefinition::<u64, &[u8]>::new(&self.names.vectors);
         {
-            let mut ptbl = self.txn.open_table(postings_def).map_err(te)?;
-            let mut atbl = self.txn.open_table(assignments_def).map_err(te)?;
+            let mut ptbl = self.txn.open_storage_table(postings_def)?;
+            let mut atbl = self.txn.open_storage_table(assignments_def)?;
             let mut vtbl_opt = if self.config.store_raw_vectors {
-                Some(self.txn.open_table(vectors_def).map_err(te)?)
+                Some(self.txn.open_storage_table(vectors_def)?)
             } else {
                 None
             };
@@ -299,22 +292,22 @@ impl<'txn> FractalIndex<'txn> {
                 let vid = ids[i];
                 let vec_slice = &flat[i * dim..(i + 1) * dim];
                 let pq_codes = codebooks_ref.encode(vec_slice);
-                ptbl.insert(PostingKey::new(root_id, vid), pq_codes.as_slice())?;
-                atbl.insert(vid, root_id)?;
+                ptbl.st_insert(&PostingKey::new(root_id, vid), &pq_codes.as_slice())?;
+                atbl.st_insert(&vid, &root_id)?;
 
                 if let Some(ref mut vtbl) = vtbl_opt {
                     let raw_bytes: Vec<u8> =
                         vec_slice.iter().flat_map(|f| f.to_le_bytes()).collect();
-                    vtbl.insert(vid, raw_bytes.as_slice())?;
+                    vtbl.st_insert(&vid, &raw_bytes.as_slice())?;
                 }
             }
         }
 
         // Update root population
         {
-            let mut ctbl = self.txn.open_table(clusters_def).map_err(te)?;
+            let mut ctbl = self.txn.open_storage_table(clusters_def)?;
             root_meta.set_population(n as u32);
-            ctbl.insert(root_id, root_meta.as_bytes().as_slice())?;
+            ctbl.st_insert(&root_id, &root_meta.as_bytes().as_slice())?;
         }
 
         self.config.num_vectors = n as u64;
@@ -345,8 +338,8 @@ impl<'txn> FractalIndex<'txn> {
             let mut to_split: Option<u32> = None;
 
             {
-                let ctbl = self.txn.open_table(clusters_def).map_err(te)?;
-                let range = ctbl.range::<u32>(..)?;
+                let ctbl = self.txn.open_storage_table(clusters_def)?;
+                let range = ctbl.st_range(None, None, true, true)?;
                 for entry in range {
                     let (key, val) = entry?;
                     let meta = ClusterMeta::from_bytes(val.value());
@@ -423,8 +416,8 @@ impl<'txn> FractalIndex<'txn> {
         // Remove old entry if it exists (upsert)
         let assignments_def = TableDefinition::<u64, u32>::new(&self.names.assignments);
         let old_cluster = {
-            let atbl = self.txn.open_table(assignments_def).map_err(te)?;
-            atbl.get(vector_id)?.map(|g| g.value())
+            let atbl = self.txn.open_storage_table(assignments_def)?;
+            atbl.st_get(&vector_id)?.map(|g| g.value())
         };
         if let Some(old_cid) = old_cluster {
             // Load the OLD vector for correct centroid removal (not the new one)
@@ -435,24 +428,24 @@ impl<'txn> FractalIndex<'txn> {
                 // No raw vector available: remove from posting list, decrement population
                 let postings_def = TableDefinition::<PostingKey, &[u8]>::new(&self.names.postings);
                 {
-                    let mut ptbl = self.txn.open_table(postings_def).map_err(te)?;
-                    ptbl.remove(PostingKey::new(old_cid, vector_id))?;
+                    let mut ptbl = self.txn.open_storage_table(postings_def)?;
+                    ptbl.st_remove(&PostingKey::new(old_cid, vector_id))?;
                 }
                 // Also remove from buffer
                 let buffer_def = TableDefinition::<PostingKey, &[u8]>::new(&self.names.buffer);
                 {
-                    let mut btbl = self.txn.open_table(buffer_def).map_err(te)?;
-                    btbl.remove(PostingKey::new(old_cid, vector_id))?;
+                    let mut btbl = self.txn.open_storage_table(buffer_def)?;
+                    btbl.st_remove(&PostingKey::new(old_cid, vector_id))?;
                 }
                 // Decrement population without centroid update
                 let clusters_def = TableDefinition::<u32, &[u8]>::new(&self.names.clusters);
-                let mut ctbl = self.txn.open_table(clusters_def).map_err(te)?;
+                let mut ctbl = self.txn.open_storage_table(clusters_def)?;
                 let meta_opt = ctbl
-                    .get(old_cid)?
+                    .st_get(&old_cid)?
                     .map(|g| ClusterMeta::from_bytes(g.value()));
                 if let Some(mut meta) = meta_opt {
                     meta.set_population(meta.population().saturating_sub(1));
-                    ctbl.insert(old_cid, meta.as_bytes().as_slice())?;
+                    ctbl.st_insert(&old_cid, &meta.as_bytes().as_slice())?;
                 }
             }
         }
@@ -463,9 +456,9 @@ impl<'txn> FractalIndex<'txn> {
         // Insert into leaf's buffer
         let buffer_def = TableDefinition::<PostingKey, &[u8]>::new(&self.names.buffer);
         {
-            let mut btbl = self.txn.open_table(buffer_def).map_err(te)?;
+            let mut btbl = self.txn.open_storage_table(buffer_def)?;
             let raw_bytes: Vec<u8> = vec_ref.iter().flat_map(|f| f.to_le_bytes()).collect();
-            btbl.insert(PostingKey::new(leaf_id, vector_id), raw_bytes.as_slice())?;
+            btbl.st_insert(&PostingKey::new(leaf_id, vector_id), &raw_bytes.as_slice())?;
         }
 
         // Update centroid incrementally.
@@ -478,8 +471,8 @@ impl<'txn> FractalIndex<'txn> {
         // not warranted for the marginal accuracy impact.
         let clusters_def = TableDefinition::<u32, &[u8]>::new(&self.names.clusters);
         let old_pop = {
-            let ctbl = self.txn.open_table(clusters_def).map_err(te)?;
-            match ctbl.get(leaf_id)? {
+            let ctbl = self.txn.open_storage_table(clusters_def)?;
+            match ctbl.st_get(&leaf_id)? {
                 Some(g) => ClusterMeta::from_bytes(g.value()).population(),
                 None => 0,
             }
@@ -497,9 +490,9 @@ impl<'txn> FractalIndex<'txn> {
 
         // Update cluster meta (population, buffer count, temporal range)
         {
-            let mut ctbl = self.txn.open_table(clusters_def).map_err(te)?;
+            let mut ctbl = self.txn.open_storage_table(clusters_def)?;
             let meta_opt = ctbl
-                .get(leaf_id)?
+                .st_get(&leaf_id)?
                 .map(|g| ClusterMeta::from_bytes(g.value()));
             if let Some(mut meta) = meta_opt {
                 meta.set_population(new_pop);
@@ -521,20 +514,20 @@ impl<'txn> FractalIndex<'txn> {
                         meta.set_newest_wall_ns(wall_ns);
                     }
                 }
-                ctbl.insert(leaf_id, meta.as_bytes().as_slice())?;
+                ctbl.st_insert(&leaf_id, &meta.as_bytes().as_slice())?;
             }
         }
 
         // Update assignments
         {
-            let mut atbl = self.txn.open_table(assignments_def).map_err(te)?;
-            atbl.insert(vector_id, leaf_id)?;
+            let mut atbl = self.txn.open_storage_table(assignments_def)?;
+            atbl.st_insert(&vector_id, &leaf_id)?;
         }
 
         // Cascade buffer if full
         let buffer_count = {
-            let ctbl = self.txn.open_table(clusters_def).map_err(te)?;
-            match ctbl.get(leaf_id)? {
+            let ctbl = self.txn.open_storage_table(clusters_def)?;
+            match ctbl.st_get(&leaf_id)? {
                 Some(g) => ClusterMeta::from_bytes(g.value()).buffer_count(),
                 None => 0,
             }
@@ -605,8 +598,8 @@ impl<'txn> FractalIndex<'txn> {
     pub fn remove(&mut self, vector_id: u64) -> crate::Result<bool> {
         let assignments_def = TableDefinition::<u64, u32>::new(&self.names.assignments);
         let cluster_id = {
-            let atbl = self.txn.open_table(assignments_def).map_err(te)?;
-            match atbl.get(vector_id)? {
+            let atbl = self.txn.open_storage_table(assignments_def)?;
+            match atbl.st_get(&vector_id)? {
                 Some(g) => g.value(),
                 None => return Ok(false),
             }
@@ -617,8 +610,9 @@ impl<'txn> FractalIndex<'txn> {
         // Check if vector is in the buffer before removal (for buffer_count tracking)
         let in_buffer = {
             let buffer_def = TableDefinition::<PostingKey, &[u8]>::new(&self.names.buffer);
-            let btbl = self.txn.open_table(buffer_def).map_err(te)?;
-            btbl.get(PostingKey::new(cluster_id, vector_id))?.is_some()
+            let btbl = self.txn.open_storage_table(buffer_def)?;
+            btbl.st_get(&PostingKey::new(cluster_id, vector_id))?
+                .is_some()
         };
 
         // Try to load vector from any source for centroid update
@@ -629,52 +623,52 @@ impl<'txn> FractalIndex<'txn> {
         } else {
             // Remove from posting list without centroid update
             let postings_def = TableDefinition::<PostingKey, &[u8]>::new(&self.names.postings);
-            let mut ptbl = self.txn.open_table(postings_def).map_err(te)?;
-            ptbl.remove(PostingKey::new(cluster_id, vector_id))?;
+            let mut ptbl = self.txn.open_storage_table(postings_def)?;
+            ptbl.st_remove(&PostingKey::new(cluster_id, vector_id))?;
 
             // Still decrement population even without centroid update
             let clusters_def = TableDefinition::<u32, &[u8]>::new(&self.names.clusters);
-            let mut ctbl = self.txn.open_table(clusters_def).map_err(te)?;
+            let mut ctbl = self.txn.open_storage_table(clusters_def)?;
             let meta_opt = ctbl
-                .get(cluster_id)?
+                .st_get(&cluster_id)?
                 .map(|g| ClusterMeta::from_bytes(g.value()));
             if let Some(mut meta) = meta_opt {
                 meta.set_population(meta.population().saturating_sub(1));
-                ctbl.insert(cluster_id, meta.as_bytes().as_slice())?;
+                ctbl.st_insert(&cluster_id, &meta.as_bytes().as_slice())?;
             }
         }
 
         // Remove from buffer
         {
             let buffer_def = TableDefinition::<PostingKey, &[u8]>::new(&self.names.buffer);
-            let mut btbl = self.txn.open_table(buffer_def).map_err(te)?;
-            btbl.remove(PostingKey::new(cluster_id, vector_id))?;
+            let mut btbl = self.txn.open_storage_table(buffer_def)?;
+            btbl.st_remove(&PostingKey::new(cluster_id, vector_id))?;
         }
 
         // Decrement buffer_count if the vector was in the buffer
         if in_buffer {
             let clusters_def = TableDefinition::<u32, &[u8]>::new(&self.names.clusters);
-            let mut ctbl = self.txn.open_table(clusters_def).map_err(te)?;
+            let mut ctbl = self.txn.open_storage_table(clusters_def)?;
             let meta_opt = ctbl
-                .get(cluster_id)?
+                .st_get(&cluster_id)?
                 .map(|g| ClusterMeta::from_bytes(g.value()));
             if let Some(mut meta) = meta_opt {
                 meta.set_buffer_count(meta.buffer_count().saturating_sub(1));
-                ctbl.insert(cluster_id, meta.as_bytes().as_slice())?;
+                ctbl.st_insert(&cluster_id, &meta.as_bytes().as_slice())?;
             }
         }
 
         // Remove assignment
         {
-            let mut atbl = self.txn.open_table(assignments_def).map_err(te)?;
-            atbl.remove(vector_id)?;
+            let mut atbl = self.txn.open_storage_table(assignments_def)?;
+            atbl.st_remove(&vector_id)?;
         }
 
         // Remove raw vector
         if self.config.store_raw_vectors {
             let vectors_def = TableDefinition::<u64, &[u8]>::new(&self.names.vectors);
-            let mut vtbl = self.txn.open_table(vectors_def).map_err(te)?;
-            vtbl.remove(vector_id)?;
+            let mut vtbl = self.txn.open_storage_table(vectors_def)?;
+            vtbl.st_remove(&vector_id)?;
         }
 
         self.config.num_vectors = self.config.num_vectors.saturating_sub(1);
@@ -683,8 +677,8 @@ impl<'txn> FractalIndex<'txn> {
         // Check merge condition
         let clusters_def = TableDefinition::<u32, &[u8]>::new(&self.names.clusters);
         let pop = {
-            let ctbl = self.txn.open_table(clusters_def).map_err(te)?;
-            match ctbl.get(cluster_id)? {
+            let ctbl = self.txn.open_storage_table(clusters_def)?;
+            match ctbl.st_get(&cluster_id)? {
                 Some(g) => ClusterMeta::from_bytes(g.value()).population(),
                 None => 0,
             }
@@ -722,8 +716,8 @@ impl<'txn> FractalIndex<'txn> {
         let mut current = start;
         loop {
             let meta = {
-                let ctbl = self.txn.open_table(clusters_def).map_err(te)?;
-                match ctbl.get(current)? {
+                let ctbl = self.txn.open_storage_table(clusters_def)?;
+                match ctbl.st_get(&current)? {
                     Some(g) => ClusterMeta::from_bytes(g.value()),
                     None => {
                         return Err(StorageError::Corrupted(alloc::format!(
@@ -738,21 +732,21 @@ impl<'txn> FractalIndex<'txn> {
             }
 
             // Internal node: find nearest child
-            let htbl = self.txn.open_table(hier_def).map_err(te)?;
-            let ctbl = self.txn.open_table(centroids_def).map_err(te)?;
+            let htbl = self.txn.open_storage_table(hier_def)?;
+            let ctbl = self.txn.open_storage_table(centroids_def)?;
 
             let mut best_child = current;
             let mut best_dist = f32::MAX;
 
-            let range = htbl.range(
-                HierarchyKey::children_start(current)..=HierarchyKey::children_end(current),
-            )?;
+            let hstart = HierarchyKey::children_start(current);
+            let hend = HierarchyKey::children_end(current);
+            let range = htbl.st_range(Some(&hstart), Some(&hend), true, true)?;
 
             for entry in range {
                 let (key, _) = entry?;
                 let child_id = key.value().child_id;
 
-                if let Some(cg) = ctbl.get(child_id)? {
+                if let Some(cg) = ctbl.st_get(&child_id)? {
                     let bytes = cg.value();
                     if bytes.len() < dim * 4 {
                         continue;
@@ -789,15 +783,15 @@ impl<'txn> FractalIndex<'txn> {
         // Remove from posting list
         let postings_def = TableDefinition::<PostingKey, &[u8]>::new(&self.names.postings);
         {
-            let mut ptbl = self.txn.open_table(postings_def).map_err(te)?;
-            ptbl.remove(PostingKey::new(cluster_id, vector_id))?;
+            let mut ptbl = self.txn.open_storage_table(postings_def)?;
+            ptbl.st_remove(&PostingKey::new(cluster_id, vector_id))?;
         }
 
         // Update centroid
         let clusters_def = TableDefinition::<u32, &[u8]>::new(&self.names.clusters);
         let old_pop = {
-            let ctbl = self.txn.open_table(clusters_def).map_err(te)?;
-            match ctbl.get(cluster_id)? {
+            let ctbl = self.txn.open_storage_table(clusters_def)?;
+            match ctbl.st_get(&cluster_id)? {
                 Some(g) => ClusterMeta::from_bytes(g.value()).population(),
                 None => 0,
             }
@@ -814,13 +808,13 @@ impl<'txn> FractalIndex<'txn> {
         )?;
 
         {
-            let mut ctbl = self.txn.open_table(clusters_def).map_err(te)?;
+            let mut ctbl = self.txn.open_storage_table(clusters_def)?;
             let meta_opt = ctbl
-                .get(cluster_id)?
+                .st_get(&cluster_id)?
                 .map(|g| ClusterMeta::from_bytes(g.value()));
             if let Some(mut meta) = meta_opt {
                 meta.set_population(new_pop);
-                ctbl.insert(cluster_id, meta.as_bytes().as_slice())?;
+                ctbl.st_insert(&cluster_id, &meta.as_bytes().as_slice())?;
             }
         }
 
@@ -832,8 +826,8 @@ impl<'txn> FractalIndex<'txn> {
             return Ok(None);
         }
         let vectors_def = TableDefinition::<u64, &[u8]>::new(&self.names.vectors);
-        let vtbl = self.txn.open_table(vectors_def).map_err(te)?;
-        match vtbl.get(vector_id)? {
+        let vtbl = self.txn.open_storage_table(vectors_def)?;
+        match vtbl.st_get(&vector_id)? {
             Some(g) => {
                 let bytes = g.value();
                 if bytes.len() < dim * 4 {
@@ -859,8 +853,8 @@ impl<'txn> FractalIndex<'txn> {
         }
         // Try buffer table (vector may not yet be cascaded)
         let buffer_def = TableDefinition::<PostingKey, &[u8]>::new(&self.names.buffer);
-        let btbl = self.txn.open_table(buffer_def).map_err(te)?;
-        if let Some(g) = btbl.get(PostingKey::new(cluster_id, vector_id))? {
+        let btbl = self.txn.open_storage_table(buffer_def)?;
+        if let Some(g) = btbl.st_get(&PostingKey::new(cluster_id, vector_id))? {
             let bytes = g.value();
             if bytes.len() < dim * 4 {
                 return Ok(None);
@@ -877,7 +871,7 @@ impl<'txn> FractalIndex<'txn> {
     }
 }
 
-impl Drop for FractalIndex<'_> {
+impl<T: StorageWrite> Drop for FractalIndex<'_, T> {
     fn drop(&mut self) {
         let _ = self.flush();
     }
@@ -887,9 +881,9 @@ impl Drop for FractalIndex<'_> {
 // ReadOnlyFractalIndex -- read-only index handle
 // ---------------------------------------------------------------------------
 
-/// A read-only fractal vector index for search within a [`ReadTransaction`].
+/// A read-only fractal vector index for search.
 ///
-/// Obtained via [`ReadTransaction::open_fractal_index`].
+/// Obtained via [`crate::ReadTransaction::open_fractal_index`].
 pub struct ReadOnlyFractalIndex {
     pub(crate) config: FractalIndexConfig,
     pub(crate) names: TableNames,
@@ -899,42 +893,43 @@ pub struct ReadOnlyFractalIndex {
 impl ReadOnlyFractalIndex {
     /// Open a fractal index for reading.
     #[allow(clippy::cast_possible_truncation)]
-    pub(crate) fn open(
-        txn: &ReadTransaction,
+    pub(crate) fn open<R: StorageRead>(
+        txn: &R,
         def: &FractalIndexDefinition,
-    ) -> Result<Self, TableError> {
+    ) -> crate::Result<Self> {
         let names = TableNames::new(def.name());
 
         let meta_def = TableDefinition::<&str, &[u8]>::new(&names.meta);
-        let meta_tbl = txn.open_table(meta_def)?;
-        let config = match meta_tbl.get("config")? {
+        let meta_tbl = txn.open_storage_table(meta_def)?;
+        let config = match meta_tbl.st_get(&"config")? {
             Some(guard) => decode_fractal_config(guard.value()),
             None => {
-                return Err(TableError::TableDoesNotExist(def.name().to_string()));
+                return Err(StorageError::Corrupted(alloc::format!(
+                    "fractal index '{}' not found (missing config)",
+                    def.name(),
+                )));
             }
         };
         drop(meta_tbl);
 
-        validate_config(&config).map_err(TableError::Storage)?;
+        validate_config(&config)?;
 
         // Eagerly load codebooks
         let cb_def = TableDefinition::<u32, &[u8]>::new(&names.codebooks);
-        let cb_tbl = txn.open_table(cb_def)?;
+        let cb_tbl = txn.open_storage_table(cb_def)?;
         let num_sub = config.num_subvectors as usize;
         let sub_dim = config.sub_dim();
         let mut data = alloc::vec![0.0f32; num_sub * 256 * sub_dim];
         for m in 0..num_sub {
-            if let Some(guard) = cb_tbl.get(m as u32)? {
+            if let Some(guard) = cb_tbl.st_get(&(m as u32))? {
                 let bytes = guard.value();
                 let expected_len = 256 * sub_dim * 4;
                 if bytes.len() < expected_len {
-                    return Err(TableError::Storage(StorageError::Corrupted(
-                        alloc::format!(
-                            "fractal: codebook {} has insufficient bytes: expected {}, got {}",
-                            m,
-                            expected_len,
-                            bytes.len(),
-                        ),
+                    return Err(StorageError::Corrupted(alloc::format!(
+                        "fractal: codebook {} has insufficient bytes: expected {}, got {}",
+                        m,
+                        expected_len,
+                        bytes.len(),
                     )));
                 }
                 for k in 0..256 {
@@ -942,10 +937,8 @@ impl ReadOnlyFractalIndex {
                         let src_offset = (k * sub_dim + d) * 4;
                         let dst_idx = m * 256 * sub_dim + k * sub_dim + d;
                         if dst_idx >= data.len() || src_offset + 4 > bytes.len() {
-                            return Err(TableError::Storage(StorageError::Corrupted(
-                                alloc::format!(
-                                    "fractal: codebook {m} index overflow: dst={dst_idx}, src_offset={src_offset}",
-                                ),
+                            return Err(StorageError::Corrupted(alloc::format!(
+                                "fractal: codebook {m} index overflow: dst={dst_idx}, src_offset={src_offset}",
                             )));
                         }
                         data[dst_idx] = read_f32_le(bytes, src_offset);
@@ -968,9 +961,9 @@ impl ReadOnlyFractalIndex {
     }
 
     /// Search the index for nearest neighbors.
-    pub fn search(
+    pub fn search<R: StorageRead>(
         &self,
-        txn: &ReadTransaction,
+        txn: &R,
         query: &[f32],
         params: &FractalSearchParams,
     ) -> crate::Result<Vec<Neighbor<u64>>> {

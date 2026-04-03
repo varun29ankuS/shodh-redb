@@ -4,9 +4,8 @@ use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
 
 use crate::TableDefinition;
-use crate::error::{StorageError, TableError};
-use crate::table::ReadableTable;
-use crate::transactions::{ReadTransaction, WriteTransaction};
+use crate::error::StorageError;
+use crate::storage_traits::{ReadTable, StorageRead, StorageWrite, WriteTable};
 use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
 
 use super::adc::AdcTable;
@@ -14,11 +13,6 @@ use super::config::{IndexConfig, IvfPqIndexDefinition, STATE_TRAINED, SearchPara
 use super::kmeans;
 use super::pq::{self, Codebooks};
 use super::types::{PostingKey, decode_index_config, encode_index_config};
-
-/// Convert a `TableError` to `StorageError`.
-fn te(e: TableError) -> StorageError {
-    e.into_storage_error_or_corrupted("IVF-PQ internal table error")
-}
 
 // ---------------------------------------------------------------------------
 // Table name helpers
@@ -74,15 +68,15 @@ fn validate_config(config: &IndexConfig) -> crate::Result<()> {
 // IvfPqIndex -- writable index handle
 // ---------------------------------------------------------------------------
 
-/// A writable IVF-PQ index bound to a [`WriteTransaction`].
+/// A writable IVF-PQ index bound to a storage write transaction.
 ///
-/// Obtained via [`WriteTransaction::open_ivfpq_index`].
+/// Obtained via [`crate::WriteTransaction::open_ivfpq_index`].
 ///
 /// The index configuration (including `num_vectors` count) is persisted
 /// automatically when the index handle is dropped. You can also call
 /// [`flush`](Self::flush) to persist explicitly at any point.
-pub struct IvfPqIndex<'txn> {
-    txn: &'txn WriteTransaction,
+pub struct IvfPqIndex<'txn, T: StorageWrite> {
+    txn: &'txn T,
     pub(crate) config: IndexConfig,
     name: String,
     /// The cluster count from the original definition, before any clamping.
@@ -94,48 +88,42 @@ pub struct IvfPqIndex<'txn> {
     config_dirty: bool,
 }
 
-impl<'txn> IvfPqIndex<'txn> {
+impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     /// Open or create. Called by `WriteTransaction::open_ivfpq_index`.
-    pub(crate) fn open(
-        txn: &'txn WriteTransaction,
-        definition: &IvfPqIndexDefinition,
-    ) -> Result<Self, TableError> {
+    pub(crate) fn open(txn: &'txn T, definition: &IvfPqIndexDefinition) -> crate::Result<Self> {
         let name = String::from(definition.name());
 
         let mn = meta_name(&name);
         let meta_def = TableDefinition::<&str, &[u8]>::new(&mn);
-        let mut meta_table = txn.open_table(meta_def)?;
+        let mut meta_table = txn.open_storage_table(meta_def)?;
 
         // Check if config exists; if not, persist the initial config.
-        let existing = meta_table.get("config")?;
+        let existing = meta_table.st_get(&"config")?;
         let config = if let Some(guard) = existing {
             decode_index_config(guard.value())
         } else {
             let config = definition.to_config();
             // Validate before persisting a new config.
-            validate_config(&config).map_err(|e| match e {
-                StorageError::Corrupted(msg) => TableError::Storage(StorageError::Corrupted(msg)),
-                other => TableError::Storage(other),
-            })?;
+            validate_config(&config)?;
             let bytes = encode_index_config(&config);
-            drop(existing); // release borrow
-            meta_table.insert("config", bytes.as_slice())?;
+            drop(existing); // release binding
+            meta_table.st_insert(&"config", &bytes.as_slice())?;
             config
         };
 
         // Eagerly create the other tables.
         {
             let cn = centroids_name(&name);
-            let _ = txn.open_table(TableDefinition::<u32, &[u8]>::new(&cn))?;
+            let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&cn))?;
             let cb = codebooks_name(&name);
-            let _ = txn.open_table(TableDefinition::<u32, &[u8]>::new(&cb))?;
+            let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&cb))?;
             let pn = postings_name(&name);
-            let _ = txn.open_table(TableDefinition::<PostingKey, &[u8]>::new(&pn))?;
+            let _ = txn.open_storage_table(TableDefinition::<PostingKey, &[u8]>::new(&pn))?;
             let an = assignments_name(&name);
-            let _ = txn.open_table(TableDefinition::<u64, u32>::new(&an))?;
+            let _ = txn.open_storage_table(TableDefinition::<u64, u32>::new(&an))?;
             if config.store_raw_vectors {
                 let vn = vectors_name(&name);
-                let _ = txn.open_table(TableDefinition::<u64, &[u8]>::new(&vn))?;
+                let _ = txn.open_storage_table(TableDefinition::<u64, &[u8]>::new(&vn))?;
             }
         }
 
@@ -243,14 +231,14 @@ impl<'txn> IvfPqIndex<'txn> {
         {
             let tn = centroids_name(&self.name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
+            let mut table = self.txn.open_storage_table(def)?;
             for c in 0..actual_k {
                 let bytes: Vec<u8> = centroid_data[c * dim..(c + 1) * dim]
                     .iter()
                     .flat_map(|f| f.to_le_bytes())
                     .collect();
                 #[allow(clippy::cast_possible_truncation)]
-                table.insert(c as u32, bytes.as_slice())?;
+                table.st_insert(&(c as u32), &bytes.as_slice())?;
             }
         }
 
@@ -258,11 +246,11 @@ impl<'txn> IvfPqIndex<'txn> {
         {
             let tn = codebooks_name(&self.name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
+            let mut table = self.txn.open_storage_table(def)?;
             for m in 0..num_subvectors {
                 let bytes = codebooks.serialize_codebook(m);
                 #[allow(clippy::cast_possible_truncation)]
-                table.insert(m as u32, bytes.as_slice())?;
+                table.st_insert(&(m as u32), &bytes.as_slice())?;
             }
         }
 
@@ -323,37 +311,40 @@ impl<'txn> IvfPqIndex<'txn> {
         let old_cluster = {
             let tn = assignments_name(&self.name);
             let def = TableDefinition::<u64, u32>::new(&tn);
-            let table = self.txn.open_table(def).map_err(te)?;
-            table.get(vector_id)?.map(|g| g.value())
+            let table = self.txn.open_storage_table(def)?;
+            table.st_get(&vector_id)?.map(|g| g.value())
         };
 
         // Remove old posting entry if the vector existed in a different (or same) cluster.
         if let Some(old_cid) = old_cluster {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
-            table.remove(PostingKey::new(old_cid, vector_id))?;
+            let mut table = self.txn.open_storage_table(def)?;
+            table.st_remove(&PostingKey::new(old_cid, vector_id))?;
         }
 
         // Insert the new posting entry.
         {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
-            table.insert(PostingKey::new(cluster_id, vector_id), pq_codes.as_slice())?;
+            let mut table = self.txn.open_storage_table(def)?;
+            table.st_insert(
+                &PostingKey::new(cluster_id, vector_id),
+                &pq_codes.as_slice(),
+            )?;
         }
         {
             let tn = assignments_name(&self.name);
             let def = TableDefinition::<u64, u32>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
-            table.insert(vector_id, cluster_id)?;
+            let mut table = self.txn.open_storage_table(def)?;
+            table.st_insert(&vector_id, &cluster_id)?;
         }
         if self.config.store_raw_vectors {
             let tn = vectors_name(&self.name);
             let def = TableDefinition::<u64, &[u8]>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
+            let mut table = self.txn.open_storage_table(def)?;
             let bytes: Vec<u8> = vec_ref.iter().flat_map(|f| f.to_le_bytes()).collect();
-            table.insert(vector_id, bytes.as_slice())?;
+            table.st_insert(&vector_id, &bytes.as_slice())?;
         }
 
         // Only increment count for genuinely new vectors.
@@ -381,18 +372,18 @@ impl<'txn> IvfPqIndex<'txn> {
 
         let pn = postings_name(&self.name);
         let pd = TableDefinition::<PostingKey, &[u8]>::new(&pn);
-        let mut pt = self.txn.open_table(pd).map_err(te)?;
+        let mut pt = self.txn.open_storage_table(pd)?;
 
         let an = assignments_name(&self.name);
         let ad = TableDefinition::<u64, u32>::new(&an);
-        let mut at = self.txn.open_table(ad).map_err(te)?;
+        let mut at = self.txn.open_storage_table(ad)?;
 
         // Open vectors table once outside loop (M2 fix).
         let vn;
         let mut vt_opt = if store_raw {
             vn = vectors_name(&self.name);
             let vd = TableDefinition::<u64, &[u8]>::new(&vn);
-            Some(self.txn.open_table(vd).map_err(te)?)
+            Some(self.txn.open_storage_table(vd)?)
         } else {
             None
         };
@@ -418,17 +409,20 @@ impl<'txn> IvfPqIndex<'txn> {
             let pq_codes = codebooks.encode(&vec);
 
             // Check for existing assignment (handle duplicates).
-            let old_cluster = at.get(vector_id)?.map(|g| g.value());
+            let old_cluster = at.st_get(&vector_id)?.map(|g| g.value());
             if let Some(old_cid) = old_cluster {
-                pt.remove(PostingKey::new(old_cid, vector_id))?;
+                pt.st_remove(&PostingKey::new(old_cid, vector_id))?;
             }
 
-            pt.insert(PostingKey::new(cluster_id, vector_id), pq_codes.as_slice())?;
-            at.insert(vector_id, cluster_id)?;
+            pt.st_insert(
+                &PostingKey::new(cluster_id, vector_id),
+                &pq_codes.as_slice(),
+            )?;
+            at.st_insert(&vector_id, &cluster_id)?;
 
             if let Some(ref mut vt) = vt_opt {
                 let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
-                vt.insert(vector_id, bytes.as_slice())?;
+                vt.st_insert(&vector_id, &bytes.as_slice())?;
             }
 
             if old_cluster.is_none() {
@@ -448,8 +442,8 @@ impl<'txn> IvfPqIndex<'txn> {
         let cluster_id = {
             let tn = assignments_name(&self.name);
             let def = TableDefinition::<u64, u32>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
-            match table.remove(vector_id)? {
+            let mut table = self.txn.open_storage_table(def)?;
+            match table.st_remove(&vector_id)? {
                 Some(guard) => guard.value(),
                 None => return Ok(false),
             }
@@ -458,15 +452,15 @@ impl<'txn> IvfPqIndex<'txn> {
         {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
-            table.remove(PostingKey::new(cluster_id, vector_id))?;
+            let mut table = self.txn.open_storage_table(def)?;
+            table.st_remove(&PostingKey::new(cluster_id, vector_id))?;
         }
 
         if self.config.store_raw_vectors {
             let tn = vectors_name(&self.name);
             let def = TableDefinition::<u64, &[u8]>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
-            table.remove(vector_id)?;
+            let mut table = self.txn.open_storage_table(def)?;
+            table.st_remove(&vector_id)?;
         }
 
         self.config.num_vectors = self.config.num_vectors.saturating_sub(1);
@@ -528,11 +522,12 @@ impl<'txn> IvfPqIndex<'txn> {
         {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
-            let table = self.txn.open_table(def).map_err(te)?;
+            let table = self.txn.open_storage_table(def)?;
             for &(cid, _) in &probes {
-                let range =
-                    table.range(PostingKey::cluster_start(cid)..=PostingKey::cluster_end(cid))?;
-                for entry in range {
+                let start = PostingKey::cluster_start(cid);
+                let end = PostingKey::cluster_end(cid);
+                let range_iter = table.st_range(Some(&start), Some(&end), true, true)?;
+                for entry in range_iter {
                     let (kg, vg) = entry?;
                     heap.push(kg.value().vector_id, adc.approximate_distance(vg.value()));
                 }
@@ -572,10 +567,10 @@ impl<'txn> IvfPqIndex<'txn> {
         if old_k > new_k {
             let tn = centroids_name(&self.name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
+            let mut table = self.txn.open_storage_table(def)?;
             for c in new_k..old_k {
                 #[allow(clippy::cast_possible_truncation)]
-                table.remove(c as u32)?;
+                table.st_remove(&(c as u32))?;
             }
         }
 
@@ -583,24 +578,24 @@ impl<'txn> IvfPqIndex<'txn> {
         {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
-            table.drain_all()?;
+            let mut table = self.txn.open_storage_table(def)?;
+            table.st_drain_all()?;
         }
 
         // Clear all assignments.
         {
             let tn = assignments_name(&self.name);
             let def = TableDefinition::<u64, u32>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
-            table.drain_all()?;
+            let mut table = self.txn.open_storage_table(def)?;
+            table.st_drain_all()?;
         }
 
         // Clear raw vectors if stored.
         if self.config.store_raw_vectors {
             let tn = vectors_name(&self.name);
             let def = TableDefinition::<u64, &[u8]>::new(&tn);
-            let mut table = self.txn.open_table(def).map_err(te)?;
-            table.drain_all()?;
+            let mut table = self.txn.open_storage_table(def)?;
+            table.st_drain_all()?;
         }
 
         Ok(())
@@ -619,9 +614,9 @@ impl<'txn> IvfPqIndex<'txn> {
     fn persist_config_inner(&self) -> crate::Result<()> {
         let tn = meta_name(&self.name);
         let def = TableDefinition::<&str, &[u8]>::new(&tn);
-        let mut table = self.txn.open_table(def).map_err(te)?;
+        let mut table = self.txn.open_storage_table(def)?;
         let bytes = encode_index_config(&self.config);
-        table.insert("config", bytes.as_slice())?;
+        table.st_insert(&"config", &bytes.as_slice())?;
         Ok(())
     }
 
@@ -639,12 +634,12 @@ impl<'txn> IvfPqIndex<'txn> {
         let k = self.config.num_clusters as usize;
         let tn = centroids_name(&self.name);
         let def = TableDefinition::<u32, &[u8]>::new(&tn);
-        let table = self.txn.open_table(def).map_err(te)?;
+        let table = self.txn.open_storage_table(def)?;
 
         let mut flat = Vec::with_capacity(k * dim);
         for c in 0..k {
             #[allow(clippy::cast_possible_truncation)]
-            let guard = table.get(c as u32)?.ok_or_else(|| {
+            let guard = table.st_get(&(c as u32))?.ok_or_else(|| {
                 StorageError::Corrupted(alloc::format!(
                     "IVF-PQ '{}': missing centroid {c}",
                     self.name,
@@ -681,12 +676,12 @@ impl<'txn> IvfPqIndex<'txn> {
         let sd = self.config.sub_dim();
         let tn = codebooks_name(&self.name);
         let def = TableDefinition::<u32, &[u8]>::new(&tn);
-        let table = self.txn.open_table(def).map_err(te)?;
+        let table = self.txn.open_storage_table(def)?;
 
         let mut data = Vec::with_capacity(m * 256 * sd);
         for i in 0..m {
             #[allow(clippy::cast_possible_truncation)]
-            let guard = table.get(i as u32)?.ok_or_else(|| {
+            let guard = table.st_get(&(i as u32))?.ok_or_else(|| {
                 StorageError::Corrupted(alloc::format!(
                     "IVF-PQ '{}': missing codebook {i}",
                     self.name,
@@ -710,12 +705,12 @@ impl<'txn> IvfPqIndex<'txn> {
     ) -> crate::Result<Vec<Neighbor<u64>>> {
         let tn = vectors_name(&self.name);
         let def = TableDefinition::<u64, &[u8]>::new(&tn);
-        let table = self.txn.open_table(def).map_err(te)?;
+        let table = self.txn.open_storage_table(def)?;
         let metric = self.config.metric;
 
         let mut results: Vec<Neighbor<u64>> = Vec::with_capacity(candidates.len());
         for cand in candidates {
-            if let Some(guard) = table.get(cand.key)? {
+            if let Some(guard) = table.st_get(&cand.key)? {
                 let vec = bytes_to_f32_vec(guard.value());
                 results.push(Neighbor {
                     key: cand.key,
@@ -733,7 +728,7 @@ impl<'txn> IvfPqIndex<'txn> {
     }
 }
 
-impl Drop for IvfPqIndex<'_> {
+impl<T: StorageWrite> Drop for IvfPqIndex<'_, T> {
     fn drop(&mut self) {
         if self.config_dirty {
             // Best-effort persist on drop. Errors are silently ignored since
@@ -748,7 +743,7 @@ impl Drop for IvfPqIndex<'_> {
 // ReadOnlyIvfPqIndex -- read-only index handle
 // ---------------------------------------------------------------------------
 
-/// A read-only IVF-PQ index bound to a [`ReadTransaction`].
+/// A read-only IVF-PQ index.
 ///
 /// Centroids and codebooks are loaded into memory at open time.
 pub struct ReadOnlyIvfPqIndex {
@@ -760,19 +755,23 @@ pub struct ReadOnlyIvfPqIndex {
 
 impl ReadOnlyIvfPqIndex {
     /// Open. Called by `ReadTransaction::open_ivfpq_index`.
-    pub(crate) fn open(
-        txn: &ReadTransaction,
+    pub(crate) fn open<R: StorageRead>(
+        txn: &R,
         definition: &IvfPqIndexDefinition,
-    ) -> Result<Self, TableError> {
+    ) -> crate::Result<Self> {
         let name = String::from(definition.name());
 
         let mn = meta_name(&name);
         let md = TableDefinition::<&str, &[u8]>::new(&mn);
-        let mt = txn.open_table(md)?;
+        let mt = txn.open_storage_table(md)?;
 
-        let config = match mt.get("config")? {
+        let config = match mt.st_get(&"config")? {
             Some(guard) => decode_index_config(guard.value()),
-            None => return Err(TableError::TableDoesNotExist(mn)),
+            None => {
+                return Err(StorageError::Corrupted(alloc::format!(
+                    "IVF-PQ index '{mn}' not found (missing config)",
+                )));
+            }
         };
 
         let dim = config.dim as usize;
@@ -780,14 +779,14 @@ impl ReadOnlyIvfPqIndex {
         let centroids = {
             let tn = centroids_name(&name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
-            let table = txn.open_table(def)?;
+            let table = txn.open_storage_table(def)?;
             let mut flat = Vec::with_capacity(num_clusters * dim);
             for c in 0..num_clusters {
                 #[allow(clippy::cast_possible_truncation)]
-                let guard = table.get(c as u32)?.ok_or_else(|| {
-                    TableError::Storage(StorageError::Corrupted(alloc::format!(
-                        "IVF-PQ '{name}': missing centroid {c}",
-                    )))
+                let guard = table.st_get(&(c as u32))?.ok_or_else(|| {
+                    StorageError::Corrupted(
+                        alloc::format!("IVF-PQ '{name}': missing centroid {c}",),
+                    )
                 })?;
                 for chunk in guard.value().chunks_exact(4) {
                     if let Ok(bytes) = chunk.try_into() {
@@ -803,14 +802,14 @@ impl ReadOnlyIvfPqIndex {
         let codebooks = {
             let tn = codebooks_name(&name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
-            let table = txn.open_table(def)?;
+            let table = txn.open_storage_table(def)?;
             let mut data = Vec::with_capacity(num_subvectors * 256 * sub_dim);
             for m in 0..num_subvectors {
                 #[allow(clippy::cast_possible_truncation)]
-                let guard = table.get(m as u32)?.ok_or_else(|| {
-                    TableError::Storage(StorageError::Corrupted(alloc::format!(
-                        "IVF-PQ '{name}': missing codebook {m}",
-                    )))
+                let guard = table.st_get(&(m as u32))?.ok_or_else(|| {
+                    StorageError::Corrupted(
+                        alloc::format!("IVF-PQ '{name}': missing codebook {m}",),
+                    )
                 })?;
                 data.extend_from_slice(&Codebooks::deserialize_codebook(guard.value(), sub_dim));
             }
@@ -835,9 +834,9 @@ impl ReadOnlyIvfPqIndex {
     }
 
     /// Search for approximate nearest neighbors.
-    pub fn search(
+    pub fn search<R: StorageRead>(
         &self,
-        txn: &ReadTransaction,
+        txn: &R,
         query: &[f32],
         params: &SearchParams,
     ) -> crate::Result<Vec<Neighbor<u64>>> {
@@ -889,11 +888,12 @@ impl ReadOnlyIvfPqIndex {
         {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
-            let table = txn.open_table(def).map_err(te)?;
+            let table = txn.open_storage_table(def)?;
             for &(cid, _) in &probes {
-                let range =
-                    table.range(PostingKey::cluster_start(cid)..=PostingKey::cluster_end(cid))?;
-                for entry in range {
+                let start = PostingKey::cluster_start(cid);
+                let end = PostingKey::cluster_end(cid);
+                let range_iter = table.st_range(Some(&start), Some(&end), true, true)?;
+                for entry in range_iter {
                     let (kg, vg) = entry?;
                     heap.push(kg.value().vector_id, adc.approximate_distance(vg.value()));
                 }
@@ -903,13 +903,13 @@ impl ReadOnlyIvfPqIndex {
         if params.rerank && self.config.store_raw_vectors {
             let tn = vectors_name(&self.name);
             let def = TableDefinition::<u64, &[u8]>::new(&tn);
-            let table = txn.open_table(def).map_err(te)?;
+            let table = txn.open_storage_table(def)?;
             let metric = self.config.metric;
 
             let sorted = heap.into_sorted();
             let mut results: Vec<Neighbor<u64>> = Vec::with_capacity(sorted.len());
             for cand in &sorted {
-                if let Some(guard) = table.get(cand.key)? {
+                if let Some(guard) = table.st_get(&cand.key)? {
                     let vec = bytes_to_f32_vec(guard.value());
                     results.push(Neighbor {
                         key: cand.key,

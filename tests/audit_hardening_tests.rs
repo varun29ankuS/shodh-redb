@@ -863,7 +863,10 @@ fn byte_slice_empty_key_and_value() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(TABLE).unwrap();
-    assert_eq!(table.get([].as_slice()).unwrap().unwrap().value(), &[]);
+    assert_eq!(
+        table.get([].as_slice()).unwrap().unwrap().value(),
+        &[] as &[u8]
+    );
     assert_eq!(
         table.get([1u8, 2, 3].as_slice()).unwrap().unwrap().value(),
         &[4u8, 5, 6]

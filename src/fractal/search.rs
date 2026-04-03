@@ -5,8 +5,7 @@ use core::cmp::Ordering as CmpOrdering;
 use crate::TableDefinition;
 use crate::error::StorageError;
 use crate::probe_select::DiversityConfig;
-use crate::table::ReadableTable;
-use crate::transactions::{ReadTransaction, WriteTransaction};
+use crate::storage_traits::{ReadTable, StorageRead, StorageWrite, WriteTable};
 use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
 
 use crate::ivfpq::adc::AdcTable;
@@ -16,11 +15,6 @@ use super::cluster::TableNames;
 use super::config::FractalSearchParams;
 use super::index::{FractalIndex, ReadOnlyFractalIndex};
 use super::types::{ClusterMeta, HierarchyKey};
-
-/// Convert a `TableError` to `StorageError`.
-fn te(e: crate::error::TableError) -> StorageError {
-    e.into_storage_error_or_corrupted("fractal search internal table error")
-}
 
 /// Safely read a little-endian `f32` from `data` at `offset`.
 /// Returns `0.0` if the slice is out of bounds or not exactly 4 bytes.
@@ -114,8 +108,8 @@ impl CandidateHeap {
 // Search implementation -- write transaction path
 // ---------------------------------------------------------------------------
 
-pub(crate) fn search_write(
-    idx: &mut FractalIndex<'_>,
+pub(crate) fn search_write<T: StorageWrite>(
+    idx: &mut FractalIndex<'_, T>,
     query: &[f32],
     params: &FractalSearchParams,
 ) -> crate::Result<Vec<Neighbor<u64>>> {
@@ -165,13 +159,14 @@ pub(crate) fn search_write(
     let postings_def = TableDefinition::<PostingKey, &[u8]>::new(&idx.names.postings);
     let buffer_def = TableDefinition::<PostingKey, &[u8]>::new(&idx.names.buffer);
 
-    let ptbl = idx.txn.open_table(postings_def).map_err(te)?;
-    let btbl = idx.txn.open_table(buffer_def).map_err(te)?;
+    let ptbl = idx.txn.open_storage_table(postings_def)?;
+    let btbl = idx.txn.open_storage_table(buffer_def)?;
 
     for leaf_id in &leaves {
         // Scan posting list with ADC
-        let range =
-            ptbl.range(PostingKey::cluster_start(*leaf_id)..=PostingKey::cluster_end(*leaf_id))?;
+        let start = PostingKey::cluster_start(*leaf_id);
+        let end = PostingKey::cluster_end(*leaf_id);
+        let range = ptbl.st_range(Some(&start), Some(&end), true, true)?;
         for entry in range {
             let (key, val) = entry?;
             let vid = key.value().vector_id;
@@ -181,8 +176,7 @@ pub(crate) fn search_write(
         }
 
         // Scan buffer with exact distance
-        let brange =
-            btbl.range(PostingKey::cluster_start(*leaf_id)..=PostingKey::cluster_end(*leaf_id))?;
+        let brange = btbl.st_range(Some(&start), Some(&end), true, true)?;
         for entry in brange {
             let (key, val) = entry?;
             let vid = key.value().vector_id;
@@ -203,11 +197,11 @@ pub(crate) fn search_write(
     if params.rerank && idx.config.store_raw_vectors {
         let candidates = heap.into_sorted(params.candidates);
         let vectors_def = TableDefinition::<u64, &[u8]>::new(&idx.names.vectors);
-        let vtbl = idx.txn.open_table(vectors_def).map_err(te)?;
+        let vtbl = idx.txn.open_storage_table(vectors_def)?;
 
         let mut reranked: Vec<Neighbor<u64>> = Vec::with_capacity(candidates.len());
         for c in &candidates {
-            if let Some(g) = vtbl.get(c.key)? {
+            if let Some(g) = vtbl.st_get(&c.key)? {
                 let bytes = g.value();
                 if bytes.len() < dim * 4 {
                     reranked.push(Neighbor {
@@ -245,9 +239,9 @@ pub(crate) fn search_write(
 // Search implementation -- read transaction path
 // ---------------------------------------------------------------------------
 
-pub(crate) fn search_read(
+pub(crate) fn search_read<R: StorageRead>(
     idx: &ReadOnlyFractalIndex,
-    txn: &ReadTransaction,
+    txn: &R,
     query: &[f32],
     params: &FractalSearchParams,
 ) -> crate::Result<Vec<Neighbor<u64>>> {
@@ -290,12 +284,13 @@ pub(crate) fn search_read(
     let postings_def = TableDefinition::<PostingKey, &[u8]>::new(&idx.names.postings);
     let buffer_def = TableDefinition::<PostingKey, &[u8]>::new(&idx.names.buffer);
 
-    let ptbl = txn.open_table(postings_def).map_err(te)?;
-    let btbl = txn.open_table(buffer_def).map_err(te)?;
+    let ptbl = txn.open_storage_table(postings_def)?;
+    let btbl = txn.open_storage_table(buffer_def)?;
 
     for leaf_id in &leaves {
-        let range =
-            ptbl.range(PostingKey::cluster_start(*leaf_id)..=PostingKey::cluster_end(*leaf_id))?;
+        let start = PostingKey::cluster_start(*leaf_id);
+        let end = PostingKey::cluster_end(*leaf_id);
+        let range = ptbl.st_range(Some(&start), Some(&end), true, true)?;
         for entry in range {
             let (key, val) = entry?;
             let vid = key.value().vector_id;
@@ -304,8 +299,7 @@ pub(crate) fn search_read(
             heap.push(vid, dist);
         }
 
-        let brange =
-            btbl.range(PostingKey::cluster_start(*leaf_id)..=PostingKey::cluster_end(*leaf_id))?;
+        let brange = btbl.st_range(Some(&start), Some(&end), true, true)?;
         for entry in brange {
             let (key, val) = entry?;
             let vid = key.value().vector_id;
@@ -325,11 +319,11 @@ pub(crate) fn search_read(
     if params.rerank && idx.config.store_raw_vectors {
         let candidates = heap.into_sorted(params.candidates);
         let vectors_def = TableDefinition::<u64, &[u8]>::new(&idx.names.vectors);
-        let vtbl = txn.open_table(vectors_def).map_err(te)?;
+        let vtbl = txn.open_storage_table(vectors_def)?;
 
         let mut reranked: Vec<Neighbor<u64>> = Vec::with_capacity(candidates.len());
         for c in &candidates {
-            if let Some(g) = vtbl.get(c.key)? {
+            if let Some(g) = vtbl.st_get(&c.key)? {
                 let bytes = g.value();
                 if bytes.len() < dim * 4 {
                     reranked.push(Neighbor {
@@ -370,8 +364,8 @@ pub(crate) fn search_read(
 /// Beam search: walk the cluster tree from root to leaves, selecting the
 /// best `nprobe` children at each internal level.
 #[allow(clippy::too_many_arguments)]
-fn beam_search_leaves_write(
-    txn: &WriteTransaction,
+fn beam_search_leaves_write<T: StorageWrite>(
+    txn: &T,
     names: &TableNames,
     config: &super::config::FractalIndexConfig,
     root: u32,
@@ -404,8 +398,8 @@ fn beam_search_leaves_write(
 
         for &node_id in &current_level {
             let meta = {
-                let ctbl = txn.open_table(clusters_def).map_err(te)?;
-                match ctbl.get(node_id)? {
+                let ctbl = txn.open_storage_table(clusters_def)?;
+                match ctbl.st_get(&node_id)? {
                     Some(g) => ClusterMeta::from_bytes(g.value()),
                     None => continue,
                 }
@@ -421,13 +415,13 @@ fn beam_search_leaves_write(
             }
 
             // Internal: collect children with distances
-            let htbl = txn.open_table(hier_def).map_err(te)?;
-            let ctbl = txn.open_table(centroids_def).map_err(te)?;
-            let cltbl = txn.open_table(clusters_def).map_err(te)?;
+            let htbl = txn.open_storage_table(hier_def)?;
+            let ctbl = txn.open_storage_table(centroids_def)?;
+            let cltbl = txn.open_storage_table(clusters_def)?;
 
-            let range = htbl.range(
-                HierarchyKey::children_start(node_id)..=HierarchyKey::children_end(node_id),
-            )?;
+            let hstart = HierarchyKey::children_start(node_id);
+            let hend = HierarchyKey::children_end(node_id);
+            let range = htbl.st_range(Some(&hstart), Some(&hend), true, true)?;
 
             for entry in range {
                 let (key, _) = entry?;
@@ -435,7 +429,7 @@ fn beam_search_leaves_write(
 
                 // Temporal filter on child
                 if min_hlc > 0
-                    && let Some(cg) = cltbl.get(child_id)?
+                    && let Some(cg) = cltbl.st_get(&child_id)?
                 {
                     let child_meta = ClusterMeta::from_bytes(cg.value());
                     if child_meta.newest_hlc() > 0 && child_meta.newest_hlc() < min_hlc {
@@ -443,7 +437,7 @@ fn beam_search_leaves_write(
                     }
                 }
 
-                if let Some(cg) = ctbl.get(child_id)? {
+                if let Some(cg) = ctbl.st_get(&child_id)? {
                     let bytes = cg.value();
                     if bytes.len() < dim * 4 {
                         continue;
@@ -505,8 +499,8 @@ fn beam_search_leaves_write(
 
 /// Beam search for read transactions (same logic, different table access).
 #[allow(clippy::too_many_arguments)]
-fn beam_search_leaves_read(
-    txn: &ReadTransaction,
+fn beam_search_leaves_read<R: StorageRead>(
+    txn: &R,
     names: &TableNames,
     config: &super::config::FractalIndexConfig,
     root: u32,
@@ -538,8 +532,8 @@ fn beam_search_leaves_read(
 
         for &node_id in &current_level {
             let meta = {
-                let ctbl = txn.open_table(clusters_def).map_err(te)?;
-                match ctbl.get(node_id)? {
+                let ctbl = txn.open_storage_table(clusters_def)?;
+                match ctbl.st_get(&node_id)? {
                     Some(g) => ClusterMeta::from_bytes(g.value()),
                     None => continue,
                 }
@@ -553,20 +547,20 @@ fn beam_search_leaves_read(
                 continue;
             }
 
-            let htbl = txn.open_table(hier_def).map_err(te)?;
-            let ctbl = txn.open_table(centroids_def).map_err(te)?;
-            let cltbl = txn.open_table(clusters_def).map_err(te)?;
+            let htbl = txn.open_storage_table(hier_def)?;
+            let ctbl = txn.open_storage_table(centroids_def)?;
+            let cltbl = txn.open_storage_table(clusters_def)?;
 
-            let range = htbl.range(
-                HierarchyKey::children_start(node_id)..=HierarchyKey::children_end(node_id),
-            )?;
+            let hstart = HierarchyKey::children_start(node_id);
+            let hend = HierarchyKey::children_end(node_id);
+            let range = htbl.st_range(Some(&hstart), Some(&hend), true, true)?;
 
             for entry in range {
                 let (key, _) = entry?;
                 let child_id = key.value().child_id;
 
                 if min_hlc > 0
-                    && let Some(cg) = cltbl.get(child_id)?
+                    && let Some(cg) = cltbl.st_get(&child_id)?
                 {
                     let child_meta = ClusterMeta::from_bytes(cg.value());
                     if child_meta.newest_hlc() > 0 && child_meta.newest_hlc() < min_hlc {
@@ -574,7 +568,7 @@ fn beam_search_leaves_read(
                     }
                 }
 
-                if let Some(cg) = ctbl.get(child_id)? {
+                if let Some(cg) = ctbl.st_get(&child_id)? {
                     let bytes = cg.value();
                     if bytes.len() < dim * 4 {
                         continue;

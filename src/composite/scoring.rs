@@ -1,7 +1,8 @@
-use crate::ReadTransaction;
 use crate::blob_store::types::BlobId;
 use crate::compat::HashMap;
 use alloc::collections::VecDeque;
+
+use super::provider::BlobQueryProvider;
 
 /// Compute `numerator / denominator` as an f64 in [0.0, 1.0] without lossy
 /// casts on the u64 inputs. Scales the ratio into u32 via u128 arithmetic,
@@ -105,8 +106,8 @@ pub(crate) fn normalize_causal(hop_distances: &HashMap<BlobId, u32>) -> HashMap<
 /// in `BlobMeta`) to discover the full causal neighborhood.
 ///
 /// Returns `HashMap<BlobId, u32>` where the root has distance 0.
-pub(crate) fn causal_bfs(
-    txn: &ReadTransaction,
+pub(crate) fn causal_bfs<P: BlobQueryProvider>(
+    provider: &P,
     root: &BlobId,
     max_hops: usize,
 ) -> crate::Result<HashMap<BlobId, u32>> {
@@ -123,7 +124,7 @@ pub(crate) fn causal_bfs(
         }
 
         // Forward: children of current
-        let children = txn.causal_children(&current)?;
+        let children = provider.causal_children(&current).map_err(Into::into)?;
         for edge in &children {
             if !distances.contains_key(&edge.child) {
                 let new_depth = depth + 1;
@@ -133,7 +134,7 @@ pub(crate) fn causal_bfs(
         }
 
         // Backward: parent of current
-        if let Some(meta) = txn.get_blob_meta(&current)?
+        if let Some(meta) = provider.get_blob_meta(&current).map_err(Into::into)?
             && let Some(parent) = meta.causal_parent
             && !distances.contains_key(&parent)
         {

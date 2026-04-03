@@ -25,7 +25,7 @@ use crate::types::{Key, Value};
 
 use super::adapter::BfTreeAdapter;
 use super::buffered_txn::{BufferLookup, WriteBuffer};
-use super::database::{encode_table_key, table_prefix, table_prefix_end};
+use super::database::{TableKind, encode_table_key, table_prefix, table_prefix_end};
 use super::error::BfTreeError;
 
 const EXPIRY_HEADER_SIZE: usize = 8;
@@ -151,7 +151,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let val_bytes = V::as_bytes(value);
-        let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
+        let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
         let wrapped = encode_ttl_value(expires_at_ms, val_bytes.as_ref());
 
         let mut buffer = self.buffer.lock().unwrap();
@@ -167,7 +167,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
     /// Get a value, returning `None` if expired or absent.
     pub fn get(&self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
+        let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
         let buffer = self.buffer.lock().unwrap();
         let raw = self.read_raw_locked(&buffer, &encoded_key)?;
@@ -179,7 +179,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
     /// Get the expiry timestamp (ms since epoch) for a key, or `None` if absent.
     pub fn expires_at_ms(&self, key: &K::SelfType<'_>) -> Result<Option<u64>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
+        let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
         let buffer = self.buffer.lock().unwrap();
         let raw = self.read_raw_locked(&buffer, &encoded_key)?;
@@ -191,7 +191,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
     /// Remove a key, returning the previous non-expired value if any.
     pub fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
+        let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
         let mut buffer = self.buffer.lock().unwrap();
         let previous_raw = self.read_raw_locked(&buffer, &encoded_key)?;
@@ -219,8 +219,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
     /// before tombstoning, closing the TOCTOU window for entries that were
     /// updated or removed after the scan.
     pub fn purge_expired(&mut self) -> Result<u64, BfTreeError> {
-        let prefix = table_prefix(&self.name);
-        let prefix_end = table_prefix_end(&self.name);
+        let prefix = table_prefix(&self.name, TableKind::Ttl);
+        let prefix_end = table_prefix_end(&self.name, TableKind::Ttl);
         let max_record_size = self.adapter.inner().config().get_cb_max_record_size();
 
         // Phase 1: Collect all BfTree key candidates (scan must complete before
@@ -355,7 +355,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTtlTable<'txn, K,
     /// Get a value, returning `None` if expired or absent.
     pub fn get(&self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
+        let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.adapter.read(&encoded_key, &mut buf) {
@@ -376,7 +376,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTtlTable<'txn, K,
     /// Get the expiry timestamp (ms since epoch) for a key.
     pub fn expires_at_ms(&self, key: &K::SelfType<'_>) -> Result<Option<u64>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
+        let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.adapter.read(&encoded_key, &mut buf) {

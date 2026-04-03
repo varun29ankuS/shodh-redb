@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! Composite BfTree key:
-//!   [table_prefix][user_key_len: u32 LE][user_key_bytes][value_bytes]
+//!   [table_name_len: u16 LE][table_name][0x01 kind][user_key_len: u32 LE][user_key_bytes][value_bytes]
 //!
 //! BfTree value: empty []
 //! ```
@@ -25,7 +25,12 @@ use crate::types::Key;
 
 use super::adapter::BfTreeAdapter;
 use super::buffered_txn::{BufferLookup, WriteBuffer};
+use super::database::TableKind;
 use super::error::BfTreeError;
+
+/// The discriminator byte for multimap tables, used in the key encoding to
+/// prevent namespace collisions with regular and TTL tables.
+const MULTIMAP_KIND: u8 = TableKind::Multimap as u8;
 
 // ---------------------------------------------------------------------------
 // Composite key encoding
@@ -33,16 +38,17 @@ use super::error::BfTreeError;
 
 /// Encode a full `BfTree` key for a multimap entry.
 ///
-/// Format: `[table_name_len: u16 LE][table_name][user_key_len: u32 LE][user_key][value_key]`
+/// Format: `[table_name_len: u16 LE][table_name][0x01 kind][user_key_len: u32 LE][user_key][value_key]`
 fn encode_multimap_key(table_name: &str, user_key: &[u8], value_key: &[u8]) -> Vec<u8> {
     let tbl = table_name.as_bytes();
     let tbl_len = u16::try_from(tbl.len()).expect("table name exceeds u16::MAX bytes");
     let uk_len = u32::try_from(user_key.len()).expect("user key exceeds u32::MAX bytes");
 
-    let total = 2 + tbl.len() + 4 + user_key.len() + value_key.len();
+    let total = 2 + tbl.len() + 1 + 4 + user_key.len() + value_key.len();
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&tbl_len.to_le_bytes());
     buf.extend_from_slice(tbl);
+    buf.push(MULTIMAP_KIND);
     buf.extend_from_slice(&uk_len.to_le_bytes());
     buf.extend_from_slice(user_key);
     buf.extend_from_slice(value_key);
@@ -51,16 +57,17 @@ fn encode_multimap_key(table_name: &str, user_key: &[u8], value_key: &[u8]) -> V
 
 /// Compute the `BfTree` key prefix for all values of a user key.
 ///
-/// Format: `[table_name_len: u16 LE][table_name][user_key_len: u32 LE][user_key]`
+/// Format: `[table_name_len: u16 LE][table_name][0x01 kind][user_key_len: u32 LE][user_key]`
 fn multimap_key_prefix(table_name: &str, user_key: &[u8]) -> Vec<u8> {
     let tbl = table_name.as_bytes();
     let tbl_len = u16::try_from(tbl.len()).expect("table name exceeds u16::MAX bytes");
     let uk_len = u32::try_from(user_key.len()).expect("user key exceeds u32::MAX bytes");
 
-    let total = 2 + tbl.len() + 4 + user_key.len();
+    let total = 2 + tbl.len() + 1 + 4 + user_key.len();
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&tbl_len.to_le_bytes());
     buf.extend_from_slice(tbl);
+    buf.push(MULTIMAP_KIND);
     buf.extend_from_slice(&uk_len.to_le_bytes());
     buf.extend_from_slice(user_key);
     buf
@@ -85,28 +92,30 @@ fn increment_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
 /// Compute the exclusive upper bound for scanning all values of a given user
 /// key in a multimap table.
 ///
-/// The prefix format is `[tbl_len: u16 LE][tbl][uk_len: u32 LE][user_key]`.
+/// The prefix format is `[tbl_len: u16 LE][tbl][0x01 kind][uk_len: u32 LE][user_key]`.
 /// When `increment_prefix` overflows (all-0xFF prefix), we fall back to the
 /// table-level prefix end. This is safe because all multimap entries for a
-/// given table share the same table prefix, so using the table boundary as
-/// the upper bound will never miss entries and never include entries from a
-/// different table.
+/// given table share the same table prefix with the multimap discriminator,
+/// so using the table+kind boundary as the upper bound will never miss
+/// entries and never include entries from a different table type.
 fn multimap_scan_end(table_name: &str, user_key: &[u8]) -> Vec<u8> {
     let prefix = multimap_key_prefix(table_name, user_key);
     if let Some(end) = increment_prefix(&prefix) {
         return end;
     }
-    // All bytes in the prefix are 0xFF. Use the table-level prefix end as the
-    // upper bound. This is always correct because every multimap entry for
-    // this table starts with the same [tbl_len][tbl] prefix.
+    // All bytes in the prefix are 0xFF. Use the table-level prefix end
+    // (including the multimap kind discriminator) as the upper bound. This
+    // is always correct because every multimap entry for this table starts
+    // with the same [tbl_len][tbl][0x01] prefix.
     let tbl = table_name.as_bytes();
     let tbl_len = u16::try_from(tbl.len()).expect("table name exceeds u16::MAX bytes");
-    let mut tbl_prefix = Vec::with_capacity(2 + tbl.len());
+    let mut tbl_prefix = Vec::with_capacity(2 + tbl.len() + 1);
     tbl_prefix.extend_from_slice(&tbl_len.to_le_bytes());
     tbl_prefix.extend_from_slice(tbl);
-    // Increment the table prefix as a big-endian integer. If even that
-    // overflows (table name is all 0xFF and length bytes are 0xFF), append
-    // 0xFF to form a lexicographically larger bound.
+    tbl_prefix.push(MULTIMAP_KIND);
+    // Increment the table+kind prefix as a big-endian integer. If even that
+    // overflows (table name is all 0xFF, length bytes are 0xFF, and kind is
+    // 0xFF), append 0xFF to form a lexicographically larger bound.
     if let Some(end) = increment_prefix(&tbl_prefix) {
         end
     } else {

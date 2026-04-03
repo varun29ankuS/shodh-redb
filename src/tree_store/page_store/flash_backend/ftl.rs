@@ -478,6 +478,18 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         }
 
         state.logical_len = len;
+
+        // Persist the updated block map and logical length to the journal so
+        // the truncation survives power loss. Without this, a crash after
+        // set_len() would restore the old mapping on mount.
+        let metadata = Self::serialize_metadata_inner(&state);
+        let FtlState {
+            ref hw,
+            ref mut journal,
+            ..
+        } = *state;
+        journal.commit(hw, &metadata)?;
+
         Ok(())
     }
 

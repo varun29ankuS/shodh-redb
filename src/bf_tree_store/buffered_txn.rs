@@ -18,7 +18,7 @@ use crate::storage_traits::OwnedKv;
 use crate::types::{Key, Value};
 
 use super::adapter::BfTreeAdapter;
-use super::database::{BfTreeTableScan, table_prefix, table_prefix_end};
+use super::database::{BfTreeTableScan, TableKind, table_prefix, table_prefix_end};
 use super::error::BfTreeError;
 
 // ---------------------------------------------------------------------------
@@ -438,10 +438,11 @@ impl<K: Key + 'static, V: Value + 'static> Iterator for BufferedScanIter<'_, K, 
 pub(crate) fn collect_buffer_entries_for_table(
     buffer: &WriteBuffer,
     table_name: &str,
+    kind: TableKind,
     start_encoded: &[u8],
     end_encoded: &[u8],
 ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-    let prefix = table_prefix(table_name);
+    let prefix = table_prefix(table_name, kind);
     let prefix_len = prefix.len();
 
     buffer
@@ -462,10 +463,11 @@ pub(crate) fn collect_buffer_entries_for_table(
 pub(crate) fn collect_all_buffer_entries_for_table(
     buffer: &WriteBuffer,
     table_name: &str,
+    kind: TableKind,
 ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-    let prefix = table_prefix(table_name);
-    let prefix_end = table_prefix_end(table_name);
-    collect_buffer_entries_for_table(buffer, table_name, &prefix, &prefix_end)
+    let prefix = table_prefix(table_name, kind);
+    let prefix_end = table_prefix_end(table_name, kind);
+    collect_buffer_entries_for_table(buffer, table_name, kind, &prefix, &prefix_end)
 }
 
 // ---------------------------------------------------------------------------
@@ -477,7 +479,7 @@ mod tests {
     use super::*;
     use crate::TableDefinition;
     use crate::bf_tree_store::config::BfTreeConfig;
-    use crate::bf_tree_store::database::{BfTreeDatabase, encode_table_key};
+    use crate::bf_tree_store::database::{BfTreeDatabase, TableKind, encode_table_key};
     use crate::storage_traits::WriteTable;
 
     const ITEMS: TableDefinition<&str, u64> = TableDefinition::new("items");
@@ -521,8 +523,8 @@ mod tests {
         let adapter = db.adapter();
 
         let mut buf = WriteBuffer::new();
-        let key1 = encode_table_key("test", b"k1");
-        let key2 = encode_table_key("test", b"k2");
+        let key1 = encode_table_key("test", TableKind::Regular, b"k1");
+        let key2 = encode_table_key("test", TableKind::Regular, b"k2");
         buf.put(key1.clone(), b"v1".to_vec());
         buf.put(key2.clone(), b"v2".to_vec());
 
@@ -541,7 +543,7 @@ mod tests {
         let adapter = db.adapter();
 
         let mut buf = WriteBuffer::new();
-        let key = encode_table_key("test", b"k1");
+        let key = encode_table_key("test", TableKind::Regular, b"k1");
         buf.put(key.clone(), b"val".to_vec());
         buf.discard();
 
@@ -559,7 +561,7 @@ mod tests {
         let adapter = db.adapter();
 
         // Pre-populate BfTree.
-        let key = encode_table_key("test", b"existing");
+        let key = encode_table_key("test", TableKind::Regular, b"existing");
         adapter.insert(&key, b"old_val").unwrap();
 
         // Buffer a delete for the existing key.

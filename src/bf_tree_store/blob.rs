@@ -34,7 +34,7 @@ use crate::temporal::HybridLogicalClock;
 
 use super::adapter::BfTreeAdapter;
 use super::buffered_txn::WriteBuffer;
-use super::database::{encode_table_key, table_prefix, table_prefix_end};
+use super::database::{TableKind, encode_table_key, table_prefix, table_prefix_end};
 use super::error::BfTreeError;
 
 // ---------------------------------------------------------------------------
@@ -77,42 +77,42 @@ fn encode_chunk_key(blob_id: BlobId, chunk_idx: u32) -> Vec<u8> {
     let mut key_bytes = Vec::with_capacity(BlobId::SERIALIZED_SIZE + 4);
     key_bytes.extend_from_slice(&blob_id.to_le_bytes());
     key_bytes.extend_from_slice(&chunk_idx.to_le_bytes());
-    encode_table_key(BLOB_DATA_TABLE, &key_bytes)
+    encode_table_key(BLOB_DATA_TABLE, TableKind::Regular, &key_bytes)
 }
 
 /// Encode a blob metadata key.
 fn encode_meta_key(blob_id: BlobId) -> Vec<u8> {
-    encode_table_key(BLOB_META_TABLE, &blob_id.to_le_bytes())
+    encode_table_key(BLOB_META_TABLE, TableKind::Regular, &blob_id.to_le_bytes())
 }
 
 /// Encode a dedup index key.
 fn encode_dedup_key(sha256: &Sha256Key) -> Vec<u8> {
-    encode_table_key(BLOB_DEDUP_TABLE, &sha256.0)
+    encode_table_key(BLOB_DEDUP_TABLE, TableKind::Regular, &sha256.0)
 }
 
 /// Encode a temporal index key.
 fn encode_temporal_key(tk: &TemporalKey) -> Vec<u8> {
-    encode_table_key(BLOB_TEMPORAL_TABLE, &tk.to_le_bytes())
+    encode_table_key(BLOB_TEMPORAL_TABLE, TableKind::Regular, &tk.to_le_bytes())
 }
 
 /// Encode a causal edge key.
 fn encode_causal_key(cek: &CausalEdgeKey) -> Vec<u8> {
-    encode_table_key(BLOB_CAUSAL_TABLE, &cek.to_le_bytes())
+    encode_table_key(BLOB_CAUSAL_TABLE, TableKind::Regular, &cek.to_le_bytes())
 }
 
 /// Encode a tag index key.
 fn encode_tag_key(tk: &TagKey) -> Vec<u8> {
-    encode_table_key(BLOB_TAG_TABLE, &tk.to_le_bytes())
+    encode_table_key(BLOB_TAG_TABLE, TableKind::Regular, &tk.to_le_bytes())
 }
 
 /// Encode a namespace index key.
 fn encode_ns_key(nk: &NamespaceKey) -> Vec<u8> {
-    encode_table_key(BLOB_NS_TABLE, &nk.to_le_bytes())
+    encode_table_key(BLOB_NS_TABLE, TableKind::Regular, &nk.to_le_bytes())
 }
 
 /// Encode the sequence counter key.
 fn encode_seq_key() -> Vec<u8> {
-    encode_table_key(BLOB_SEQ_TABLE, SEQ_KEY)
+    encode_table_key(BLOB_SEQ_TABLE, TableKind::Regular, SEQ_KEY)
 }
 
 // ---------------------------------------------------------------------------
@@ -525,8 +525,8 @@ impl<'txn> BfTreeBlobStore<'txn> {
     ///
     /// Buffer-aware: sees blobs stored in the current transaction before commit.
     pub fn list_temporal(&self, limit: usize) -> Result<Vec<(BlobId, BlobMeta)>, BfTreeError> {
-        let prefix = table_prefix(BLOB_META_TABLE);
-        let prefix_end = table_prefix_end(BLOB_META_TABLE);
+        let prefix = table_prefix(BLOB_META_TABLE, TableKind::Regular);
+        let prefix_end = table_prefix_end(BLOB_META_TABLE, TableKind::Regular);
         let prefix_len = prefix.len();
 
         let entries =
@@ -564,7 +564,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let end = TagKey::range_end(tag);
         let start_encoded = encode_tag_key(&start);
         let end_encoded = encode_tag_key(&end);
-        let prefix_len = table_prefix(BLOB_TAG_TABLE).len();
+        let prefix_len = table_prefix(BLOB_TAG_TABLE, TableKind::Regular).len();
 
         let entries = scan_range_buffered(
             self.buffer,
@@ -593,7 +593,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let end = NamespaceKey::range_end(namespace);
         let start_encoded = encode_ns_key(&start);
         let end_encoded = encode_ns_key(&end);
-        let prefix_len = table_prefix(BLOB_NS_TABLE).len();
+        let prefix_len = table_prefix(BLOB_NS_TABLE, TableKind::Regular).len();
 
         let entries = scan_range_buffered(
             self.buffer,
@@ -625,7 +625,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let end = CausalEdgeKey::new(parent, BlobId::MAX);
         let start_encoded = encode_causal_key(&start);
         let end_encoded = encode_causal_key(&end);
-        let prefix_len = table_prefix(BLOB_CAUSAL_TABLE).len();
+        let prefix_len = table_prefix(BLOB_CAUSAL_TABLE, TableKind::Regular).len();
 
         let entries = scan_range_buffered(
             self.buffer,
@@ -738,8 +738,8 @@ impl<'txn> BfTreeBlobStore<'txn> {
     // -----------------------------------------------------------------------
 
     fn delete_tags_for_blob(&self, buf: &mut WriteBuffer, blob_id: BlobId) {
-        let prefix = table_prefix(BLOB_TAG_TABLE);
-        let prefix_end = table_prefix_end(BLOB_TAG_TABLE);
+        let prefix = table_prefix(BLOB_TAG_TABLE, TableKind::Regular);
+        let prefix_end = table_prefix_end(BLOB_TAG_TABLE, TableKind::Regular);
         let prefix_len = prefix.len();
 
         // Scan committed BfTree entries.
@@ -791,8 +791,8 @@ impl<'txn> BfTreeBlobStore<'txn> {
     }
 
     fn delete_ns_for_blob(&self, buf: &mut WriteBuffer, blob_id: BlobId) {
-        let prefix = table_prefix(BLOB_NS_TABLE);
-        let prefix_end = table_prefix_end(BLOB_NS_TABLE);
+        let prefix = table_prefix(BLOB_NS_TABLE, TableKind::Regular);
+        let prefix_end = table_prefix_end(BLOB_NS_TABLE, TableKind::Regular);
         let prefix_len = prefix.len();
 
         // Scan committed BfTree entries.
@@ -1271,7 +1271,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let end = TagKey::range_end(tag);
         let start_encoded = encode_tag_key(&start);
         let end_encoded = encode_tag_key(&end);
-        let prefix_len = table_prefix(BLOB_TAG_TABLE).len();
+        let prefix_len = table_prefix(BLOB_TAG_TABLE, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
@@ -1297,7 +1297,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let end = CausalEdgeKey::new(parent, BlobId::MAX);
         let start_encoded = encode_causal_key(&start);
         let end_encoded = encode_causal_key(&end);
-        let prefix_len = table_prefix(BLOB_CAUSAL_TABLE).len();
+        let prefix_len = table_prefix(BLOB_CAUSAL_TABLE, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
@@ -1327,7 +1327,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let end_id = BlobId::new(seq, u64::MAX);
         let start_key = encode_meta_key(start_id);
         let end_key = encode_meta_key(end_id);
-        let prefix_len = table_prefix(BLOB_META_TABLE).len();
+        let prefix_len = table_prefix(BLOB_META_TABLE, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_key, &end_key)?;
@@ -1365,7 +1365,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let end_tk = TemporalKey::range_end(end_ns);
         let start_encoded = encode_temporal_key(&start_tk);
         let end_encoded = encode_temporal_key(&end_tk);
-        let prefix_len = table_prefix(BLOB_TEMPORAL_TABLE).len();
+        let prefix_len = table_prefix(BLOB_TEMPORAL_TABLE, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
@@ -1399,7 +1399,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let end = NamespaceKey::range_end(namespace);
         let start_encoded = encode_ns_key(&start);
         let end_encoded = encode_ns_key(&end);
-        let prefix_len = table_prefix(BLOB_NS_TABLE).len();
+        let prefix_len = table_prefix(BLOB_NS_TABLE, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;

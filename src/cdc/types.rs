@@ -76,8 +76,8 @@ pub(crate) struct CdcEvent {
 
 /// Key for the CDC log system table.
 ///
-/// Encoded as 12 bytes little-endian: `[transaction_id: u64][sequence: u32]`.
-/// Ordering is handled by the [`Key::compare`] implementation.
+/// Encoded as 12 bytes big-endian: `[transaction_id: u64][sequence: u32]`.
+/// Big-endian ensures lexicographic byte order matches numeric order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct CdcKey {
     pub transaction_id: u64,
@@ -94,24 +94,32 @@ impl CdcKey {
         }
     }
 
-    pub(crate) fn to_le_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
+    #[allow(clippy::big_endian_bytes)]
+    pub(crate) fn to_be_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
         let mut buf = [0u8; Self::SERIALIZED_SIZE];
-        buf[..8].copy_from_slice(&self.transaction_id.to_le_bytes());
-        buf[8..12].copy_from_slice(&self.sequence.to_le_bytes());
+        buf[..8].copy_from_slice(&self.transaction_id.to_be_bytes());
+        buf[8..12].copy_from_slice(&self.sequence.to_be_bytes());
         buf
     }
 
-    pub(crate) fn from_le_bytes(data: &[u8]) -> Self {
+    #[allow(clippy::big_endian_bytes)]
+    pub(crate) fn from_be_bytes(data: &[u8]) -> Self {
+        debug_assert!(
+            data.len() >= Self::SERIALIZED_SIZE,
+            "CdcKey::from_be_bytes: truncated data ({} < {})",
+            data.len(),
+            Self::SERIALIZED_SIZE,
+        );
         if data.len() < Self::SERIALIZED_SIZE {
             return Self {
                 transaction_id: 0,
                 sequence: 0,
             };
         }
-        let transaction_id = u64::from_le_bytes([
+        let transaction_id = u64::from_be_bytes([
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);
-        let sequence = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        let sequence = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
         Self {
             transaction_id,
             sequence,
@@ -151,14 +159,14 @@ impl Value for CdcKey {
     where
         Self: 'a,
     {
-        Self::from_le_bytes(data)
+        Self::from_be_bytes(data)
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b,
     {
-        value.to_le_bytes()
+        value.to_be_bytes()
     }
 
     fn type_name() -> TypeName {
@@ -168,9 +176,11 @@ impl Value for CdcKey {
 
 impl Key for CdcKey {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let a = Self::from_le_bytes(data1);
-        let b = Self::from_le_bytes(data2);
-        a.cmp(&b)
+        // Big-endian serialization means raw byte comparison is correct.
+        let len = Self::SERIALIZED_SIZE.min(data1.len()).min(data2.len());
+        data1[..len]
+            .cmp(&data2[..len])
+            .then_with(|| data1.len().cmp(&data2.len()))
     }
 }
 
@@ -478,8 +488,8 @@ mod tests {
     #[test]
     fn cdc_key_round_trip() {
         let key = CdcKey::new(42, 7);
-        let bytes = key.to_le_bytes();
-        let decoded = CdcKey::from_le_bytes(&bytes);
+        let bytes = key.to_be_bytes();
+        let decoded = CdcKey::from_be_bytes(&bytes);
         assert_eq!(key, decoded);
     }
 
@@ -491,12 +501,24 @@ mod tests {
         assert!(a < b);
         assert!(b < c);
 
-        // Key::compare handles ordering via deserialization
-        let ab = a.to_le_bytes();
-        let bb = b.to_le_bytes();
-        let cb = c.to_le_bytes();
+        // Big-endian: raw byte comparison matches numeric ordering
+        let ab = a.to_be_bytes();
+        let bb = b.to_be_bytes();
+        let cb = c.to_be_bytes();
         assert_eq!(CdcKey::compare(&ab, &bb), core::cmp::Ordering::Less);
         assert_eq!(CdcKey::compare(&bb, &cb), core::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn cdc_key_be_ordering_across_byte_boundary() {
+        // Regression: LE encoding caused txn_id=256 to sort before txn_id=1
+        let small = CdcKey::new(1, 0);
+        let large = CdcKey::new(256, 0);
+        let sb = small.to_be_bytes();
+        let lb = large.to_be_bytes();
+        assert_eq!(CdcKey::compare(&sb, &lb), core::cmp::Ordering::Less);
+        // Also verify raw lexicographic order is correct
+        assert!(sb < lb);
     }
 
     #[test]

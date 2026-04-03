@@ -116,7 +116,7 @@ mod tests {
             0.0, 0.0, 1.0, 0.0,  0.0, 1.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 1.0,  1.0, 0.0, 0.0, 0.0,
         ];
-        let codebooks = train_codebooks(&training, 8, 2, 25, DistanceMetric::EuclideanSq);
+        let codebooks = train_codebooks(&training, 8, 2, 25, DistanceMetric::EuclideanSq).unwrap();
 
         let query = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
         let adc = AdcTable::build(&query, &codebooks, DistanceMetric::EuclideanSq);
@@ -142,7 +142,7 @@ mod tests {
             5.0, 5.0,  5.0, 5.0,
             10.0, 10.0, 10.0, 10.0,
         ];
-        let codebooks = train_codebooks(&training, 4, 2, 25, DistanceMetric::EuclideanSq);
+        let codebooks = train_codebooks(&training, 4, 2, 25, DistanceMetric::EuclideanSq).unwrap();
         let query = vec![0.0, 0.0, 0.0, 0.0];
         let adc = AdcTable::build(&query, &codebooks, DistanceMetric::EuclideanSq);
 

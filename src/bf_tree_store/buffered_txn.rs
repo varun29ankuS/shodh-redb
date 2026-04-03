@@ -124,19 +124,19 @@ impl WriteBuffer {
         // partial writes. Key size validation is handled by adapter.insert() with
         // compensating rollback as a safety net.
         for (key, value) in &self.entries {
-            if let Some(val) = value {
-                if val.len() > max_record_size {
-                    return Err(BfTreeError::InvalidKV(alloc::format!(
-                        "value size {} exceeds max {}",
-                        val.len(),
-                        max_record_size
-                    )));
-                }
-                if key.is_empty() {
-                    return Err(BfTreeError::InvalidKV(alloc::string::String::from(
-                        "key must not be empty",
-                    )));
-                }
+            // Reject empty keys for both inserts and tombstones. An empty key
+            // is invalid regardless of the operation type.
+            if key.is_empty() {
+                return Err(BfTreeError::InvalidKV(alloc::string::String::from(
+                    "key must not be empty",
+                )));
+            }
+            if let Some(val) = value.as_ref().filter(|v| v.len() > max_record_size) {
+                return Err(BfTreeError::InvalidKV(alloc::format!(
+                    "value size {} exceeds max {}",
+                    val.len(),
+                    max_record_size
+                )));
             }
         }
 
@@ -148,6 +148,10 @@ impl WriteBuffer {
         let mut flushed_inserts: Vec<Vec<u8>> = Vec::new();
         let mut flushed_deletes: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
 
+        // Single reusable buffer for reading previous values before deletes,
+        // avoiding a per-delete allocation of max_record_size bytes.
+        let mut delete_read_buf = vec![0u8; max_record_size];
+
         for (key, value) in &self.entries {
             if let Some(val) = value {
                 if let Err(e) = adapter.insert(key, val) {
@@ -158,12 +162,9 @@ impl WriteBuffer {
                 flushed_inserts.push(key.clone());
             } else {
                 // Snapshot the current value before deleting for rollback.
-                let prev = {
-                    let mut buf = vec![0u8; max_record_size];
-                    match adapter.read(key, &mut buf) {
-                        Ok(len) => Some(buf[..len as usize].to_vec()),
-                        Err(_) => None,
-                    }
+                let prev = match adapter.read(key, &mut delete_read_buf) {
+                    Ok(len) => Some(delete_read_buf[..len as usize].to_vec()),
+                    Err(_) => None,
                 };
                 adapter.delete(key);
                 flushed_deletes.push((key.clone(), prev));

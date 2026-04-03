@@ -127,8 +127,8 @@ pub use ivfpq::{
     Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, ReadOnlyIvfPqIndex, SearchParams,
 };
 pub use merge::{
-    BitwiseOr, BytesAppend, FnMergeOperator, MergeOperator, NumericAdd, NumericMax, NumericMin,
-    merge_fn,
+    BitwiseOr, BytesAppend, FloatAdd, FnMergeOperator, MergeOperator, NumericAdd, NumericMax,
+    NumericMin, merge_fn,
 };
 pub use probe_select::DiversityConfig;
 pub use temporal::HybridLogicalClock;

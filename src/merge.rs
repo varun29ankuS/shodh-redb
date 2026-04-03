@@ -21,13 +21,17 @@ pub trait MergeOperator: Send + Sync {
     fn merge(&self, key: &[u8], existing: Option<&[u8]>, operand: &[u8]) -> Option<Vec<u8>>;
 }
 
-/// Adds two little-endian encoded numeric values.
+/// Adds two little-endian encoded **integer** values using wrapping arithmetic.
 ///
-/// Supports 1, 2, 4, and 8-byte widths (u8/i8 through u64/i64, f32, f64).
+/// Supports 1, 2, 4, and 8-byte widths (u8/i8 through u64/i64).
 /// If the key does not exist, the operand is used as the initial value.
 ///
 /// If `existing` and `operand` have different byte widths, the existing value
 /// is preserved unchanged (no panic).
+///
+/// **Note:** This operator performs integer wrapping addition on the raw bytes.
+/// It is not suitable for floating-point values (f32/f64). For float addition,
+/// implement a custom [`MergeOperator`] or use [`FloatAdd`].
 #[derive(Clone, Copy)]
 pub struct NumericAdd;
 
@@ -74,6 +78,56 @@ impl MergeOperator for NumericAdd {
                 let a = u64::from_le_bytes(a_bytes);
                 let b = u64::from_le_bytes(b_bytes);
                 a.wrapping_add(b).to_le_bytes().to_vec()
+            }
+            _ => return Some(existing.to_vec()),
+        };
+        Some(result)
+    }
+}
+
+/// Adds two little-endian encoded floating-point values.
+///
+/// Supports 4-byte (f32) and 8-byte (f64) widths.
+/// If the key does not exist, the operand is used as the initial value.
+///
+/// If `existing` and `operand` have different byte widths, or the width is
+/// not 4 or 8, the existing value is preserved unchanged (no panic).
+///
+/// If either operand is NaN or infinite, the result follows standard IEEE 754
+/// arithmetic rules.
+#[derive(Clone, Copy)]
+pub struct FloatAdd;
+
+impl Debug for FloatAdd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FloatAdd")
+    }
+}
+
+impl MergeOperator for FloatAdd {
+    fn merge(&self, _key: &[u8], existing: Option<&[u8]>, operand: &[u8]) -> Option<Vec<u8>> {
+        let Some(existing) = existing else {
+            return Some(operand.to_vec());
+        };
+        if existing.len() != operand.len() {
+            return Some(existing.to_vec());
+        }
+        let result = match operand.len() {
+            4 => {
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = f32::from_le_bytes(a_bytes);
+                let b = f32::from_le_bytes(b_bytes);
+                (a + b).to_le_bytes().to_vec()
+            }
+            8 => {
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = f64::from_le_bytes(a_bytes);
+                let b = f64::from_le_bytes(b_bytes);
+                (a + b).to_le_bytes().to_vec()
             }
             _ => return Some(existing.to_vec()),
         };

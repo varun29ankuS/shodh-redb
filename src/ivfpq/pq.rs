@@ -151,13 +151,14 @@ pub fn train_codebooks(
     num_subvectors: usize,
     max_iter: usize,
     _metric: DistanceMetric,
-) -> Codebooks {
+) -> Result<Codebooks, crate::StorageError> {
+    if dim == 0 || num_subvectors == 0 || dim % num_subvectors != 0 {
+        return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+            "PQ training: dim must be non-zero and divisible by num_subvectors",
+        )));
+    }
     let n = flat_vectors.len() / dim;
     let sub_dim = dim / num_subvectors;
-    assert!(
-        dim % num_subvectors == 0,
-        "dim ({dim}) must be divisible by num_subvectors ({num_subvectors})"
-    );
 
     let k = 256usize.min(n); // Can't have more codewords than training vectors.
 
@@ -187,11 +188,11 @@ pub fn train_codebooks(
         }
     }
 
-    Codebooks {
+    Ok(Codebooks {
         data: all_data,
         num_subvectors,
         sub_dim,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +214,7 @@ mod tests {
             0.0, 0.0, 0.0, 1.0,  1.0, 0.0, 0.0, 0.0,
         ];
 
-        let codebooks = train_codebooks(&training, 8, 2, 25, DistanceMetric::EuclideanSq);
+        let codebooks = train_codebooks(&training, 8, 2, 25, DistanceMetric::EuclideanSq).unwrap();
         assert_eq!(codebooks.num_subvectors, 2);
         assert_eq!(codebooks.sub_dim, 4);
 

@@ -175,7 +175,10 @@ impl RangeIterState {
         }
     }
 
-    fn get_entry<K: Key, V: Value>(&self, compression_enabled: bool) -> Option<EntryGuard<K, V>> {
+    fn get_entry<K: Key, V: Value>(
+        &self,
+        compression_enabled: bool,
+    ) -> Result<Option<EntryGuard<K, V>>> {
         match self {
             Leaf {
                 page,
@@ -184,17 +187,21 @@ impl RangeIterState {
                 entry,
                 ..
             } => {
-                let (key, value) =
+                if let Some((key, value)) =
                     LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size)
-                        .entry_ranges(*entry)?;
-                Some(EntryGuard::new(
-                    page.clone(),
-                    key,
-                    value,
-                    compression_enabled,
-                ))
+                        .entry_ranges(*entry)
+                {
+                    Ok(Some(EntryGuard::new(
+                        page.clone(),
+                        key,
+                        value,
+                        compression_enabled,
+                    )?))
+                } else {
+                    Ok(None)
+                }
             }
-            Internal { .. } => None,
+            Internal { .. } => Ok(None),
         }
     }
 }
@@ -214,28 +221,29 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
         key_range: Range<usize>,
         value_range: Range<usize>,
         compression_enabled: bool,
-    ) -> Self {
+    ) -> Result<Self> {
         let decompressed_value = if compression_enabled {
             let raw = &page.memory()[value_range.clone()];
             match decompress_value(raw) {
                 Ok(Cow::Owned(decompressed)) => Some(decompressed),
                 Ok(Cow::Borrowed(_)) => None,
-                Err(e) => {
-                    debug_assert!(false, "value decompression failed: {e}");
-                    None
+                Err(_) => {
+                    return Err(StorageError::Corrupted(String::from(
+                        "value decompression failed: compressed data is corrupt",
+                    )));
                 }
             }
         } else {
             None
         };
-        Self {
+        Ok(Self {
             page,
             key_range,
             value_range,
             decompressed_value,
             _key_type: Default::default(),
             _value_type: Default::default(),
-        }
+        })
     }
 
     pub(crate) fn key_data(&self) -> Vec<u8> {
@@ -391,6 +399,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
         let mut item = self.inner.next();
         while let Some(Ok(ref entry)) = item {
             if (self.predicate)(entry.key(), entry.value()) {
+                let deleted_key = entry.key_data();
                 let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
                     self.root,
                     self.mem.clone(),
@@ -398,7 +407,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                     self.allocated.clone(),
                     self.compression,
                 );
-                match operation.delete(&entry.key()) {
+                match operation.delete(&K::from_bytes(&deleted_key)) {
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         return Some(Err(crate::StorageError::Corrupted(
@@ -425,6 +434,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
         let mut item = self.inner.next_back();
         while let Some(Ok(ref entry)) = item {
             if (self.predicate)(entry.key(), entry.value()) {
+                let deleted_key = entry.key_data();
                 let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
                     self.root,
                     self.mem.clone(),
@@ -432,7 +442,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                     self.allocated.clone(),
                     self.compression,
                 );
-                match operation.delete(&entry.key()) {
+                match operation.delete(&K::from_bytes(&deleted_key)) {
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         return Some(Err(crate::StorageError::Corrupted(
@@ -673,8 +683,12 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
 
             self.include_left = false;
             let ce = self.compression_enabled;
-            if let Some(entry) = self.left.as_ref().and_then(|s| s.get_entry::<K, V>(ce)) {
-                return Some(Ok(entry));
+            if let Some(state) = self.left.as_ref() {
+                match state.get_entry::<K, V>(ce) {
+                    Ok(Some(entry)) => return Some(Ok(entry)),
+                    Ok(None) => {}
+                    Err(err) => return Some(Err(err)),
+                }
             }
         }
     }
@@ -735,8 +749,12 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
 
             self.include_right = false;
             let ce = self.compression_enabled;
-            if let Some(entry) = self.right.as_ref().and_then(|s| s.get_entry::<K, V>(ce)) {
-                return Some(Ok(entry));
+            if let Some(state) = self.right.as_ref() {
+                match state.get_entry::<K, V>(ce) {
+                    Ok(Some(entry)) => return Some(Ok(entry)),
+                    Ok(None) => {}
+                    Err(err) => return Some(Err(err)),
+                }
             }
         }
     }

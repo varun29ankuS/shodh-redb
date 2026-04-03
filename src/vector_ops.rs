@@ -111,9 +111,9 @@ impl fmt::Display for DistanceMetric {
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "dot_product: vector dimension mismatch");
-    let len = a.len().min(b.len());
-    let a = &a[..len];
-    let b = &b[..len];
+    if a.len() != b.len() {
+        return 0.0;
+    }
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
@@ -131,9 +131,9 @@ pub fn euclidean_distance_sq(a: &[f32], b: &[f32]) -> f32 {
         b.len(),
         "euclidean_distance_sq: vector dimension mismatch"
     );
-    let len = a.len().min(b.len());
-    let a = &a[..len];
-    let b = &b[..len];
+    if a.len() != b.len() {
+        return 0.0;
+    }
     a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
@@ -152,9 +152,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         b.len(),
         "cosine_similarity: vector dimension mismatch"
     );
-    let len = a.len().min(b.len());
-    let a = &a[..len];
-    let b = &b[..len];
+    if a.len() != b.len() {
+        return 0.0;
+    }
     let mut dot = 0.0f32;
     let mut norm_a = 0.0f32;
     let mut norm_b = 0.0f32;
@@ -193,9 +193,9 @@ pub fn manhattan_distance(a: &[f32], b: &[f32]) -> f32 {
         b.len(),
         "manhattan_distance: vector dimension mismatch"
     );
-    let len = a.len().min(b.len());
-    let a = &a[..len];
-    let b = &b[..len];
+    if a.len() != b.len() {
+        return 0.0;
+    }
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
 }
 

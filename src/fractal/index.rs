@@ -213,7 +213,7 @@ impl<'txn, T: StorageWrite> FractalIndex<'txn, T> {
         }
 
         // Train PQ codebooks
-        let codebooks = pq::train_codebooks(&flat, dim, num_sub, max_iter, self.config.metric);
+        let codebooks = pq::train_codebooks(&flat, dim, num_sub, max_iter, self.config.metric)?;
 
         // Persist codebooks
         let cb_def = TableDefinition::<u32, &[u8]>::new(&self.names.codebooks);

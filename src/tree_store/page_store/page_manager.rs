@@ -1138,7 +1138,15 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    // Make changes visible, without a durability guarantee
+    // Make changes visible, without a durability guarantee.
+    //
+    // Crash safety: pages moved into `unpersisted` are not tracked on disk.
+    // On crash, they would leak because the in-memory set is lost and the
+    // on-disk header was never flushed. This is safe because `begin_writable`
+    // durably sets `recovery_required = true` before any writes. On next open,
+    // the recovery process (`begin_repair` / `end_repair`) rebuilds the
+    // allocator from scratch by walking only reachable pages from the primary
+    // header, so non-durable pages are implicitly reclaimed.
     pub(crate) fn non_durable_commit(
         &self,
         data_root: Option<BtreeHeader>,
@@ -1153,6 +1161,17 @@ impl TransactionalMemory {
         if self.needs_recovery.load(Ordering::Acquire) {
             return Err(StorageError::Corrupted(alloc::string::String::from(
                 "Cannot proceed: database recovery is required",
+            )));
+        }
+
+        // Verify that recovery_required is set on disk. This is the invariant
+        // that guarantees non-durable pages are reclaimed after a crash.
+        // Without this flag, a crash would leave pages in `unpersisted`
+        // allocated but unreferenced, permanently leaking disk space.
+        if !self.state.lock().header.recovery_required {
+            return Err(StorageError::Corrupted(alloc::string::String::from(
+                "non_durable_commit requires recovery_required flag to be set \
+                 for crash-safe page reclamation",
             )));
         }
 

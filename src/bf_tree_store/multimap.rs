@@ -86,27 +86,33 @@ fn increment_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
 /// key in a multimap table.
 ///
 /// The prefix format is `[tbl_len: u16 LE][tbl][uk_len: u32 LE][user_key]`.
-/// When `increment_prefix` overflows (all-0xFF prefix), we construct a tighter
-/// bound by incrementing the `uk_len` field instead of falling back to the
-/// entire table's prefix end -- which would incorrectly include entries for
-/// other user keys.
+/// When `increment_prefix` overflows (all-0xFF prefix), we fall back to the
+/// table-level prefix end. This is safe because all multimap entries for a
+/// given table share the same table prefix, so using the table boundary as
+/// the upper bound will never miss entries and never include entries from a
+/// different table.
 fn multimap_scan_end(table_name: &str, user_key: &[u8]) -> Vec<u8> {
     let prefix = multimap_key_prefix(table_name, user_key);
     if let Some(end) = increment_prefix(&prefix) {
         return end;
     }
-    // All bytes in the prefix are 0xFF. Construct an end bound by incrementing
-    // the uk_len (u32 LE) portion. The uk_len field starts at offset
-    // 2 + table_name.len().
+    // All bytes in the prefix are 0xFF. Use the table-level prefix end as the
+    // upper bound. This is always correct because every multimap entry for
+    // this table starts with the same [tbl_len][tbl] prefix.
     let tbl = table_name.as_bytes();
     let tbl_len = u16::try_from(tbl.len()).expect("table name exceeds u16::MAX bytes");
-    let uk_len = u32::try_from(user_key.len()).expect("user key exceeds u32::MAX bytes");
-    let next_uk_len = uk_len.wrapping_add(1);
-    let mut end = Vec::with_capacity(2 + tbl.len() + 4);
-    end.extend_from_slice(&tbl_len.to_le_bytes());
-    end.extend_from_slice(tbl);
-    end.extend_from_slice(&next_uk_len.to_le_bytes());
-    end
+    let mut tbl_prefix = Vec::with_capacity(2 + tbl.len());
+    tbl_prefix.extend_from_slice(&tbl_len.to_le_bytes());
+    tbl_prefix.extend_from_slice(tbl);
+    // Increment the table prefix as a big-endian integer. If even that
+    // overflows (table name is all 0xFF and length bytes are 0xFF), append
+    // 0xFF to form a lexicographically larger bound.
+    if let Some(end) = increment_prefix(&tbl_prefix) {
+        end
+    } else {
+        tbl_prefix.push(0xFF);
+        tbl_prefix
+    }
 }
 
 /// Extract the value key portion from a composite key, given the known prefix length.

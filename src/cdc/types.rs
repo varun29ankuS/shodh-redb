@@ -37,6 +37,9 @@ pub enum ChangeOp {
     Update = 1,
     /// A key was removed.
     Delete = 2,
+    /// The on-disk record could not be deserialized. Consumers should skip
+    /// records with this variant -- they do not represent real mutations.
+    Corrupted = 255,
 }
 
 impl ChangeOp {
@@ -209,38 +212,46 @@ impl fmt::Debug for CdcRecord {
 }
 
 impl CdcRecord {
-    pub fn from_event(event: &CdcEvent) -> Self {
-        debug_assert!(
-            u16::try_from(event.table_name.len()).is_ok(),
-            "CDC table_name exceeds u16::MAX bytes ({})",
-            event.table_name.len()
-        );
-        debug_assert!(
-            event.key.len() < NONE_SENTINEL as usize,
-            "CDC key exceeds maximum serializable length ({})",
-            event.key.len()
-        );
-        if let Some(ref v) = event.new_value {
-            debug_assert!(
-                v.len() < NONE_SENTINEL as usize,
+    pub fn from_event(event: &CdcEvent) -> Result<Self, StorageError> {
+        if u16::try_from(event.table_name.len()).is_err() {
+            return Err(StorageError::Corrupted(format!(
+                "CDC table_name exceeds u16::MAX bytes ({})",
+                event.table_name.len()
+            )));
+        }
+        if event.key.len() >= NONE_SENTINEL as usize {
+            return Err(StorageError::Corrupted(format!(
+                "CDC key exceeds maximum serializable length ({})",
+                event.key.len()
+            )));
+        }
+        if event
+            .new_value
+            .as_ref()
+            .is_some_and(|v| v.len() >= NONE_SENTINEL as usize)
+        {
+            return Err(StorageError::Corrupted(format!(
                 "CDC new_value exceeds maximum serializable length ({})",
-                v.len()
-            );
+                event.new_value.as_ref().unwrap().len()
+            )));
         }
-        if let Some(ref v) = event.old_value {
-            debug_assert!(
-                v.len() < NONE_SENTINEL as usize,
+        if event
+            .old_value
+            .as_ref()
+            .is_some_and(|v| v.len() >= NONE_SENTINEL as usize)
+        {
+            return Err(StorageError::Corrupted(format!(
                 "CDC old_value exceeds maximum serializable length ({})",
-                v.len()
-            );
+                event.old_value.as_ref().unwrap().len()
+            )));
         }
-        Self {
+        Ok(Self {
             op: event.op,
             table_name: event.table_name.clone(),
             key: event.key.clone(),
             new_value: event.new_value.clone(),
             old_value: event.old_value.clone(),
-        }
+        })
     }
 
     pub(crate) fn serialized_size(&self) -> usize {
@@ -401,7 +412,7 @@ impl Value for CdcRecord {
         match Self::deserialize(data) {
             Ok(record) => record,
             Err(_) => CdcRecord {
-                op: ChangeOp::Insert,
+                op: ChangeOp::Corrupted,
                 table_name: String::new(),
                 key: Vec::new(),
                 new_value: None,

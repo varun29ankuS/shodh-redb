@@ -50,9 +50,7 @@ impl PartialOrd for CandidateEntry {
 impl Ord for CandidateEntry {
     fn cmp(&self, other: &Self) -> CmpOrdering {
         // Max-heap: worst (largest) distance at top for eviction
-        self.distance
-            .partial_cmp(&other.distance)
-            .unwrap_or(CmpOrdering::Equal)
+        self.distance.total_cmp(&other.distance)
     }
 }
 
@@ -223,11 +221,7 @@ pub(crate) fn search_write<T: StorageWrite>(
                 });
             }
         }
-        reranked.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(CmpOrdering::Equal)
-        });
+        reranked.sort_by(|a, b| a.distance.total_cmp(&b.distance));
         reranked.truncate(params.k);
         Ok(reranked)
     } else {
@@ -345,11 +339,7 @@ pub(crate) fn search_read<R: StorageRead>(
                 });
             }
         }
-        reranked.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(CmpOrdering::Equal)
-        });
+        reranked.sort_by(|a, b| a.distance.total_cmp(&b.distance));
         reranked.truncate(params.k);
         Ok(reranked)
     } else {

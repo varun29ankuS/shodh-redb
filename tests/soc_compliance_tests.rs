@@ -3865,7 +3865,7 @@ fn blob_meta_roundtrip_no_parent() {
 
 #[test]
 fn blob_meta_serialized_size() {
-    assert_eq!(shodh_redb::BlobMeta::SERIALIZED_SIZE, 137);
+    assert_eq!(shodh_redb::BlobMeta::SERIALIZED_SIZE, 169);
 }
 
 #[test]

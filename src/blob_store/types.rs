@@ -342,11 +342,14 @@ pub struct BlobMeta {
     /// User-provided label (up to 63 bytes, UTF-8).
     pub label_len: u8,
     pub label: [u8; 63],
+    /// SHA-256 digest of the full blob content, computed at write time.
+    /// All-zero when unavailable (e.g. zero-length blobs).
+    pub sha256: [u8; 32],
 }
 
 impl BlobMeta {
-    // 40 (BlobRef) + 8 (wall_clock) + 8 (hlc) + 1 (has_parent) + 16 (parent) + 1 (label_len) + 63 (label)
-    pub const SERIALIZED_SIZE: usize = 40 + 8 + 8 + 1 + 16 + 1 + 63; // = 137
+    // 40 (BlobRef) + 8 (wall_clock) + 8 (hlc) + 1 (has_parent) + 16 (parent) + 1 (label_len) + 63 (label) + 32 (sha256)
+    pub const SERIALIZED_SIZE: usize = 40 + 8 + 8 + 1 + 16 + 1 + 63 + 32; // = 169
 
     pub fn new(
         blob_ref: BlobRef,
@@ -354,6 +357,24 @@ impl BlobMeta {
         hlc: u64,
         causal_parent: Option<BlobId>,
         label: &str,
+    ) -> Self {
+        Self::with_sha256(
+            blob_ref,
+            wall_clock_ns,
+            hlc,
+            causal_parent,
+            label,
+            [0u8; 32],
+        )
+    }
+
+    pub fn with_sha256(
+        blob_ref: BlobRef,
+        wall_clock_ns: u64,
+        hlc: u64,
+        causal_parent: Option<BlobId>,
+        label: &str,
+        sha256: [u8; 32],
     ) -> Self {
         let label_bytes = label.as_bytes();
         // Safe: .min(63) guarantees value fits in u8 (max 63 < 256).
@@ -368,6 +389,7 @@ impl BlobMeta {
             causal_parent,
             label_len,
             label: label_buf,
+            sha256,
         }
     }
 
@@ -410,6 +432,10 @@ impl BlobMeta {
         buf[pos] = self.label_len;
         pos += 1;
         buf[pos..pos + 63].copy_from_slice(&self.label);
+        pos += 63;
+
+        // sha256 (32 bytes)
+        buf[pos..pos + 32].copy_from_slice(&self.sha256);
 
         buf
     }
@@ -445,6 +471,10 @@ impl BlobMeta {
         pos += 1;
         let mut label = [0u8; 63];
         label.copy_from_slice(&data[pos..pos + 63]);
+        pos += 63;
+
+        let mut sha256 = [0u8; 32];
+        sha256.copy_from_slice(&data[pos..pos + 32]);
 
         Self {
             blob_ref,
@@ -453,6 +483,7 @@ impl BlobMeta {
             causal_parent,
             label_len,
             label,
+            sha256,
         }
     }
 }
@@ -1411,7 +1442,7 @@ impl Key for TemporalKey {
 const _: () = {
     assert!(size_of::<u64>() * 2 == BlobId::SERIALIZED_SIZE);
     assert!(BlobRef::SERIALIZED_SIZE == 40);
-    assert!(BlobMeta::SERIALIZED_SIZE == 137);
+    assert!(BlobMeta::SERIALIZED_SIZE == 169);
     assert!(TemporalKey::SERIALIZED_SIZE == 32);
     assert!(CausalEdge::SERIALIZED_SIZE == 80);
     assert!(TagKey::SERIALIZED_SIZE == 49);

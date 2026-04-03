@@ -292,6 +292,10 @@ impl MutInPlaceValue for PageList<'_> {
     }
 
     fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType {
+        // SAFETY: PageListMut is #[repr(transparent)] over [u8], so it has the
+        // same size, alignment, and memory layout. The pointer cast preserves
+        // the slice length metadata and the mutable borrow guarantees exclusive
+        // access for the lifetime of the returned reference.
         unsafe { &mut *(core::ptr::from_mut::<[u8]>(data) as *mut PageListMut) }
     }
 }
@@ -2589,7 +2593,7 @@ impl WriteTransaction {
 
         for (seq, event) in events.iter().enumerate() {
             let key = CdcKey::new(txn_id, u32::try_from(seq).unwrap_or(u32::MAX));
-            let record = CdcRecord::from_event(event);
+            let record = CdcRecord::from_event(event)?;
             cdc_table.insert(&key, &record)?;
         }
 

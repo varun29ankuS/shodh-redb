@@ -28,8 +28,13 @@ const HISTORY_META_TABLE: &str = "__bf_history_meta";
 const MAX_PATH_LEN: usize = 1024;
 
 /// Size of a serialized `HistoryEntry` (fixed-width).
-/// Layout: `txn_id`(8) + `timestamp_ns`(8) + `path_len`(2) + path(1024) = 1042 bytes.
-const HISTORY_ENTRY_SIZE: usize = 8 + 8 + 2 + MAX_PATH_LEN;
+/// Layout: `txn_id`(8) + `timestamp_ns`(8) + `path_len`(2) + path(1024) + `status`(1) = 1043 bytes.
+const HISTORY_ENTRY_SIZE: usize = 8 + 8 + 2 + MAX_PATH_LEN + 1;
+
+/// Status byte for a history entry: snapshot creation is in progress.
+const HISTORY_STATUS_PENDING: u8 = 0;
+/// Status byte for a history entry: snapshot is complete and valid.
+const HISTORY_STATUS_COMPLETE: u8 = 1;
 
 /// A recorded history snapshot entry.
 #[derive(Clone, Debug)]
@@ -40,6 +45,8 @@ pub struct HistoryEntry {
     pub timestamp_ns: u64,
     /// Filesystem path to the snapshot file.
     pub snapshot_path: String,
+    /// Status: 0 = pending (snapshot creation in progress), 1 = complete.
+    pub status: u8,
 }
 
 impl HistoryEntry {
@@ -62,22 +69,38 @@ impl HistoryEntry {
         let path_len_u16 = path_bytes.len() as u16;
         buf[16..18].copy_from_slice(&path_len_u16.to_le_bytes());
         buf[18..18 + path_bytes.len()].copy_from_slice(path_bytes);
+        buf[18 + MAX_PATH_LEN] = self.status;
         Ok(buf)
     }
 
-    pub fn from_le_bytes(data: &[u8]) -> Self {
+    /// Deserialize from bytes. Returns `None` if the input is too short
+    /// (less than the minimum required 18 bytes for the fixed header).
+    pub fn from_le_bytes(data: &[u8]) -> Option<Self> {
+        // Minimum: 8 (txn_id) + 8 (timestamp_ns) + 2 (path_len) = 18 bytes.
+        if data.len() < 18 {
+            return None;
+        }
         let txn_id = u64::from_le_bytes(data[..8].try_into().unwrap());
         let timestamp_ns = u64::from_le_bytes(data[8..16].try_into().unwrap());
         let path_len = u16::from_le_bytes(data[16..18].try_into().unwrap()) as usize;
-        let path_len = path_len.min(MAX_PATH_LEN).min(data.len() - 18);
+        let available = data.len().saturating_sub(18);
+        let path_len = path_len.min(MAX_PATH_LEN).min(available);
         let snapshot_path = core::str::from_utf8(&data[18..18 + path_len])
             .unwrap_or("")
             .to_string();
-        Self {
+        // Status byte follows the path region at offset 18 + MAX_PATH_LEN.
+        let status = if data.len() >= HISTORY_ENTRY_SIZE {
+            data[18 + MAX_PATH_LEN]
+        } else {
+            // Legacy entries without a status byte are treated as complete.
+            HISTORY_STATUS_COMPLETE
+        };
+        Some(Self {
             txn_id,
             timestamp_ns,
             snapshot_path,
-        }
+            status,
+        })
     }
 }
 
@@ -100,8 +123,12 @@ pub struct BfTreeHistory {
 
 impl BfTreeHistory {
     /// Create a new history manager for the given database.
+    ///
+    /// On startup, recovers from incomplete snapshots by deleting any entries
+    /// that are still in "pending" status (crash between metadata insert and
+    /// snapshot completion).
     pub fn new(db: Arc<BfTreeDatabase>) -> Self {
-        // Recover next snapshot ID from existing entries.
+        // Recover next snapshot ID and clean up pending entries.
         let next_id = {
             let rtxn = db.begin_read();
             let prefix = table_prefix(HISTORY_META_TABLE);
@@ -110,8 +137,9 @@ impl BfTreeHistory {
             let max_record = rtxn.adapter.inner().config().get_cb_max_record_size();
             let mut buf = vec![0u8; max_record * 2];
             let mut max_id: u64 = 0;
+            let mut pending_keys: Vec<(Vec<u8>, String)> = Vec::new();
             if let Ok(mut iter) = rtxn.adapter.scan_range(&prefix, &prefix_end) {
-                while let Some((key_len, _)) = iter.next(&mut buf) {
+                while let Some((key_len, val_len)) = iter.next(&mut buf) {
                     if key_len > prefix_len + 8 {
                         continue;
                     }
@@ -121,9 +149,28 @@ impl BfTreeHistory {
                         if id > max_id {
                             max_id = id;
                         }
+                        // Check for pending entries that need cleanup.
+                        let val_bytes = &buf[key_len..key_len + val_len];
+                        if let Some(entry) = HistoryEntry::from_le_bytes(val_bytes)
+                            .filter(|e| e.status == HISTORY_STATUS_PENDING)
+                        {
+                            let full_key = buf[..key_len].to_vec();
+                            pending_keys.push((full_key, entry.snapshot_path));
+                        }
                     }
                 }
             }
+            drop(rtxn);
+
+            // Delete pending entries and their snapshot files.
+            for (full_key, snap_path) in pending_keys {
+                let path = Path::new(&snap_path);
+                if path.exists() {
+                    let _ = std::fs::remove_file(path);
+                }
+                db.adapter().delete(&full_key);
+            }
+
             max_id.saturating_add(1)
         };
 
@@ -136,6 +183,14 @@ impl BfTreeHistory {
     /// Commit the current state as a named history point.
     /// Takes a snapshot and records the entry in the history meta table.
     /// Returns the snapshot ID.
+    ///
+    /// Uses a two-phase approach to prevent orphaned snapshot files on crash:
+    ///
+    /// 1. Write a "pending" metadata entry first.
+    /// 2. Create the snapshot file.
+    /// 3. Update the metadata entry to "complete".
+    ///
+    /// On recovery, `new()` cleans up any pending entries and their files.
     pub fn commit_snapshot(&self) -> Result<(u64, PathBuf), BfTreeError> {
         let snapshot_id = self.next_snapshot_id.fetch_add(1, Ordering::SeqCst);
         let txn_id = {
@@ -145,23 +200,40 @@ impl BfTreeHistory {
                 .unwrap_or(0)
         };
 
-        // Take the BfTree snapshot.
-        let snapshot_path = self.db.snapshot();
+        let key = encode_table_key(HISTORY_META_TABLE, &snapshot_id.to_le_bytes());
 
-        // Record the history entry.
-        let entry = HistoryEntry {
+        // Phase 1: Write a pending metadata entry before creating the snapshot.
+        // If we crash after this but before the snapshot completes, recovery
+        // will find the pending entry and clean it up.
+        let pending_entry = HistoryEntry {
             txn_id,
             timestamp_ns: now_ns(),
-            snapshot_path: snapshot_path.to_string_lossy().to_string(),
+            snapshot_path: String::new(), // Path not yet known.
+            status: HISTORY_STATUS_PENDING,
         };
+        self.db
+            .adapter()
+            .insert(&key, &pending_entry.to_le_bytes()?)?;
 
-        let key = encode_table_key(HISTORY_META_TABLE, &snapshot_id.to_le_bytes());
-        self.db.adapter().insert(&key, &entry.to_le_bytes()?)?;
+        // Phase 2: Take the BfTree snapshot.
+        let snapshot_path = self.db.snapshot();
+
+        // Phase 3: Update the metadata entry to "complete" with the real path.
+        let complete_entry = HistoryEntry {
+            txn_id,
+            timestamp_ns: pending_entry.timestamp_ns,
+            snapshot_path: snapshot_path.to_string_lossy().to_string(),
+            status: HISTORY_STATUS_COMPLETE,
+        };
+        self.db
+            .adapter()
+            .insert(&key, &complete_entry.to_le_bytes()?)?;
 
         Ok((snapshot_id, snapshot_path))
     }
 
-    /// List all history entries, newest first.
+    /// List all completed history entries, newest first.
+    /// Pending entries (incomplete snapshots) are excluded.
     pub fn list(&self) -> Result<Vec<(u64, HistoryEntry)>, BfTreeError> {
         let rtxn = self.db.begin_read();
         let prefix = table_prefix(HISTORY_META_TABLE);
@@ -179,10 +251,13 @@ impl BfTreeHistory {
             let key_bytes = &buf[prefix_len..key_len];
             let val_bytes = &buf[key_len..key_len + val_len];
 
-            if key_bytes.len() >= 8 && val_bytes.len() >= HISTORY_ENTRY_SIZE {
+            if key_bytes.len() >= 8 {
                 let id = u64::from_le_bytes(key_bytes[..8].try_into().unwrap());
-                let entry = HistoryEntry::from_le_bytes(val_bytes);
-                results.push((id, entry));
+                if let Some(entry) = HistoryEntry::from_le_bytes(val_bytes)
+                    .filter(|e| e.status == HISTORY_STATUS_COMPLETE)
+                {
+                    results.push((id, entry));
+                }
             }
         }
 
@@ -190,16 +265,18 @@ impl BfTreeHistory {
         Ok(results)
     }
 
-    /// Get a specific history entry by snapshot ID.
+    /// Get a specific completed history entry by snapshot ID.
+    /// Returns `None` if the entry does not exist or is still pending.
     pub fn get(&self, snapshot_id: u64) -> Result<Option<HistoryEntry>, BfTreeError> {
         let key = encode_table_key(HISTORY_META_TABLE, &snapshot_id.to_le_bytes());
         let max_val = self.db.adapter().inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.db.adapter().read(&key, &mut buf) {
-            Ok(len) if (len as usize) >= HISTORY_ENTRY_SIZE => {
-                Ok(Some(HistoryEntry::from_le_bytes(&buf[..len as usize])))
-            }
-            Ok(_) | Err(BfTreeError::NotFound | BfTreeError::Deleted) => Ok(None),
+            Ok(len) => match HistoryEntry::from_le_bytes(&buf[..len as usize]) {
+                Some(entry) if entry.status == HISTORY_STATUS_COMPLETE => Ok(Some(entry)),
+                _ => Ok(None),
+            },
+            Err(BfTreeError::NotFound | BfTreeError::Deleted) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -222,6 +299,10 @@ impl BfTreeHistory {
 
     /// Prune old history entries, keeping only the most recent `keep` entries.
     /// Deletes the associated snapshot files from disk.
+    ///
+    /// Returns the number of entries removed, or the first error encountered
+    /// during metadata deletion. File-removal failures cause the entry to be
+    /// skipped (it can be retried on a subsequent prune).
     pub fn prune(&self, keep: usize) -> Result<usize, BfTreeError> {
         let entries = self.list()?;
         if entries.len() <= keep {
@@ -230,19 +311,32 @@ impl BfTreeHistory {
 
         let to_remove = &entries[keep..];
         let mut removed = 0;
+        let mut first_error: Option<BfTreeError> = None;
 
         for (id, entry) in to_remove {
             let path = Path::new(&entry.snapshot_path);
             if path.exists() && std::fs::remove_file(path).is_err() {
-                // If we cannot remove the snapshot file, skip metadata deletion
-                // so the entry remains and can be retried on a subsequent prune.
+                // If we cannot remove the snapshot file, skip metadata
+                // deletion so the entry remains for a subsequent prune.
+                if first_error.is_none() {
+                    first_error = Some(BfTreeError::InvalidOperation(alloc::format!(
+                        "failed to remove snapshot file {}",
+                        entry.snapshot_path
+                    )));
+                }
                 continue;
             }
-            // Delete the history entry from BfTree only after file removal succeeds
-            // (or the file was already absent).
+            // Delete the history entry from BfTree only after file removal
+            // succeeds (or the file was already absent).
             let key = encode_table_key(HISTORY_META_TABLE, &id.to_le_bytes());
             self.db.adapter().delete(&key);
             removed += 1;
+        }
+
+        // If some entries were pruned but others failed, return the count of
+        // successful removals. Only propagate the error if nothing was removed.
+        if let (0, Some(err)) = (removed, first_error) {
+            return Err(err);
         }
 
         Ok(removed)
@@ -267,12 +361,22 @@ mod tests {
             txn_id: 42,
             timestamp_ns: 1234567890,
             snapshot_path: "/tmp/snap.bin".into(),
+            status: HISTORY_STATUS_COMPLETE,
         };
         let bytes = entry.to_le_bytes().unwrap();
-        let restored = HistoryEntry::from_le_bytes(&bytes);
+        let restored = HistoryEntry::from_le_bytes(&bytes).unwrap();
         assert_eq!(restored.txn_id, 42);
         assert_eq!(restored.timestamp_ns, 1234567890);
         assert_eq!(restored.snapshot_path, "/tmp/snap.bin");
+        assert_eq!(restored.status, HISTORY_STATUS_COMPLETE);
+    }
+
+    #[test]
+    fn from_le_bytes_rejects_short_input() {
+        assert!(HistoryEntry::from_le_bytes(&[0u8; 10]).is_none());
+        assert!(HistoryEntry::from_le_bytes(&[]).is_none());
+        // Exactly 18 bytes (minimum header) should succeed.
+        assert!(HistoryEntry::from_le_bytes(&[0u8; 18]).is_some());
     }
 
     #[test]

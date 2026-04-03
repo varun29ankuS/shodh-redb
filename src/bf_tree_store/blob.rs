@@ -442,20 +442,11 @@ impl<'txn> BfTreeBlobStore<'txn> {
             total_len.div_ceil(MAX_CHUNK_SIZE)
         };
 
-        // For dedup-eligible blobs, compute SHA-256 from the blob data before deleting chunks.
-        let dedup_sha256 = if total_len >= DEDUP_MIN_SIZE {
-            // Read the blob data to compute its SHA-256 for dedup table lookup.
-            let mut hasher = Sha256::new();
-            for chunk_idx in 0..num_chunks {
-                let chunk_key =
-                    encode_chunk_key(blob_id, u32::try_from(chunk_idx).unwrap_or(u32::MAX));
-                if let Some(chunk_data) = read_raw_buffered(self.buffer, self.adapter, &chunk_key)?
-                {
-                    hasher.update(&chunk_data);
-                }
-            }
-            let digest: [u8; 32] = hasher.finalize().into();
-            Some(Sha256Key(digest))
+        // Use the SHA-256 hash stored in BlobMeta at write time for dedup lookup.
+        // This avoids recomputing from chunks, which could silently produce a
+        // wrong digest if any chunk is missing.
+        let dedup_sha256 = if total_len >= DEDUP_MIN_SIZE && meta.sha256 != [0u8; 32] {
+            Some(Sha256Key(meta.sha256))
         } else {
             None
         };
@@ -864,15 +855,24 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
 
-        let keys_to_delete: Vec<Vec<u8>> = {
-            let mut keys = Vec::new();
-            if let Ok(mut iter) = self.adapter.scan_range(&start_encoded, &end_encoded) {
-                while let Some((key_len, _)) = iter.next(&mut scan_buf) {
-                    keys.push(scan_buf[..key_len].to_vec());
-                }
+        let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
+
+        // Scan committed BfTree entries.
+        if let Ok(mut iter) = self.adapter.scan_range(&start_encoded, &end_encoded) {
+            while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+                keys_to_delete.push(scan_buf[..key_len].to_vec());
             }
-            keys
-        };
+        }
+
+        // Also scan the write buffer for causal edges added in this transaction.
+        for (key, value) in buf.range(&start_encoded, &end_encoded) {
+            if value.is_none() {
+                continue; // Already a tombstone.
+            }
+            if !keys_to_delete.contains(key) {
+                keys_to_delete.push(key.clone());
+            }
+        }
 
         for key in keys_to_delete {
             buf.delete(key);
@@ -991,7 +991,14 @@ impl BfTreeBlobWriter<'_, '_> {
                 content_type: self.content_type.as_byte(),
                 compression: 0,
             };
-            let meta = BlobMeta::new(blob_ref, wall_ns, hlc.to_raw(), causal_parent, &self.label);
+            let meta = BlobMeta::with_sha256(
+                blob_ref,
+                wall_ns,
+                hlc.to_raw(),
+                causal_parent,
+                &self.label,
+                sha256_digest,
+            );
 
             // Write metadata only (data is shared via dedup).
             let mut buf = self.store.buffer.lock().unwrap();
@@ -1034,7 +1041,14 @@ impl BfTreeBlobWriter<'_, '_> {
             content_type: self.content_type.as_byte(),
             compression: 0,
         };
-        let meta = BlobMeta::new(blob_ref, wall_ns, hlc.to_raw(), causal_parent, &self.label);
+        let meta = BlobMeta::with_sha256(
+            blob_ref,
+            wall_ns,
+            hlc.to_raw(),
+            causal_parent,
+            &self.label,
+            sha256_digest,
+        );
 
         {
             let mut buf = self.store.buffer.lock().unwrap();
@@ -1072,7 +1086,8 @@ impl BfTreeBlobWriter<'_, '_> {
     ///
     /// Reads from the write buffer first (via `BufferLookup`), falling back to
     /// `BfTree` for committed data. The buffer lock is held for the entire
-    /// operation to prevent interleaved mutations from corrupting the copy.
+    /// read-then-write operation to prevent TOCTOU races where another thread
+    /// could delete the source chunks between reading and writing.
     fn write_dedup_chunk_refs(
         &self,
         new_id: BlobId,
@@ -1085,46 +1100,25 @@ impl BfTreeBlobWriter<'_, '_> {
             let total = usize::try_from(m.blob_ref.length).unwrap_or(usize::MAX);
             let num_chunks = total.div_ceil(MAX_CHUNK_SIZE);
 
-            // Pre-read all chunks that aren't in the buffer from BfTree, so we
-            // can hold the buffer lock for the entire write without re-acquiring.
-            let mut chunk_data: Vec<Option<Vec<u8>>> = Vec::with_capacity(num_chunks);
-            let buf_guard = self.store.buffer.lock().unwrap();
+            // Hold the buffer lock for the entire read + write cycle to
+            // eliminate the TOCTOU gap between reading source chunks and
+            // writing destination refs.
+            let mut buf_guard = self.store.buffer.lock().unwrap();
             for idx in 0..num_chunks {
                 let idx_u32 = u32::try_from(idx).unwrap_or(u32::MAX);
                 let src_key = encode_chunk_key(existing_id, idx_u32);
-                match buf_guard.get(&src_key) {
-                    BufferLookup::Found(v) => chunk_data.push(Some(v)),
-                    BufferLookup::Tombstone => chunk_data.push(None),
+                let chunk_bytes = match buf_guard.get(&src_key) {
+                    BufferLookup::Found(v) => Some(v),
+                    BufferLookup::Tombstone => None,
                     BufferLookup::NotInBuffer => {
-                        // Mark as needing BfTree read (placeholder).
-                        chunk_data.push(None);
+                        // Read from BfTree while holding the lock. BfTree reads
+                        // are lock-free internally so this does not deadlock.
+                        read_raw(self.store.adapter, &src_key)?
                     }
-                }
-            }
-            // Track which indices need BfTree reads.
-            let needs_tree_read: Vec<usize> = (0..num_chunks)
-                .filter(|&idx| {
-                    let idx_u32 = u32::try_from(idx).unwrap_or(u32::MAX);
-                    let src_key = encode_chunk_key(existing_id, idx_u32);
-                    matches!(buf_guard.get(&src_key), BufferLookup::NotInBuffer)
-                })
-                .collect();
-            drop(buf_guard);
-
-            // Read missing chunks from BfTree outside the lock.
-            for &idx in &needs_tree_read {
-                let idx_u32 = u32::try_from(idx).unwrap_or(u32::MAX);
-                let src_key = encode_chunk_key(existing_id, idx_u32);
-                chunk_data[idx] = read_raw(self.store.adapter, &src_key)?;
-            }
-
-            // Write all chunk refs under a single lock acquisition.
-            let mut buf = self.store.buffer.lock().unwrap();
-            for (idx, data) in chunk_data.into_iter().enumerate() {
-                let idx_u32 = u32::try_from(idx).unwrap_or(u32::MAX);
-                let dst_key = encode_chunk_key(new_id, idx_u32);
-                if let Some(bytes) = data {
-                    buf.put(dst_key, bytes);
+                };
+                if let Some(bytes) = chunk_bytes {
+                    let dst_key = encode_chunk_key(new_id, idx_u32);
+                    buf_guard.put(dst_key, bytes);
                 }
             }
         }

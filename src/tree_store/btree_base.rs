@@ -682,6 +682,9 @@ impl<'a> LeafAccessor<'a> {
     }
 
     fn value_start(&self, n: usize) -> Option<usize> {
+        if self.num_pairs() == 0 {
+            return None;
+        }
         if n == 0 {
             self.key_end(self.num_pairs() - 1)
         } else {
@@ -1092,10 +1095,12 @@ impl Drop for RawLeafBuilder<'_> {
         };
         if !is_panicking {
             assert_eq!(self.pairs_written, self.num_pairs);
-            assert_eq!(
-                self.key_section_start() + self.provisioned_key_bytes,
-                self.key_end(self.num_pairs - 1)
-            );
+            if self.num_pairs > 0 {
+                assert_eq!(
+                    self.key_section_start() + self.provisioned_key_bytes,
+                    self.key_end(self.num_pairs - 1)
+                );
+            }
         }
     }
 }

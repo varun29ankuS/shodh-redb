@@ -78,29 +78,67 @@ impl GroupCommit {
 /// All batches share a single write transaction protected by a mutex. Each
 /// batch runs in its own thread, acquiring the mutex to interact with the
 /// transaction. A single `commit()` at the end ensures atomicity.
+///
+/// An `AtomicBool` abort flag is shared across all batch threads. When any
+/// batch fails, it sets the flag, and other batches bail out early instead
+/// of performing work that would be discarded on rollback.
 pub fn concurrent_group_commit(
     db: Arc<BfTreeDatabase>,
     batches: Vec<WriteBatchFn>,
 ) -> Result<usize, BfTreeError> {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
 
     let count = batches.len();
     let wtxn = Arc::new(db.begin_write());
+    let abort = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::with_capacity(count);
 
     for batch in batches {
         let wtxn = wtxn.clone();
+        let abort = abort.clone();
         handles.push(thread::spawn(move || -> Result<(), BfTreeError> {
-            batch(&wtxn)?;
-            Ok(())
+            // Check abort flag before executing this batch. If another batch
+            // has already failed, skip execution to avoid wasted work.
+            if abort.load(Ordering::Acquire) {
+                return Err(BfTreeError::InvalidOperation(
+                    "batch aborted due to earlier failure".into(),
+                ));
+            }
+            match batch(&wtxn) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    // Signal other batches to bail out.
+                    abort.store(true, Ordering::Release);
+                    Err(e)
+                }
+            }
         }));
     }
 
     // Join all threads and collect errors.
+    let mut first_error: Option<BfTreeError> = None;
     for handle in handles {
-        handle
-            .join()
-            .map_err(|_| BfTreeError::InvalidOperation("batch thread panicked".into()))??;
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some(BfTreeError::InvalidOperation(
+                        "batch thread panicked".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some(err) = first_error {
+        // Transaction is dropped without commit -- automatic rollback.
+        return Err(err);
     }
 
     // All batches completed successfully -- commit atomically.

@@ -69,21 +69,21 @@ impl From<BfTreeError> for crate::StorageError {
             // InvalidKV covers both value-too-large and other validation errors
             // (empty key, CDC serialization). Map to Corrupted with the original
             // message to preserve diagnostic context.
-            BfTreeError::InvalidKV(msg) => crate::StorageError::Corrupted(alloc::format!(
-                "bf-tree: invalid key/value: {msg}"
-            )),
+            BfTreeError::InvalidKV(msg) => {
+                crate::StorageError::Corrupted(alloc::format!("bf-tree: invalid key/value: {msg}"))
+            }
             // InvalidKey from LeafReadResult means the B-tree node contains a key
             // that violates size constraints -- this is data-level inconsistency.
             BfTreeError::InvalidKey => crate::StorageError::Corrupted(alloc::string::String::from(
                 "bf-tree: key exceeds maximum length (data inconsistency)",
             )),
             // Config errors are startup/initialization failures, not data corruption.
-            BfTreeError::Config(e) => crate::StorageError::Io(crate::BackendError::Io(
-                std::io::Error::new(
+            BfTreeError::Config(e) => {
+                crate::StorageError::Io(crate::BackendError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     alloc::format!("bf-tree config error: {e:?}"),
-                ),
-            )),
+                )))
+            }
             // Scan errors originate from the storage/IO layer during iteration.
             BfTreeError::Scan(e) => crate::StorageError::Io(crate::BackendError::Io(
                 std::io::Error::other(alloc::format!("bf-tree scan error: {e:?}")),

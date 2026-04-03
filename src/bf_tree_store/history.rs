@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::config::BfTreeConfig;
-use super::database::{BfTreeDatabase, TableKind, encode_table_key, table_prefix, table_prefix_end};
+use super::database::{
+    BfTreeDatabase, TableKind, encode_table_key, table_prefix, table_prefix_end,
+};
 use super::error::BfTreeError;
 
 /// System table for history metadata.
@@ -200,7 +202,11 @@ impl BfTreeHistory {
                 .unwrap_or(0)
         };
 
-        let key = encode_table_key(HISTORY_META_TABLE, TableKind::Regular, &snapshot_id.to_le_bytes());
+        let key = encode_table_key(
+            HISTORY_META_TABLE,
+            TableKind::Regular,
+            &snapshot_id.to_le_bytes(),
+        );
 
         // Phase 1: Write a pending metadata entry before creating the snapshot.
         // If we crash after this but before the snapshot completes, recovery
@@ -268,7 +274,11 @@ impl BfTreeHistory {
     /// Get a specific completed history entry by snapshot ID.
     /// Returns `None` if the entry does not exist or is still pending.
     pub fn get(&self, snapshot_id: u64) -> Result<Option<HistoryEntry>, BfTreeError> {
-        let key = encode_table_key(HISTORY_META_TABLE, TableKind::Regular, &snapshot_id.to_le_bytes());
+        let key = encode_table_key(
+            HISTORY_META_TABLE,
+            TableKind::Regular,
+            &snapshot_id.to_le_bytes(),
+        );
         let max_val = self.db.adapter().inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.db.adapter().read(&key, &mut buf) {

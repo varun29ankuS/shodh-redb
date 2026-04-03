@@ -84,8 +84,7 @@ impl WriteBuffer {
     /// entries and the key is not already present (i.e., this would be a net
     /// new entry, not an overwrite of an existing buffered key).
     pub(crate) fn put(&mut self, encoded_key: Vec<u8>, value: Vec<u8>) -> Result<(), BfTreeError> {
-        if self.entries.len() >= self.max_buffer_entries
-            && !self.entries.contains_key(&encoded_key)
+        if self.entries.len() >= self.max_buffer_entries && !self.entries.contains_key(&encoded_key)
         {
             return Err(BfTreeError::InvalidKV(alloc::format!(
                 "write buffer full: {} entries (limit {})",

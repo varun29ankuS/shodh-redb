@@ -390,7 +390,8 @@ impl BfTreeDatabaseWriteTxn {
     ) -> Result<(), BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let val_bytes = V::as_bytes(value);
-        let encoded_key = encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
         self.buffer
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -408,8 +409,12 @@ impl BfTreeDatabaseWriteTxn {
         key: &K::SelfType<'_>,
     ) {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
-        self.buffer.lock().unwrap_or_else(|e| e.into_inner()).delete(encoded_key);
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        self.buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .delete(encoded_key);
         self.ops_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -423,7 +428,8 @@ impl BfTreeDatabaseWriteTxn {
         key: &K::SelfType<'_>,
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
 
         // Check write buffer first.
         {
@@ -455,7 +461,8 @@ impl BfTreeDatabaseWriteTxn {
         key: &K::SelfType<'_>,
     ) -> bool {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
 
         // Check write buffer first.
         {
@@ -535,7 +542,10 @@ impl BfTreeDatabaseWriteTxn {
         let key_bytes = name.as_bytes();
         let encoded = encode_table_key(CDC_CURSOR_TABLE_NAME, TableKind::Regular, key_bytes);
         let val_bytes = up_to_txn.to_le_bytes();
-        self.buffer.lock().unwrap_or_else(|e| e.into_inner()).put(encoded, val_bytes.to_vec())?;
+        self.buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .put(encoded, val_bytes.to_vec())?;
         Ok(())
     }
 
@@ -581,7 +591,8 @@ impl BfTreeDatabaseWriteTxn {
     /// transaction IDs are never reused, even when CDC is disabled.
     fn stage_txn_id_into_buffer(&self, buffer: &mut WriteBuffer) -> Result<(), BfTreeError> {
         let next_id = self.txn_id.saturating_add(1);
-        let encoded_key = encode_table_key(BF_META_TABLE_NAME, TableKind::Regular, BF_META_TXN_ID_KEY);
+        let encoded_key =
+            encode_table_key(BF_META_TABLE_NAME, TableKind::Regular, BF_META_TXN_ID_KEY);
         buffer.put(encoded_key, next_id.to_le_bytes().to_vec())
     }
 
@@ -598,7 +609,11 @@ impl BfTreeDatabaseWriteTxn {
 
         let cutoff_txn = self.txn_id - self.cdc_config.retention_max_txns;
         let cutoff_key = CdcKey::new(cutoff_txn, u32::MAX);
-        let cutoff_encoded = encode_table_key(CDC_LOG_TABLE_NAME, TableKind::Regular, &cutoff_key.to_be_bytes());
+        let cutoff_encoded = encode_table_key(
+            CDC_LOG_TABLE_NAME,
+            TableKind::Regular,
+            &cutoff_key.to_be_bytes(),
+        );
         let prefix = table_prefix(CDC_LOG_TABLE_NAME, TableKind::Regular);
         let prefix_len = prefix.len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
@@ -685,7 +700,8 @@ impl BfTreeDatabaseReadTxn {
         key: &K::SelfType<'_>,
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.adapter.read(&encoded_key, &mut buf) {
@@ -702,7 +718,8 @@ impl BfTreeDatabaseReadTxn {
         key: &K::SelfType<'_>,
     ) -> bool {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
         self.adapter.contains_key(&encoded_key)
     }
 
@@ -800,8 +817,16 @@ impl BfTreeDatabaseReadTxn {
         start_key: CdcKey,
         end_key: CdcKey,
     ) -> Result<Vec<ChangeStream>, BfTreeError> {
-        let start_encoded = encode_table_key(CDC_LOG_TABLE_NAME, TableKind::Regular, &start_key.to_be_bytes());
-        let end_encoded = encode_table_key(CDC_LOG_TABLE_NAME, TableKind::Regular, &end_key.to_be_bytes());
+        let start_encoded = encode_table_key(
+            CDC_LOG_TABLE_NAME,
+            TableKind::Regular,
+            &start_key.to_be_bytes(),
+        );
+        let end_encoded = encode_table_key(
+            CDC_LOG_TABLE_NAME,
+            TableKind::Regular,
+            &end_key.to_be_bytes(),
+        );
         let prefix_len = table_prefix(CDC_LOG_TABLE_NAME, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_record * 2];
@@ -995,7 +1020,8 @@ mod tests {
                         // Insert using raw bytes since we can't easily use &str generics across threads
                         let key_bytes = key_str.as_bytes();
                         let val_bytes = (t * 1000 + i).to_le_bytes();
-                        let encoded = encode_table_key(SCORES.name(), TableKind::Regular, key_bytes);
+                        let encoded =
+                            encode_table_key(SCORES.name(), TableKind::Regular, key_bytes);
                         wtxn.adapter.insert(&encoded, &val_bytes).unwrap();
                     }
                     wtxn.commit().unwrap();
@@ -1342,7 +1368,10 @@ mod tests {
 
         // Recover from the adapter (simulating reopen).
         let recovered = recover_next_txn_id(db.adapter()).unwrap();
-        assert_eq!(recovered, 6, "recovery must return 6 even without CDC entries");
+        assert_eq!(
+            recovered, 6,
+            "recovery must return 6 even without CDC entries"
+        );
     }
 
     #[test]
@@ -1436,6 +1465,9 @@ mod tests {
         }
 
         let recovered = recover_next_txn_id(db.adapter()).unwrap();
-        assert_eq!(recovered, 4, "recovery with CDC should return next available id");
+        assert_eq!(
+            recovered, 4,
+            "recovery with CDC should return next available id"
+        );
     }
 }

@@ -500,7 +500,11 @@ impl<'txn> BfTreeBlobStore<'txn> {
     }
 
     /// Decrement a dedup entry's ref-count, removing it entirely if it reaches zero.
-    fn apply_dedup_decrement(buf: &mut WriteBuffer, dedup_key: &[u8], bytes: &[u8]) -> Result<(), BfTreeError> {
+    fn apply_dedup_decrement(
+        buf: &mut WriteBuffer,
+        dedup_key: &[u8],
+        bytes: &[u8],
+    ) -> Result<(), BfTreeError> {
         if bytes.len() >= DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE {
             let mut arr = [0u8; DedupVal::SERIALIZED_SIZE];
             arr.copy_from_slice(&bytes[..DedupVal::SERIALIZED_SIZE]);
@@ -728,7 +732,10 @@ impl<'txn> BfTreeBlobStore<'txn> {
                     Vec::with_capacity(DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE);
                 val.extend_from_slice(&dedup.to_le_bytes());
                 val.extend_from_slice(&blob_id_bytes);
-                self.buffer.lock().unwrap_or_else(|e| e.into_inner()).put(key, val)?;
+                self.buffer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .put(key, val)?;
                 Ok(())
             }
             _ => Ok(()),

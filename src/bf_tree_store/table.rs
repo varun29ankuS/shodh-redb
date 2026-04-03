@@ -26,7 +26,9 @@ use super::adapter::BfTreeAdapter;
 use super::buffered_txn::{
     BufferLookup, BufferedScanIter, WriteBuffer, collect_buffer_entries_for_table,
 };
-use super::database::{BfTreeTableScan, TableKind, encode_table_key, table_prefix, table_prefix_end};
+use super::database::{
+    BfTreeTableScan, TableKind, encode_table_key, table_prefix, table_prefix_end,
+};
 use super::error::BfTreeError;
 
 /// A writable table handle backed by Bf-Tree.
@@ -181,7 +183,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
 
         if previous.is_some() {
             // Re-acquire buffer lock to write tombstone.
-            self.buffer.lock().unwrap_or_else(|e| e.into_inner()).delete(encoded_key);
+            self.buffer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .delete(encoded_key);
             self.ops_count.fetch_add(1, Ordering::Relaxed);
 
             // Record CDC event if enabled.
@@ -538,7 +543,8 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
 
     // Collect buffer entries for this range (prefix-stripped keys).
     let buf = buffer_mutex.lock().unwrap_or_else(|e| e.into_inner());
-    let buf_entries = collect_buffer_entries_for_table(&buf, name, TableKind::Regular, &scan_start, &scan_end);
+    let buf_entries =
+        collect_buffer_entries_for_table(&buf, name, TableKind::Regular, &scan_start, &scan_end);
     drop(buf);
 
     Ok(BufferedScanIter::new(

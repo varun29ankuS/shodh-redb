@@ -26,3 +26,6 @@ flamegraph.svg
 
 **/*.redb
 .claude/
+
+# Local audit docs (not for GitHub)
+AUDIT_PLAYBOOK.md

@@ -230,7 +230,11 @@ mod tests {
             let key = alloc::format!("large_{i}");
             // Insert raw bytes via the adapter since our typed API serializes u64.
             let key_bytes = key.as_bytes();
-            let encoded = super::super::database::encode_table_key(TABLE_A.name(), super::super::database::TableKind::Regular, key_bytes);
+            let encoded = super::super::database::encode_table_key(
+                TABLE_A.name(),
+                super::super::database::TableKind::Regular,
+                key_bytes,
+            );
             wtxn.adapter.insert(&encoded, &large_val).unwrap();
         }
         wtxn.commit().unwrap();
@@ -239,7 +243,11 @@ mod tests {
         for i in 0..50u64 {
             let key = alloc::format!("large_{i}");
             let key_bytes = key.as_bytes();
-            let encoded = super::super::database::encode_table_key(TABLE_A.name(), super::super::database::TableKind::Regular, key_bytes);
+            let encoded = super::super::database::encode_table_key(
+                TABLE_A.name(),
+                super::super::database::TableKind::Regular,
+                key_bytes,
+            );
             let max_val = db.adapter().inner().config().get_cb_max_record_size();
             let mut buf = vec![0u8; max_val];
             let len = rtxn.adapter.read(&encoded, &mut buf).unwrap();

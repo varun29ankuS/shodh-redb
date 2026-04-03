@@ -46,25 +46,6 @@ impl RangeIterState {
         }
     }
 
-    /// Extract the raw key bytes at the current leaf entry position.
-    /// Returns None if this is an Internal node or the entry is out of range.
-    fn leaf_key_bytes(&self) -> Option<Vec<u8>> {
-        match self {
-            Leaf {
-                page,
-                fixed_key_size,
-                fixed_value_size,
-                entry,
-                ..
-            } => {
-                let accessor = LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size);
-                let (key_range, _) = accessor.entry_ranges(*entry)?;
-                Some(page.memory()[key_range].to_vec())
-            }
-            Internal { .. } => None,
-        }
-    }
-
     fn next(self, reverse: bool, manager: &TransactionalMemory) -> Result<Option<RangeIterState>> {
         match self {
             Leaf {
@@ -382,12 +363,7 @@ pub(crate) struct BtreeExtractIf<
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     mem: Arc<TransactionalMemory>,
     compression: CompressionConfig,
-    /// Saved raw key bytes of the left bound for re-seeking after backward mutations.
-    /// None means the original range had an unbounded left end.
-    left_bound_key: Option<Vec<u8>>,
-    /// Saved raw key bytes of the right bound for re-seeking after forward mutations.
-    /// None means the original range had an unbounded right end.
-    right_bound_key: Option<Vec<u8>>,
+
 }
 
 impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>
@@ -402,9 +378,6 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
         mem: Arc<TransactionalMemory>,
         compression: CompressionConfig,
     ) -> Self {
-        // Save the bound key bytes so we can rebuild the iterator after mutations.
-        let left_bound_key = inner.left.as_ref().and_then(|s| s.leaf_key_bytes());
-        let right_bound_key = inner.right.as_ref().and_then(|s| s.leaf_key_bytes());
         Self {
             root,
             inner,
@@ -414,8 +387,6 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
             allocated,
             mem,
             compression,
-            left_bound_key,
-            right_bound_key,
         }
     }
 }
@@ -448,16 +419,6 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                     Err(x) => {
                         return Some(Err(x));
                     }
-                }
-                // After the delete, the tree structure may have changed (page
-                // merges, rebalances). Re-seek the iterator from the deleted key
-                // to ensure we are not following stale page references.
-                if let Err(e) = self.inner.reseed_after_mutation(
-                    *self.root,
-                    &deleted_key,
-                    self.right_bound_key.as_deref(),
-                ) {
-                    return Some(Err(e));
                 }
                 break;
             }
@@ -493,16 +454,6 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                     Err(x) => {
                         return Some(Err(x));
                     }
-                }
-                // After the delete, the tree structure may have changed (page
-                // merges, rebalances). Re-seek the iterator from the deleted key
-                // to ensure we are not following stale page references.
-                if let Err(e) = self.inner.reseed_after_mutation_back(
-                    *self.root,
-                    &deleted_key,
-                    self.left_bound_key.as_deref(),
-                ) {
-                    return Some(Err(e));
                 }
                 break;
             }
@@ -675,123 +626,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
         self.right = None;
     }
 
-    /// Rebuild the iterator after a tree mutation (e.g. delete during `extract_if`).
-    /// `deleted_key` is the raw key bytes of the deleted entry.
-    /// `right_key` is the optional raw key bytes of the original right bound (inclusive).
-    /// The left cursor is re-seeked to the position of `deleted_key` (exclusive),
-    /// and the right cursor is rebuilt from `right_key` (inclusive) if provided.
-    fn reseed_after_mutation(
-        &mut self,
-        root: Option<BtreeHeader>,
-        deleted_key: &[u8],
-        right_key: Option<&[u8]>,
-    ) -> Result<()> {
-        let fixed_value_size = V::fixed_width();
-        if let Some(header) = root {
-            let root_page = self.manager.get_page(header.root)?;
-            let (_, left) = find_iter_left::<K, V>(
-                root_page,
-                None,
-                deleted_key,
-                false,
-                fixed_value_size,
-                &self.manager,
-                Some(header.checksum),
-            )?;
-            self.left = left;
-            self.include_left = false;
-
-            if let Some(rk) = right_key {
-                let root_page = self.manager.get_page(header.root)?;
-                let (include_right, right) = find_iter_right::<K, V>(
-                    root_page,
-                    None,
-                    rk,
-                    true,
-                    fixed_value_size,
-                    &self.manager,
-                    Some(header.checksum),
-                )?;
-                self.right = right;
-                self.include_right = include_right;
-            } else {
-                let root_page = self.manager.get_page(header.root)?;
-                let right = find_iter_unbounded::<K, V>(
-                    root_page,
-                    None,
-                    true,
-                    fixed_value_size,
-                    &self.manager,
-                    Some(header.checksum),
-                )?;
-                self.right = right;
-                self.include_right = true;
-            }
-        } else {
-            self.left = None;
-            self.right = None;
-        }
-        Ok(())
-    }
-
-    /// Rebuild the iterator after a backward delete during `extract_if`.
-    /// `deleted_key` is the raw key bytes of the deleted entry.
-    /// `left_key` is the optional raw key bytes of the original left bound (inclusive).
-    /// The right cursor is re-seeked to the position of `deleted_key` (exclusive),
-    /// and the left cursor is rebuilt from `left_key` (inclusive) if provided.
-    fn reseed_after_mutation_back(
-        &mut self,
-        root: Option<BtreeHeader>,
-        deleted_key: &[u8],
-        left_key: Option<&[u8]>,
-    ) -> Result<()> {
-        let fixed_value_size = V::fixed_width();
-        if let Some(header) = root {
-            let root_page = self.manager.get_page(header.root)?;
-            let (_, right) = find_iter_right::<K, V>(
-                root_page,
-                None,
-                deleted_key,
-                false,
-                fixed_value_size,
-                &self.manager,
-                Some(header.checksum),
-            )?;
-            self.right = right;
-            self.include_right = false;
-
-            if let Some(lk) = left_key {
-                let root_page = self.manager.get_page(header.root)?;
-                let (include_left, left) = find_iter_left::<K, V>(
-                    root_page,
-                    None,
-                    lk,
-                    true,
-                    fixed_value_size,
-                    &self.manager,
-                    Some(header.checksum),
-                )?;
-                self.left = left;
-                self.include_left = include_left;
-            } else {
-                let root_page = self.manager.get_page(header.root)?;
-                let left = find_iter_unbounded::<K, V>(
-                    root_page,
-                    None,
-                    false,
-                    fixed_value_size,
-                    &self.manager,
-                    Some(header.checksum),
-                )?;
-                self.left = left;
-                self.include_left = true;
-            }
-        } else {
-            self.left = None;
-            self.right = None;
-        }
-        Ok(())
-    }
 }
 
 impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {

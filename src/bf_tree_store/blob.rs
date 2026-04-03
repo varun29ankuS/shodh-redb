@@ -1464,7 +1464,7 @@ mod tests {
 
         let read_data = blob_store.read(blob_id).unwrap().unwrap();
         assert_eq!(read_data, data);
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
 
         let rtxn = db.begin_read();
@@ -1479,6 +1479,7 @@ mod tests {
         let wtxn = db.begin_write();
         let blob_store = wtxn.open_blob_store();
 
+        #[allow(clippy::cast_possible_truncation)]
         let data: Vec<u8> = (0..5000u32).map(|i| (i % 256) as u8).collect();
         let blob_id = blob_store
             .store(
@@ -1492,7 +1493,7 @@ mod tests {
         let read_data = blob_store.read(blob_id).unwrap().unwrap();
         assert_eq!(read_data.len(), data.len());
         assert_eq!(read_data, data);
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
     }
 
@@ -1514,7 +1515,7 @@ mod tests {
         let blob_id = writer.finish().unwrap();
         let read_data = blob_store.read(blob_id).unwrap().unwrap();
         assert_eq!(read_data, b"chunk1-chunk2-chunk3");
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
     }
 
@@ -1542,7 +1543,7 @@ mod tests {
 
         let range = blob_store.read_range(blob_id, 16, 10).unwrap();
         assert!(range.is_empty());
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
     }
 
@@ -1566,7 +1567,7 @@ mod tests {
         assert!(deleted);
         assert!(blob_store.read(blob_id).unwrap().is_none());
         assert!(!blob_store.delete(blob_id).unwrap());
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
     }
 
@@ -1590,7 +1591,7 @@ mod tests {
         assert_eq!(meta.blob_ref.content_type, ContentType::ImagePng.as_byte());
         assert_eq!(meta.label_str(), "my-image");
         assert!(meta.causal_parent.is_none());
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
     }
 
@@ -1608,7 +1609,7 @@ mod tests {
             .store(b"sensor-data", ContentType::SensorImu, "imu-reading", opts)
             .unwrap();
 
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
 
         let rtxn = db.begin_read();
@@ -1650,7 +1651,7 @@ mod tests {
             .store(b"child", ContentType::OctetStream, "child", opts)
             .unwrap();
 
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
 
         let rtxn = db.begin_read();
@@ -1676,7 +1677,7 @@ mod tests {
             .store(b"ns-data", ContentType::OctetStream, "ns-blob", opts)
             .unwrap();
 
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
 
         let wtxn2 = db.begin_write();
@@ -1711,7 +1712,7 @@ mod tests {
             )
             .unwrap();
 
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
 
         let wtxn2 = db.begin_write();
@@ -1762,7 +1763,7 @@ mod tests {
             )
             .unwrap();
 
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
 
         let wtxn2 = db.begin_write();
@@ -1793,7 +1794,7 @@ mod tests {
 
         let meta = blob_store.get_meta(blob_id).unwrap().unwrap();
         assert_eq!(meta.blob_ref.length, 0);
-        drop(blob_store);
+        let _ = blob_store;
         wtxn.commit().unwrap();
     }
 }

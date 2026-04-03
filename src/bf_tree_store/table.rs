@@ -902,22 +902,15 @@ mod tests {
         // Inclusive start "b", exclusive end "d"
         let s = "b";
         let e = "d";
-        let iter = WriteTable::st_range(
-            &table,
-            Some(&(&s as &str)),
-            Some(&(&e as &str)),
-            true,
-            false,
-        )
-        .unwrap();
+        let s_ref: &str = s;
+        let e_ref: &str = e;
+        let iter = WriteTable::st_range(&table, Some(&s_ref), Some(&e_ref), true, false).unwrap();
         let entries: Vec<_> = iter.collect::<Result<Vec<_>, _>>().unwrap();
         let keys: Vec<&str> = entries.iter().map(|(k, _)| k.value()).collect();
         assert_eq!(keys, vec!["b", "c"]);
 
         // Inclusive both sides "b"..="d"
-        let iter =
-            WriteTable::st_range(&table, Some(&(&s as &str)), Some(&(&e as &str)), true, true)
-                .unwrap();
+        let iter = WriteTable::st_range(&table, Some(&s_ref), Some(&e_ref), true, true).unwrap();
         let entries: Vec<_> = iter.collect::<Result<Vec<_>, _>>().unwrap();
         let keys: Vec<&str> = entries.iter().map(|(k, _)| k.value()).collect();
         assert_eq!(keys, vec!["b", "c", "d"]);

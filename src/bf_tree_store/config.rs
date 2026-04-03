@@ -41,10 +41,10 @@ pub enum BfTreeBackend {
     Memory,
     /// Standard file I/O (cross-platform).
     Std,
-    /// Linux io_uring in blocking mode (Linux only, better throughput).
+    /// Linux `io_uring` in blocking mode (Linux only, better throughput).
     #[cfg(target_os = "linux")]
     IoUringBlocking,
-    /// Linux io_uring in polling mode (Linux only, lowest latency).
+    /// Linux `io_uring` in polling mode (Linux only, lowest latency).
     #[cfg(target_os = "linux")]
     IoUringPolling,
 }

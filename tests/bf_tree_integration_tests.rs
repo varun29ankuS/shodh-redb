@@ -58,7 +58,7 @@ fn crud_insert_get_update_delete() {
     t.insert(&"alice", &"engineer").unwrap();
     t.insert(&"bob", &"designer").unwrap();
     t.insert(&"carol", &"pm").unwrap();
-    drop(t);
+    let _ = t;
     wtxn.commit().unwrap();
 
     // Read back
@@ -73,7 +73,7 @@ fn crud_insert_get_update_delete() {
     let wtxn = db.begin_write();
     let mut t = wtxn.open_table(USERS);
     t.insert(&"alice", &"staff engineer").unwrap();
-    drop(t);
+    let _ = t;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
@@ -84,7 +84,7 @@ fn crud_insert_get_update_delete() {
     let wtxn = db.begin_write();
     let mut t = wtxn.open_table(USERS);
     t.remove(&"bob").unwrap();
-    drop(t);
+    let _ = t;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
@@ -101,7 +101,7 @@ fn transaction_rollback_on_drop() {
     let wtxn = db.begin_write();
     let mut t = wtxn.open_table(COUNTERS);
     t.insert(&"x", &100u64).unwrap();
-    drop(t);
+    let _ = t;
     wtxn.commit().unwrap();
 
     // Start a write txn, mutate, but DROP without committing
@@ -110,7 +110,7 @@ fn transaction_rollback_on_drop() {
         let mut t = wtxn.open_table(COUNTERS);
         t.insert(&"x", &999u64).unwrap();
         t.insert(&"y", &42u64).unwrap();
-        drop(t);
+        let _ = t;
         // wtxn dropped here — implicit rollback
     }
 
@@ -131,7 +131,7 @@ fn range_scan_ordered() {
     for i in 0u64..20 {
         t.insert(&i, &(i * 10)).unwrap();
     }
-    drop(t);
+    let _ = t;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
@@ -192,7 +192,7 @@ fn ttl_table_expiry() {
         .unwrap();
     ttl.insert_with_ttl(&"persistent", &"stays", Duration::from_secs(60))
         .unwrap();
-    drop(ttl);
+    let _ = ttl;
     wtxn.commit().unwrap();
 
     // Wait for expiry
@@ -225,7 +225,7 @@ fn multimap_multiple_values_per_key() {
     mm.insert(&"post:1", &"embedded").unwrap();
     mm.insert(&"post:2", &"rust").unwrap();
     mm.insert(&"post:2", &"wasm").unwrap();
-    drop(mm);
+    let _ = mm;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
@@ -241,7 +241,7 @@ fn multimap_multiple_values_per_key() {
     let wtxn = db.begin_write();
     let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
     mm.remove(&"post:1", &"database").unwrap();
-    drop(mm);
+    let _ = mm;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
@@ -272,7 +272,7 @@ fn blob_store_and_read() {
                 StoreOptions::default(),
             )
             .unwrap();
-        drop(bs);
+        let _ = bs;
         wtxn.commit().unwrap();
     }
 
@@ -306,7 +306,7 @@ fn blob_large_chunked() {
                 StoreOptions::default(),
             )
             .unwrap();
-        drop(bs);
+        let _ = bs;
         wtxn.commit().unwrap();
     }
 
@@ -384,7 +384,7 @@ fn blob_tags_and_namespace() {
         "should see namespace entries before commit"
     );
 
-    drop(bs);
+    let _ = bs;
     wtxn.commit().unwrap();
 
     // Also verify after commit (data persisted to BfTree)
@@ -437,7 +437,7 @@ fn blob_causal_graph() {
     let content = bs.read(child_id).unwrap().unwrap();
     assert_eq!(content, b"child");
 
-    drop(bs);
+    let _ = bs;
     wtxn.commit().unwrap();
 
     // Verify persistence after commit
@@ -529,7 +529,7 @@ fn history_snapshot_and_restore() {
     let wtxn = db.begin_write();
     let mut t = wtxn.open_table(USERS);
     t.insert(&"alice", &"v1").unwrap();
-    drop(t);
+    let _ = t;
     wtxn.commit().unwrap();
 
     // Take snapshot
@@ -553,7 +553,7 @@ fn history_snapshot_and_restore() {
     let wtxn = db.begin_write();
     let mut t = wtxn.open_table(USERS);
     t.insert(&"bob", &"new").unwrap();
-    drop(t);
+    let _ = t;
     wtxn.commit().unwrap();
 
     let (snap_id2, _) = history.commit_snapshot().unwrap();
@@ -612,7 +612,7 @@ fn unified_api_bftree_backend() {
     let wtxn = db.begin_write();
     let mut t = wtxn.open_table(COUNTERS);
     t.insert(&"unified", &42u64).unwrap();
-    drop(t);
+    let _ = t;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
@@ -658,7 +658,7 @@ fn cdc_records_changes() {
     let mut t = wtxn.open_table(USERS);
     t.insert(&"alice", &"engineer").unwrap();
     t.insert(&"bob", &"designer").unwrap();
-    drop(t);
+    let _ = t;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
@@ -687,7 +687,7 @@ fn concurrent_readers_and_writers() {
                 let mut t = wtxn.open_table(SCORES);
                 let key = thread_id * 1000 + i;
                 t.insert(&key, &(key * 10)).unwrap();
-                drop(t);
+                let _ = t;
                 wtxn.commit().unwrap();
             }
         }));
@@ -782,7 +782,7 @@ fn iot_sensor_pipeline() {
             )
             .unwrap();
 
-        drop(bs);
+        let _ = bs;
         wtxn.commit().unwrap();
 
         // Query after commit
@@ -803,7 +803,7 @@ fn iot_sensor_pipeline() {
 
         ttl.insert_with_ttl(&99999u64, &12345u64, Duration::from_secs(3600))
             .unwrap();
-        drop(ttl);
+        let _ = ttl;
         wtxn.commit().unwrap();
 
         let rtxn = db.begin_read();
@@ -864,7 +864,7 @@ fn knowledge_graph_workflow() {
         )
         .unwrap();
 
-    drop(bs);
+    let _ = bs;
 
     // Multimap: tag → doc sequence index
     let mut mm = wtxn.open_multimap_table::<&str, u64>("doc_tags");
@@ -872,7 +872,7 @@ fn knowledge_graph_workflow() {
     mm.insert(&"programming", &doc1.sequence).unwrap();
     mm.insert(&"bftree", &doc2.sequence).unwrap();
     mm.insert(&"database", &doc2.sequence).unwrap();
-    drop(mm);
+    let _ = mm;
     wtxn.commit().unwrap();
 
     // Query

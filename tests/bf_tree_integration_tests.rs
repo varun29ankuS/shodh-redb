@@ -777,7 +777,6 @@ fn iot_sensor_pipeline() {
                         relation: RelationType::Derived,
                         context: "anomaly detection".into(),
                     }),
-                    ..Default::default()
                 },
             )
             .unwrap();

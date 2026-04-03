@@ -363,7 +363,6 @@ pub(crate) struct BtreeExtractIf<
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     mem: Arc<TransactionalMemory>,
     compression: CompressionConfig,
-
 }
 
 impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>
@@ -625,7 +624,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
         self.left = None;
         self.right = None;
     }
-
 }
 
 impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {

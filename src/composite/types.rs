@@ -20,15 +20,15 @@ impl SignalWeights {
     /// Returns normalized weights as f64 that sum to 1.0.
     /// If all weights are zero, returns (0, 0, 0).
     pub(crate) fn normalized_f64(&self) -> (f64, f64, f64) {
-        let total = f64::from(self.semantic) + f64::from(self.temporal) + f64::from(self.causal);
+        // Clamp negative weights to zero before normalization
+        let sem = f64::from(self.semantic).max(0.0);
+        let tmp = f64::from(self.temporal).max(0.0);
+        let cau = f64::from(self.causal).max(0.0);
+        let total = sem + tmp + cau;
         if total <= f64::from(f32::EPSILON) {
             return (0.0, 0.0, 0.0);
         }
-        (
-            f64::from(self.semantic) / total,
-            f64::from(self.temporal) / total,
-            f64::from(self.causal) / total,
-        )
+        (sem / total, tmp / total, cau / total)
     }
 
     pub(crate) fn any_active(&self) -> bool {
@@ -109,10 +109,7 @@ impl PartialOrd for HeapEntry {
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse: BinaryHeap is max-heap, we want min at top for eviction
-        other
-            .score
-            .partial_cmp(&self.score)
-            .unwrap_or(Ordering::Equal)
+        other.score.total_cmp(&self.score)
     }
 }
 
@@ -130,6 +127,6 @@ impl HeapEntry {
 /// Collect `HeapEntry` items into a sorted `Vec<ScoredBlob>` (highest score first).
 pub(crate) fn heap_to_sorted(heap: alloc::collections::BinaryHeap<HeapEntry>) -> Vec<ScoredBlob> {
     let mut results: Vec<ScoredBlob> = heap.into_iter().map(|e| e.into_scored_blob()).collect();
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+    results.sort_by(|a, b| b.score.total_cmp(&a.score));
     results
 }

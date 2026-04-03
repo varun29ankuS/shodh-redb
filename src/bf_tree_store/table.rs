@@ -101,26 +101,33 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let val_bytes = V::as_bytes(value);
         let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
 
-        let mut buffer = self.buffer.lock().unwrap();
-
         // Determine previous visible value: check buffer first, then BfTree.
-        let previous = match buffer.get(&encoded_key) {
-            BufferLookup::Found(v) => Some(v),
-            BufferLookup::Tombstone => None,
-            BufferLookup::NotInBuffer => {
-                let max_val = self.adapter.inner().config().get_cb_max_record_size();
-                let mut buf = vec![0u8; max_val];
-                match self.adapter.read(&encoded_key, &mut buf) {
-                    Ok(len) => Some(buf[..len as usize].to_vec()),
-                    Err(BfTreeError::NotFound | BfTreeError::Deleted) => None,
-                    Err(e) => return Err(e),
+        // Release the buffer lock before performing BfTree I/O to avoid
+        // holding the mutex across potentially slow disk reads.
+        let previous = {
+            let buffer = self.buffer.lock().unwrap();
+            match buffer.get(&encoded_key) {
+                BufferLookup::Found(v) => Some(v),
+                BufferLookup::Tombstone => None,
+                BufferLookup::NotInBuffer => {
+                    drop(buffer);
+                    // Read from BfTree without holding the buffer lock.
+                    let max_val = self.adapter.inner().config().get_cb_max_record_size();
+                    let mut buf = vec![0u8; max_val];
+                    match self.adapter.read(&encoded_key, &mut buf) {
+                        Ok(len) => Some(buf[..len as usize].to_vec()),
+                        Err(BfTreeError::NotFound | BfTreeError::Deleted) => None,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
         };
 
-        // Write to buffer (not directly to BfTree).
-        buffer.put(encoded_key, val_bytes.as_ref().to_vec());
-        drop(buffer);
+        // Re-acquire the lock to write the new value into the buffer.
+        {
+            let mut buffer = self.buffer.lock().unwrap();
+            buffer.put(encoded_key, val_bytes.as_ref().to_vec());
+        }
 
         self.ops_count.fetch_add(1, Ordering::Relaxed);
 
@@ -150,26 +157,31 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
 
-        let mut buffer = self.buffer.lock().unwrap();
-
         // Determine previous visible value: check buffer first, then BfTree.
-        let previous = match buffer.get(&encoded_key) {
-            BufferLookup::Found(v) => Some(v),
-            BufferLookup::Tombstone => None,
-            BufferLookup::NotInBuffer => {
-                let max_val = self.adapter.inner().config().get_cb_max_record_size();
-                let mut buf = vec![0u8; max_val];
-                match self.adapter.read(&encoded_key, &mut buf) {
-                    Ok(len) => Some(buf[..len as usize].to_vec()),
-                    Err(BfTreeError::NotFound | BfTreeError::Deleted) => None,
-                    Err(e) => return Err(e),
+        // Release the buffer lock before performing BfTree I/O to avoid
+        // holding the mutex across potentially slow disk reads.
+        let previous = {
+            let buffer = self.buffer.lock().unwrap();
+            match buffer.get(&encoded_key) {
+                BufferLookup::Found(v) => Some(v),
+                BufferLookup::Tombstone => None,
+                BufferLookup::NotInBuffer => {
+                    drop(buffer);
+                    // Read from BfTree without holding the buffer lock.
+                    let max_val = self.adapter.inner().config().get_cb_max_record_size();
+                    let mut buf = vec![0u8; max_val];
+                    match self.adapter.read(&encoded_key, &mut buf) {
+                        Ok(len) => Some(buf[..len as usize].to_vec()),
+                        Err(BfTreeError::NotFound | BfTreeError::Deleted) => None,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
         };
 
         if previous.is_some() {
-            buffer.delete(encoded_key);
-            drop(buffer);
+            // Re-acquire buffer lock to write tombstone.
+            self.buffer.lock().unwrap().delete(encoded_key);
             self.ops_count.fetch_add(1, Ordering::Relaxed);
 
             // Record CDC event if enabled.
@@ -182,8 +194,6 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                     old_value: previous.clone(),
                 });
             }
-        } else {
-            drop(buffer);
         }
 
         Ok(previous)
@@ -228,28 +238,36 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, key_bytes.as_ref());
 
-        let mut buffer = self.buffer.lock().unwrap();
-
-        let existing = match buffer.get(&encoded_key) {
-            BufferLookup::Found(v) => Some(v),
-            BufferLookup::Tombstone => None,
-            BufferLookup::NotInBuffer => {
-                let max_val = self.adapter.inner().config().get_cb_max_record_size();
-                let mut buf = vec![0u8; max_val];
-                match self.adapter.read(&encoded_key, &mut buf) {
-                    Ok(len) => Some(buf[..len as usize].to_vec()),
-                    Err(BfTreeError::NotFound | BfTreeError::Deleted) => None,
-                    Err(e) => return Err(e),
+        // Read existing value: check buffer first, then BfTree.
+        // Release the buffer lock before performing BfTree I/O to avoid
+        // holding the mutex across potentially slow disk reads.
+        let existing = {
+            let buffer = self.buffer.lock().unwrap();
+            match buffer.get(&encoded_key) {
+                BufferLookup::Found(v) => Some(v),
+                BufferLookup::Tombstone => None,
+                BufferLookup::NotInBuffer => {
+                    drop(buffer);
+                    let max_val = self.adapter.inner().config().get_cb_max_record_size();
+                    let mut buf = vec![0u8; max_val];
+                    match self.adapter.read(&encoded_key, &mut buf) {
+                        Ok(len) => Some(buf[..len as usize].to_vec()),
+                        Err(BfTreeError::NotFound | BfTreeError::Deleted) => None,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
         };
 
-        match operator.merge(key_bytes.as_ref(), existing.as_deref(), operand) {
-            Some(new_val) => buffer.put(encoded_key, new_val),
-            None => buffer.delete(encoded_key),
+        // Re-acquire buffer lock to apply the merge result.
+        {
+            let mut buffer = self.buffer.lock().unwrap();
+            match operator.merge(key_bytes.as_ref(), existing.as_deref(), operand) {
+                Some(new_val) => buffer.put(encoded_key, new_val),
+                None => buffer.delete(encoded_key),
+            }
         }
 
-        drop(buffer);
         self.ops_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }

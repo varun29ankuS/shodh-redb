@@ -91,8 +91,7 @@ impl std::io::Read for BlobReader {
             return Ok(0);
         }
 
-        #[allow(clippy::cast_possible_truncation)]
-        let remaining = (self.blob_length - self.position) as usize;
+        let remaining = usize::try_from(self.blob_length - self.position).unwrap_or(usize::MAX);
         let to_read = buf.len().min(remaining);
         if to_read == 0 {
             return Ok(0);

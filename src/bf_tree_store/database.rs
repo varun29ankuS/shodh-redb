@@ -151,29 +151,59 @@ impl BfTreeDatabase {
     }
 }
 
-/// Recover the next transaction ID from the latest CDC log entry.
-/// Scans the CDC log table backwards and returns `latest_txn_id + 1`.
+/// Recover the next transaction ID from the latest CDC log and cursor entries.
+///
+/// Scans both the CDC log table and the CDC cursor table to find the highest
+/// known transaction ID. This prevents the counter from resetting after
+/// retention pruning removes old CDC log entries whose IDs might still be
+/// referenced by cursors.
 fn recover_next_txn_id(adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
-    let prefix = table_prefix(CDC_LOG_TABLE_NAME);
-    let prefix_end = table_prefix_end(CDC_LOG_TABLE_NAME);
-    let prefix_len = prefix.len();
     let max_record = adapter.inner().config().get_cb_max_record_size();
     let mut buf = vec![0u8; max_record * 2];
-    let mut iter = adapter.scan_range(&prefix, &prefix_end)?;
     let mut max_txn_id: u64 = 0;
-    while let Some((key_len, _val_len)) = iter.next(&mut buf) {
-        if key_len > prefix_len + CdcKey::SERIALIZED_SIZE {
-            // Should not happen, but be defensive
-            continue;
-        }
-        let key_bytes = &buf[prefix_len..key_len];
-        if key_bytes.len() >= CdcKey::SERIALIZED_SIZE {
-            let cdc_key = CdcKey::from_le_bytes(key_bytes);
-            if cdc_key.transaction_id > max_txn_id {
-                max_txn_id = cdc_key.transaction_id;
+
+    // Scan CDC log entries for the highest transaction ID.
+    {
+        let prefix = table_prefix(CDC_LOG_TABLE_NAME);
+        let prefix_end = table_prefix_end(CDC_LOG_TABLE_NAME);
+        let prefix_len = prefix.len();
+        let mut iter = adapter.scan_range(&prefix, &prefix_end)?;
+        while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+            if key_len > prefix_len + CdcKey::SERIALIZED_SIZE {
+                continue;
+            }
+            let key_bytes = &buf[prefix_len..key_len];
+            if key_bytes.len() >= CdcKey::SERIALIZED_SIZE {
+                let cdc_key = CdcKey::from_le_bytes(key_bytes);
+                if cdc_key.transaction_id > max_txn_id {
+                    max_txn_id = cdc_key.transaction_id;
+                }
             }
         }
     }
+
+    // Scan CDC cursor entries for the highest stored transaction ID.
+    // Cursors store `u64` LE values representing the last consumed txn_id,
+    // which may exceed the CDC log's max after retention pruning.
+    {
+        let prefix = table_prefix(CDC_CURSOR_TABLE_NAME);
+        let prefix_end = table_prefix_end(CDC_CURSOR_TABLE_NAME);
+        let prefix_len = prefix.len();
+        let mut iter = adapter.scan_range(&prefix, &prefix_end)?;
+        while let Some((key_len, val_len)) = iter.next(&mut buf) {
+            if key_len <= prefix_len {
+                continue;
+            }
+            let val_bytes = &buf[key_len..key_len + val_len];
+            if val_bytes.len() >= 8 {
+                let cursor_txn = u64::from_le_bytes(val_bytes[..8].try_into().unwrap());
+                if cursor_txn > max_txn_id {
+                    max_txn_id = cursor_txn;
+                }
+            }
+        }
+    }
+
     Ok(max_txn_id.saturating_add(1))
 }
 
@@ -317,6 +347,9 @@ impl BfTreeDatabaseWriteTxn {
     }
 
     /// Read a typed value from the specified table.
+    ///
+    /// Checks the write buffer first (for read-your-writes), then falls
+    /// through to `BfTree` if the key is not in the buffer.
     pub fn get<K: Key + 'static, V: Value + 'static>(
         &self,
         definition: &TableDefinition<K, V>,
@@ -324,6 +357,18 @@ impl BfTreeDatabaseWriteTxn {
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(definition.name(), key_bytes.as_ref());
+
+        // Check write buffer first.
+        {
+            let buffer = self.buffer.lock().unwrap();
+            match buffer.get(&encoded_key) {
+                super::buffered_txn::BufferLookup::Found(v) => return Ok(Some(v)),
+                super::buffered_txn::BufferLookup::Tombstone => return Ok(None),
+                super::buffered_txn::BufferLookup::NotInBuffer => {}
+            }
+        }
+
+        // Fall through to BfTree.
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.adapter.read(&encoded_key, &mut buf) {
@@ -334,6 +379,9 @@ impl BfTreeDatabaseWriteTxn {
     }
 
     /// Check if a key exists in the table.
+    ///
+    /// Checks the write buffer first (for read-your-writes), then falls
+    /// through to `BfTree` if the key is not in the buffer.
     pub fn contains_key<K: Key + 'static, V: Value + 'static>(
         &self,
         definition: &TableDefinition<K, V>,
@@ -341,6 +389,18 @@ impl BfTreeDatabaseWriteTxn {
     ) -> bool {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(definition.name(), key_bytes.as_ref());
+
+        // Check write buffer first.
+        {
+            let buffer = self.buffer.lock().unwrap();
+            match buffer.get(&encoded_key) {
+                super::buffered_txn::BufferLookup::Found(_) => return true,
+                super::buffered_txn::BufferLookup::Tombstone => return false,
+                super::buffered_txn::BufferLookup::NotInBuffer => {}
+            }
+        }
+
+        // Fall through to BfTree.
         self.adapter.contains_key(&encoded_key)
     }
 
@@ -385,11 +445,14 @@ impl BfTreeDatabaseWriteTxn {
     }
 
     /// Advance a named CDC cursor to the given transaction ID.
+    ///
+    /// Routed through the write buffer so that cursor advances are rolled back
+    /// on abort and committed atomically with the rest of the transaction.
     pub fn advance_cdc_cursor(&self, name: &str, up_to_txn: u64) -> Result<(), BfTreeError> {
         let key_bytes = name.as_bytes();
         let encoded = encode_table_key(CDC_CURSOR_TABLE_NAME, key_bytes);
         let val_bytes = up_to_txn.to_le_bytes();
-        self.adapter.insert(&encoded, &val_bytes)?;
+        self.buffer.lock().unwrap().put(encoded, val_bytes.to_vec());
         Ok(())
     }
 
@@ -410,8 +473,15 @@ impl BfTreeDatabaseWriteTxn {
         };
 
         for (seq, event) in events.iter().enumerate() {
-            let key = CdcKey::new(self.txn_id, u32::try_from(seq).unwrap_or(u32::MAX));
-            let record = CdcRecord::from_event(event);
+            let seq_u32 = u32::try_from(seq).map_err(|_| {
+                BfTreeError::InvalidKV(alloc::format!(
+                    "CDC sequence {seq} exceeds u32::MAX; too many events in one transaction"
+                ))
+            })?;
+            let key = CdcKey::new(self.txn_id, seq_u32);
+            let record = CdcRecord::from_event(event).map_err(|e| {
+                BfTreeError::InvalidKV(alloc::format!("CDC record serialization error: {e}"))
+            })?;
             let key_bytes = key.to_le_bytes();
             let val_bytes = record.serialize();
             let encoded_key = encode_table_key(CDC_LOG_TABLE_NAME, &key_bytes);
@@ -678,15 +748,16 @@ impl BfTreeTableScan<'_> {
     /// The `buf` must be large enough to hold key + value.
     /// Returns `None` when no more entries exist.
     pub fn next<'buf>(&mut self, buf: &'buf mut [u8]) -> Option<(&'buf [u8], &'buf [u8])> {
-        let (key_len, val_len) = self.iter.next(buf)?;
-        // Strip the table prefix from the key.
-        if key_len > self.prefix_len {
-            let key = &buf[self.prefix_len..key_len];
-            let val = &buf[key_len..key_len + val_len];
-            Some((key, val))
-        } else {
-            // Shouldn't happen for well-formed data, but be defensive.
-            None
+        loop {
+            let (key_len, val_len) = self.iter.next(buf)?;
+            // Strip the table prefix from the key.
+            if key_len > self.prefix_len {
+                let key = &buf[self.prefix_len..key_len];
+                let val = &buf[key_len..key_len + val_len];
+                return Some((key, val));
+            }
+            // Malformed entry (key_len <= prefix_len) -- skip and try the next
+            // entry instead of terminating the entire scan.
         }
     }
 }

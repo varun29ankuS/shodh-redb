@@ -59,6 +59,8 @@ impl<const N: usize> Value for FixedVec<N> {
             "FixedVec<{N}>::from_bytes: truncated data ({} < {expected})",
             data.len(),
         );
+        // In release mode, gracefully handle truncated data by zero-padding
+        // the remaining dimensions rather than reading out-of-bounds.
         let usable = data.len().min(expected);
         let dims = usable / 4;
         for (i, val) in result.iter_mut().enumerate().take(dims) {

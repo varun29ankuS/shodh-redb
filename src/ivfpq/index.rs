@@ -219,7 +219,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         // 2. Train PQ codebooks.
         let codebooks =
-            pq::train_codebooks(&flat, dim, num_subvectors, max_iter, self.config.metric);
+            pq::train_codebooks(&flat, dim, num_subvectors, max_iter, self.config.metric)?;
 
         // 3. Clear stale data from a previous training cycle.
         //    Old centroids beyond actual_k, old postings, assignments, and raw
@@ -955,9 +955,7 @@ impl PartialOrd for CandidateEntry {
 
 impl Ord for CandidateEntry {
     fn cmp(&self, other: &Self) -> CmpOrdering {
-        self.distance
-            .partial_cmp(&other.distance)
-            .unwrap_or(CmpOrdering::Equal)
+        self.distance.total_cmp(&other.distance)
     }
 }
 

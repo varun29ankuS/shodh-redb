@@ -357,6 +357,11 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         let mut data_offset = 0usize;
         let mut current_offset = offset;
 
+        // Collect old physical blocks to defer freeing until after the entire
+        // write loop completes. This prevents a block freed in iteration N from
+        // being reallocated as new_phys in iteration N+1 (double-free risk).
+        let mut deferred_free: Vec<u32> = Vec::new();
+
         while remaining > 0 {
             let logical_block = u32::try_from(current_offset / ebs_u64).unwrap_or(u32::MAX);
             let offset_in_block = (current_offset % ebs_u64) as usize;
@@ -383,7 +388,19 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
 
             // Erase the new block -- widen to u64 before adding to prevent u32 overflow
             let global_new = u64::from(state.data_region_start) + u64::from(new_phys);
-            let global_new_u32 = (global_new & 0xFFFF_FFFF) as u32;
+            let global_new_u32 = u32::try_from(global_new).map_err(|_| {
+                #[cfg(feature = "std")]
+                {
+                    BackendError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "block index exceeds u32 range",
+                    ))
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    BackendError::Message(String::from("block index exceeds u32 range"))
+                }
+            })?;
             state.hw.erase_block(global_new_u32)?;
             state.erase_counts.increment(global_new_u32);
             state.ops_since_static_wl += 1;
@@ -403,9 +420,9 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             // Update mapping
             state.block_map.assign(logical_block, new_phys);
 
-            // Release old physical block back to free list
+            // Defer releasing the old physical block until after the loop
             if let Some(old) = old_phys {
-                state.block_map.free_list.push(old);
+                deferred_free.push(old);
             }
 
             // Check for static wear leveling
@@ -418,6 +435,21 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             current_offset += chunk_len as u64;
             remaining -= chunk_len;
         }
+
+        // Return all old physical blocks to the free list now that no iteration
+        // can accidentally reallocate them.
+        state.block_map.free_list.extend(deferred_free);
+
+        // Persist the updated block map to the journal so the mapping survives
+        // power loss. Without this, a crash after write() but before sync()
+        // would lose the logical-to-physical mapping changes.
+        let metadata = Self::serialize_metadata_inner(&state);
+        let FtlState {
+            ref hw,
+            ref mut journal,
+            ..
+        } = *state;
+        journal.commit(hw, &metadata)?;
 
         Ok(())
     }
@@ -521,7 +553,19 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             // Widen to u64 before adding to prevent u32 overflow
             let hot_global = u64::from(state.data_region_start) + u64::from(hot_phys);
             let cold_global = u64::from(state.data_region_start) + u64::from(cold_phys);
-            let cold_global_u32 = (cold_global & 0xFFFF_FFFF) as u32;
+            let cold_global_u32 = u32::try_from(cold_global).map_err(|_| {
+                #[cfg(feature = "std")]
+                {
+                    BackendError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "block index exceeds u32 range",
+                    ))
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    BackendError::Message(String::from("block index exceeds u32 range"))
+                }
+            })?;
 
             // Read hot block data
             let mut buf = vec![0u8; ebs as usize];

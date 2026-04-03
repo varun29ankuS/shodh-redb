@@ -183,8 +183,15 @@ impl<V: Value + 'static> TtlAccessGuard<'_, V> {
     }
 
     /// Returns the deserialized value (without the expiry header).
+    ///
+    /// If the raw data is shorter than the expiry header (corrupted entry),
+    /// returns the value deserialized from an empty slice rather than panicking.
     pub fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.raw[EXPIRY_HEADER_SIZE..])
+        if self.raw.len() < EXPIRY_HEADER_SIZE {
+            V::from_bytes(&[])
+        } else {
+            V::from_bytes(&self.raw[EXPIRY_HEADER_SIZE..])
+        }
     }
 
     /// Returns the expiry timestamp in milliseconds since UNIX epoch, or 0 for no expiry.
@@ -277,9 +284,12 @@ impl<'txn, K: Key + 'static, V: Value + 'static> TtlTable<'txn, K, V> {
         value: impl Borrow<V::SelfType<'v>>,
         ttl: Duration,
     ) -> Result<Option<TtlAccessGuard<'_, V>>> {
-        // Truncation is safe: u64 millis covers ~584 million years
+        // Truncation is safe: u64 millis covers ~584 million years.
+        // Use saturating_add so that overflow clamps to u64::MAX (never expires)
+        // rather than wrapping to a past timestamp.
         #[allow(clippy::cast_possible_truncation)]
-        let expires_at = now_millis() + ttl.as_millis() as u64;
+        let ttl_millis = ttl.as_millis() as u64;
+        let expires_at = now_millis().saturating_add(ttl_millis);
         let encoded = encode_ttl_value::<V>(expires_at, value.borrow());
         let ttl_ref = TtlValueRef { data: &encoded };
         let old = self.inner.insert(key, &ttl_ref)?;

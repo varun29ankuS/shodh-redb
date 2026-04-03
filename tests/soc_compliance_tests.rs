@@ -7205,7 +7205,7 @@ fn temporal_key_zero() {
         shodh_redb::HybridLogicalClock::ZERO,
         shodh_redb::BlobId::MIN,
     );
-    let bytes = tk.to_le_bytes();
+    let bytes = tk.to_be_bytes();
     assert_eq!(bytes, [0u8; 32]);
 }
 

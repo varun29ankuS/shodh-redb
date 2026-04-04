@@ -11,7 +11,8 @@ mod tests {
     use std::thread;
 
     use crate::bf_tree_store::config::BfTreeConfig;
-    use crate::bf_tree_store::database::BfTreeDatabase;
+    use crate::bf_tree_store::database::{BfTreeBuilder, BfTreeDatabase};
+    use crate::cdc::types::{CdcConfig, ChangeOp};
     use crate::{TableDefinition, TableHandle};
 
     const TABLE_A: TableDefinition<&str, u64> = TableDefinition::new("table_a");
@@ -306,6 +307,204 @@ mod tests {
             let key_id = val % 1000;
             assert!(thread_id < 4, "unexpected thread id {thread_id}");
             assert_eq!(key_id, i);
+        }
+    }
+
+    /// Concurrent insert/remove on the same table within a single write txn
+    /// via `thread::scope`. Exercises the TOCTOU fix (buffer lock held across
+    /// read-modify-write) and verifies CDC event consistency.
+    ///
+    /// 4 threads share one `BfTreeDatabaseWriteTxn`, each opening its own
+    /// `BfTreeTable` handle. They insert overlapping keys so the buffer mutex
+    /// serializes their updates. After commit, CDC events must match the
+    /// final persisted state.
+    #[test]
+    fn toctou_shared_txn_with_cdc() {
+        const NUM_THREADS: u64 = 4;
+        const KEYS_PER_THREAD: u64 = 200;
+        const OVERLAP: u64 = 50; // first 50 keys written by every thread
+
+        let mut builder = BfTreeBuilder::new();
+        builder.set_cdc(CdcConfig {
+            enabled: true,
+            retention_max_txns: 1000,
+        });
+        let db = builder.create(BfTreeConfig::new_memory(8)).unwrap();
+
+        // Phase 1: Concurrent inserts within a single write txn.
+        let wtxn = db.begin_write();
+        let barrier = Barrier::new(NUM_THREADS as usize);
+        thread::scope(|s| {
+            for t in 0..NUM_THREADS {
+                let barrier = &barrier;
+                let wtxn = &wtxn;
+                s.spawn(move || {
+                    barrier.wait();
+                    let mut table = wtxn.open_table(TABLE_A).unwrap();
+                    for i in 0..KEYS_PER_THREAD {
+                        // First OVERLAP keys are written by all threads (contention).
+                        // Remaining keys are thread-unique.
+                        let key = if i < OVERLAP {
+                            alloc::format!("shared_{i}")
+                        } else {
+                            alloc::format!("t{t}_{i}")
+                        };
+                        let val = t * 10000 + i;
+                        table.insert(&key.as_str(), &val).unwrap();
+                    }
+                });
+            }
+        });
+        wtxn.commit().unwrap();
+
+        // Phase 2: Verify persisted state.
+        let rtxn = db.begin_read();
+
+        // Shared keys: each must have a value from one of the threads.
+        for i in 0..OVERLAP {
+            let key = alloc::format!("shared_{i}");
+            let val_bytes = rtxn
+                .get::<&str, u64>(&TABLE_A, &key.as_str())
+                .unwrap()
+                .unwrap_or_else(|| panic!("shared_{i} missing"));
+            let val = u64::from_le_bytes(val_bytes.as_slice().try_into().unwrap());
+            let thread_id = val / 10000;
+            let key_id = val % 10000;
+            assert!(
+                thread_id < NUM_THREADS,
+                "shared_{i} has invalid thread_id {thread_id}"
+            );
+            assert_eq!(key_id, i, "shared_{i} value index mismatch");
+        }
+
+        // Thread-unique keys must all exist.
+        for t in 0..NUM_THREADS {
+            for i in OVERLAP..KEYS_PER_THREAD {
+                let key = alloc::format!("t{t}_{i}");
+                assert!(
+                    rtxn.get::<&str, u64>(&TABLE_A, &key.as_str())
+                        .unwrap()
+                        .is_some(),
+                    "t{t}_{i} missing"
+                );
+            }
+        }
+
+        // Phase 3: Verify CDC events.
+        let changes = rtxn.read_cdc_since(0).unwrap();
+        assert!(
+            !changes.is_empty(),
+            "CDC should have recorded events for the committed txn"
+        );
+
+        // Build a map of the final CDC event per key (last-writer-wins).
+        let mut final_ops: alloc::collections::BTreeMap<String, ChangeOp> =
+            alloc::collections::BTreeMap::new();
+        for c in &changes {
+            if c.table_name == "table_a" {
+                final_ops.insert(
+                    alloc::string::String::from_utf8_lossy(&c.key).into_owned(),
+                    c.op.clone(),
+                );
+            }
+        }
+
+        // Every shared key should have an Insert or Update CDC event.
+        for i in 0..OVERLAP {
+            let key = alloc::format!("shared_{i}");
+            let op = final_ops
+                .get(&key)
+                .unwrap_or_else(|| panic!("no CDC event for shared_{i}"));
+            assert!(
+                matches!(op, ChangeOp::Insert | ChangeOp::Update),
+                "shared_{i} CDC op should be Insert or Update, got {op:?}"
+            );
+        }
+    }
+
+    /// Concurrent insert + remove on overlapping keys within a single txn.
+    /// Verifies that after commit, removed keys are gone and CDC records
+    /// the Delete events.
+    #[test]
+    fn toctou_concurrent_insert_remove_cdc() {
+        const KEYS: u64 = 100;
+
+        let mut builder = BfTreeBuilder::new();
+        builder.set_cdc(CdcConfig {
+            enabled: true,
+            retention_max_txns: 1000,
+        });
+        let db = builder.create(BfTreeConfig::new_memory(8)).unwrap();
+
+        // Pre-populate keys so removes have something to act on.
+        {
+            let wtxn = db.begin_write();
+            let mut table = wtxn.open_table(TABLE_A).unwrap();
+            for i in 0..KEYS {
+                let key = alloc::format!("k_{i}");
+                table.insert(&key.as_str(), &i).unwrap();
+            }
+            let _ = table;
+            wtxn.commit().unwrap();
+        }
+
+        // Phase 1: Two threads -- one inserts even keys, one removes odd keys.
+        let wtxn = db.begin_write();
+        let barrier = Barrier::new(2);
+        thread::scope(|s| {
+            let wtxn = &wtxn;
+            let barrier = &barrier;
+
+            // Thread A: overwrite even keys with new values.
+            s.spawn(move || {
+                barrier.wait();
+                let mut table = wtxn.open_table(TABLE_A).unwrap();
+                for i in (0..KEYS).step_by(2) {
+                    let key = alloc::format!("k_{i}");
+                    table.insert(&key.as_str(), &(i + 9000)).unwrap();
+                }
+            });
+
+            // Thread B: remove odd keys.
+            s.spawn(move || {
+                barrier.wait();
+                let mut table = wtxn.open_table(TABLE_A).unwrap();
+                for i in (1..KEYS).step_by(2) {
+                    let key = alloc::format!("k_{i}");
+                    table.remove(&key.as_str()).unwrap();
+                }
+            });
+        });
+        wtxn.commit().unwrap();
+
+        // Phase 2: Verify state.
+        let rtxn = db.begin_read();
+        for i in 0..KEYS {
+            let key = alloc::format!("k_{i}");
+            let result = rtxn.get::<&str, u64>(&TABLE_A, &key.as_str()).unwrap();
+            if i % 2 == 0 {
+                let val_bytes = result.unwrap_or_else(|| panic!("k_{i} should exist (even)"));
+                let val = u64::from_le_bytes(val_bytes.as_slice().try_into().unwrap());
+                assert_eq!(val, i + 9000, "k_{i} has wrong value");
+            } else {
+                assert!(result.is_none(), "k_{i} should be deleted (odd)");
+            }
+        }
+
+        // Phase 3: Verify CDC has Delete events for odd keys.
+        let changes = rtxn.read_cdc_since(0).unwrap();
+        let delete_keys: alloc::collections::BTreeSet<String> = changes
+            .iter()
+            .filter(|c| c.table_name == "table_a" && matches!(c.op, ChangeOp::Delete))
+            .map(|c| alloc::string::String::from_utf8_lossy(&c.key).into_owned())
+            .collect();
+
+        for i in (1..KEYS).step_by(2) {
+            let key = alloc::format!("k_{i}");
+            assert!(
+                delete_keys.contains(&key),
+                "CDC missing Delete event for {key}"
+            );
         }
     }
 }

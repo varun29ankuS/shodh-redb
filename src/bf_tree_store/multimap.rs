@@ -131,10 +131,7 @@ fn key_matches_prefix(composite_key: &[u8], prefix: &[u8]) -> bool {
 /// When `increment_prefix` overflows (all-0xFF prefix), we return `None` to
 /// indicate that callers must use a prefix-match filter on scan results
 /// rather than relying on an upper bound key.
-fn multimap_scan_end(
-    table_name: &str,
-    user_key: &[u8],
-) -> Result<Option<Vec<u8>>, BfTreeError> {
+fn multimap_scan_end(table_name: &str, user_key: &[u8]) -> Result<Option<Vec<u8>>, BfTreeError> {
     let prefix = multimap_key_prefix(table_name, user_key)?;
     Ok(increment_prefix(&prefix))
 }

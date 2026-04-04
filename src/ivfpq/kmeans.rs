@@ -371,9 +371,7 @@ pub fn nearest_clusters(
     if !diversity.enabled() {
         // Fast path: identical to previous behavior
         let select_idx = (nprobe - 1).min(dists.len() - 1);
-        dists.select_nth_unstable_by(select_idx, |a, b| {
-            a.1.total_cmp(&b.1)
-        });
+        dists.select_nth_unstable_by(select_idx, |a, b| a.1.total_cmp(&b.1));
         dists.truncate(nprobe.min(dists.len()));
         dists.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         return dists;
@@ -382,9 +380,7 @@ pub fn nearest_clusters(
     // Diversity path: partial sort top 2*nprobe, build centroid shortlist,
     // then delegate to the shared MMR selector.
     let shortlist_size = (nprobe.saturating_mul(2)).min(dists.len());
-    dists.select_nth_unstable_by(shortlist_size - 1, |a, b| {
-        a.1.total_cmp(&b.1)
-    });
+    dists.select_nth_unstable_by(shortlist_size - 1, |a, b| a.1.total_cmp(&b.1));
     dists.truncate(shortlist_size);
     dists.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 

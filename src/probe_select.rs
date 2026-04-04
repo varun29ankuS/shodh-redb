@@ -194,8 +194,7 @@ mod tests {
                 (i as u32, dist)
             })
             .collect();
-        candidates
-            .sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+        candidates.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
         // Build centroids in sorted order
         let mut centroids = Vec::with_capacity(candidates.len() * dim);
@@ -380,8 +379,7 @@ mod tests {
                 (i as u32, dist)
             })
             .collect();
-        candidates
-            .sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+        candidates.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
         let mut centroids_flat = Vec::with_capacity(candidates.len() * dim);
         for &(id, _) in &candidates {
@@ -446,8 +444,7 @@ mod tests {
                 (i as u32, dist)
             })
             .collect();
-        candidates
-            .sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+        candidates.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
         let mut centroids_flat = Vec::with_capacity(candidates.len() * dim);
         for &(id, _) in &candidates {

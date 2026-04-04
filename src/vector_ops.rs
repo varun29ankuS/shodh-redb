@@ -176,7 +176,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         norm_b += y * y;
     }
     let denom = sqrt_f32(norm_a) * sqrt_f32(norm_b);
-    if denom == 0.0 { 0.0 } else { (dot / denom).clamp(-1.0, 1.0) }
+    if denom == 0.0 {
+        0.0
+    } else {
+        (dot / denom).clamp(-1.0, 1.0)
+    }
 }
 
 /// Computes the cosine distance between two f32 slices.

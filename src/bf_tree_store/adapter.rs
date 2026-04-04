@@ -38,10 +38,7 @@ impl BfTreeAdapter {
         let max_key_len = config.max_key_len;
         let bf_config = config.into_bf_config()?;
         let inner = BfTree::with_config(bf_config, None)?;
-        Ok(Self {
-            inner,
-            max_key_len,
-        })
+        Ok(Self { inner, max_key_len })
     }
 
     /// Open a Bf-Tree from an existing snapshot file for crash recovery.
@@ -49,10 +46,7 @@ impl BfTreeAdapter {
         let max_key_len = config.max_key_len;
         let bf_config = config.into_bf_config()?;
         let inner = BfTree::new_from_snapshot(bf_config, None)?;
-        Ok(Self {
-            inner,
-            max_key_len,
-        })
+        Ok(Self { inner, max_key_len })
     }
 
     /// Maximum key length in bytes, as configured at construction time.

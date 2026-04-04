@@ -452,8 +452,7 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                     state.bad_blocks.mark_bad(global_new_u32);
                     let _ = state.hw.mark_bad_block(global_new_u32);
                     let replacement = Self::allocate_block(&mut state)?;
-                    let repl_global =
-                        u64::from(state.data_region_start) + u64::from(replacement);
+                    let repl_global = u64::from(state.data_region_start) + u64::from(replacement);
                     let repl_global_u32 = u32::try_from(repl_global).map_err(|_| {
                         #[cfg(feature = "std")]
                         {
@@ -469,14 +468,8 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                     })?;
                     state.hw.erase_block(repl_global_u32)?;
                     state.erase_counts.increment(repl_global_u32);
-                    if Self::write_block_pages(
-                        &state,
-                        repl_global,
-                        &block_buf,
-                        wps,
-                        ebs as usize,
-                    )
-                    .is_err()
+                    if Self::write_block_pages(&state, repl_global, &block_buf, wps, ebs as usize)
+                        .is_err()
                     {
                         state.bad_blocks.mark_bad(repl_global_u32);
                         let _ = state.hw.mark_bad_block(repl_global_u32);
@@ -732,14 +725,8 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                 }
                 state.erase_counts.increment(dst_global_u32);
 
-                if Self::write_block_pages(
-                    state,
-                    u64::from(dst_global),
-                    &buf,
-                    wps,
-                    ebs as usize,
-                )
-                .is_err()
+                if Self::write_block_pages(state, u64::from(dst_global), &buf, wps, ebs as usize)
+                    .is_err()
                 {
                     state.bad_blocks.mark_bad(dst_global_u32);
                     let _ = state.hw.mark_bad_block(dst_global_u32);

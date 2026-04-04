@@ -42,7 +42,11 @@ use super::types::{
 ///     .top_k(10)
 ///     .execute()?;
 /// ```
-pub struct CompositeQuery<'a, P: BlobQueryProvider = ReadTransaction, R: StorageRead = ReadTransaction> {
+pub struct CompositeQuery<
+    'a,
+    P: BlobQueryProvider = ReadTransaction,
+    R: StorageRead = ReadTransaction,
+> {
     provider: &'a P,
 
     /// Storage reader for vector index search (IVF-PQ / Fractal). Generic over

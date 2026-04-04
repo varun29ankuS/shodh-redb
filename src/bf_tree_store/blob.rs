@@ -401,7 +401,8 @@ impl<'txn> BfTreeBlobStore<'txn> {
             if read_checksum != meta.blob_ref.checksum {
                 return Err(BfTreeError::Corruption(alloc::format!(
                     "blob {blob_id:?} checksum mismatch: expected {:032x}, got {:032x}",
-                    meta.blob_ref.checksum, read_checksum
+                    meta.blob_ref.checksum,
+                    read_checksum
                 )));
             }
         }

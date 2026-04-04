@@ -387,7 +387,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
             .collect();
 
         for (encoded_key, raw_val) in buf_only {
-            if let Ok(exp) = read_expiry(&raw_val) && is_expired_at(exp, now) {
+            if let Ok(exp) = read_expiry(&raw_val)
+                && is_expired_at(exp, now)
+            {
                 if self.cdc_log.is_some() {
                     let user_key = encoded_key.get(prefix_len..).unwrap_or(&[]).to_vec();
                     let old_value = strip_expiry(&raw_val).to_vec();

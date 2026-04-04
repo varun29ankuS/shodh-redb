@@ -174,8 +174,7 @@ impl BfTreeHistory {
             let mut pending_keys: Vec<(Vec<u8>, String)> = Vec::new();
 
             // Read the persisted high-water-mark ID.
-            let hwm_key =
-                encode_table_key(HISTORY_META_TABLE, TableKind::Regular, HISTORY_HWM_KEY);
+            let hwm_key = encode_table_key(HISTORY_META_TABLE, TableKind::Regular, HISTORY_HWM_KEY);
             let mut hwm_buf = [0u8; 8];
             if let Ok(len) = db.adapter().read(&hwm_key, &mut hwm_buf)
                 && len as usize >= 8
@@ -211,9 +210,7 @@ impl BfTreeHistory {
             for (full_key, snap_path) in pending_keys {
                 // Validate the path before attempting file deletion to prevent
                 // path traversal attacks via crafted PENDING entries.
-                if !snap_path.is_empty()
-                    && validate_snapshot_path(&snap_path).is_ok()
-                {
+                if !snap_path.is_empty() && validate_snapshot_path(&snap_path).is_ok() {
                     let path = Path::new(&snap_path);
                     if path.exists() {
                         let _ = std::fs::remove_file(path);
@@ -262,8 +259,7 @@ impl BfTreeHistory {
 
         // Persist the high-water-mark ID so that after a full prune + restart
         // the counter does not reset to 1 and cause ID collisions.
-        let hwm_key =
-            encode_table_key(HISTORY_META_TABLE, TableKind::Regular, HISTORY_HWM_KEY);
+        let hwm_key = encode_table_key(HISTORY_META_TABLE, TableKind::Regular, HISTORY_HWM_KEY);
         self.db
             .adapter()
             .insert(&hwm_key, &snapshot_id.to_le_bytes())?;

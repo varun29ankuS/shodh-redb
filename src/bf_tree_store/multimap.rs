@@ -416,7 +416,7 @@ mod tests {
     fn insert_and_get_values() {
         let db = make_db();
         let wtxn = db.begin_write();
-        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
 
         assert!(!mm.insert(&"doc1", &"rust").unwrap());
         assert!(!mm.insert(&"doc1", &"systems").unwrap());
@@ -434,7 +434,7 @@ mod tests {
     fn insert_duplicate_returns_true() {
         let db = make_db();
         let wtxn = db.begin_write();
-        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
 
         assert!(!mm.insert(&"k", &"v").unwrap());
         assert!(mm.insert(&"k", &"v").unwrap()); // duplicate
@@ -444,7 +444,7 @@ mod tests {
     fn remove_specific_value() {
         let db = make_db();
         let wtxn = db.begin_write();
-        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
 
         mm.insert(&"k", &"a").unwrap();
         mm.insert(&"k", &"b").unwrap();
@@ -463,7 +463,7 @@ mod tests {
     fn remove_all_values() {
         let db = make_db();
         let wtxn = db.begin_write();
-        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
 
         mm.insert(&"k", &"x").unwrap();
         mm.insert(&"k", &"y").unwrap();
@@ -479,7 +479,7 @@ mod tests {
     fn key_isolation() {
         let db = make_db();
         let wtxn = db.begin_write();
-        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
 
         mm.insert(&"alice", &"admin").unwrap();
         mm.insert(&"bob", &"user").unwrap();
@@ -494,7 +494,7 @@ mod tests {
     fn contains_check() {
         let db = make_db();
         let wtxn = db.begin_write();
-        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
 
         mm.insert(&"k", &"val").unwrap();
         assert!(mm.contains(&"k", &"val"));
@@ -505,7 +505,7 @@ mod tests {
     fn count_values_matches() {
         let db = make_db();
         let wtxn = db.begin_write();
-        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+        let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
 
         mm.insert(&"k", &"a").unwrap();
         mm.insert(&"k", &"b").unwrap();
@@ -518,7 +518,7 @@ mod tests {
 
         {
             let wtxn = db.begin_write();
-            let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+            let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
             mm.insert(&"k", &"val1").unwrap();
             mm.insert(&"k", &"val2").unwrap();
             drop(mm);
@@ -526,7 +526,7 @@ mod tests {
         }
 
         let rtxn = db.begin_read();
-        let ro = rtxn.open_multimap_table::<&str, &str>("tags");
+        let ro = rtxn.open_multimap_table::<&str, &str>("tags").unwrap();
         let vals = ro.get_values(&"k").unwrap();
         assert_eq!(vals.len(), 2);
         assert!(ro.contains(&"k", &"val1"));
@@ -539,14 +539,14 @@ mod tests {
 
         {
             let wtxn = db.begin_write();
-            let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+            let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
             mm.insert(&"k", &"gone").unwrap();
             drop(mm);
             // Drop without commit -- rollback.
         }
 
         let rtxn = db.begin_read();
-        let ro = rtxn.open_multimap_table::<&str, &str>("tags");
+        let ro = rtxn.open_multimap_table::<&str, &str>("tags").unwrap();
         assert!(ro.get_values(&"k").unwrap().is_empty());
     }
 }

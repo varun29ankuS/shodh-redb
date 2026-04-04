@@ -708,21 +708,23 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         let table = self.txn.open_storage_table(def)?;
         let metric = self.config.metric;
 
+        let dim = query.len();
         let mut results: Vec<Neighbor<u64>> = Vec::with_capacity(candidates.len());
         for cand in candidates {
             if let Some(guard) = table.st_get(&cand.key)? {
                 let vec = bytes_to_f32_vec(guard.value());
+                // Skip truncated/corrupted vectors -- fall back to excluding
+                // them rather than computing a misleading distance.
+                if vec.len() != dim {
+                    continue;
+                }
                 results.push(Neighbor {
                     key: cand.key,
                     distance: metric.compute(query, &vec),
                 });
             }
         }
-        results.sort_unstable_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(CmpOrdering::Equal)
-        });
+        results.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
         results.truncate(k);
         Ok(results)
     }
@@ -911,17 +913,18 @@ impl ReadOnlyIvfPqIndex {
             for cand in &sorted {
                 if let Some(guard) = table.st_get(&cand.key)? {
                     let vec = bytes_to_f32_vec(guard.value());
+                    // Skip truncated/corrupted vectors -- fall back to excluding
+                    // them rather than computing a misleading distance.
+                    if vec.len() != dim {
+                        continue;
+                    }
                     results.push(Neighbor {
                         key: cand.key,
                         distance: metric.compute(q, &vec),
                     });
                 }
             }
-            results.sort_unstable_by(|a, b| {
-                a.distance
-                    .partial_cmp(&b.distance)
-                    .unwrap_or(CmpOrdering::Equal)
-            });
+            results.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
             results.truncate(params.k);
             Ok(results)
         } else {

@@ -396,7 +396,7 @@ mod tests {
         let db = Arc::new(BfTreeDatabase::create(BfTreeConfig::new_file(&db_path, 4)).unwrap());
 
         let wtxn = db.begin_write();
-        let mut t = wtxn.open_table(DATA);
+        let mut t = wtxn.open_table(DATA).unwrap();
         t.insert(&"key", &1u64).unwrap();
         drop(t);
         wtxn.commit().unwrap();

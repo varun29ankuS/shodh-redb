@@ -63,6 +63,22 @@ pub struct BfTreeDatabase {
     cdc_config: CdcConfig,
     /// Monotonically increasing transaction ID counter for CDC.
     next_txn_id: AtomicU64,
+    /// Monotonically increasing commit-order counter for CDC event keys.
+    ///
+    /// Unlike `next_txn_id` (allocated at `begin_write()` time), this counter
+    /// is allocated at `commit()` time. This guarantees that CDC events are
+    /// keyed in commit order, so consumers that track progress by scanning
+    /// `transaction_id > last_seen` will never permanently miss events from
+    /// transactions that were started early but committed late.
+    next_commit_id: Arc<AtomicU64>,
+    /// Serializes flush + snapshot operations across concurrent committers.
+    ///
+    /// Without this lock, concurrent `commit_with_snapshot()` (or `commit()` on
+    /// file backends) calls can interleave: Thread A flushes, Thread B flushes,
+    /// Thread A snapshots (capturing Thread B's partial state). The mutex
+    /// ensures each flush + snapshot pair is atomic with respect to other
+    /// committers.
+    snapshot_lock: Arc<Mutex<()>>,
 }
 
 impl BfTreeDatabase {
@@ -73,6 +89,8 @@ impl BfTreeDatabase {
             adapter: Arc::new(adapter),
             cdc_config: CdcConfig::default(),
             next_txn_id: AtomicU64::new(1),
+            next_commit_id: Arc::new(AtomicU64::new(1)),
+            snapshot_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -85,6 +103,8 @@ impl BfTreeDatabase {
             adapter: Arc::new(adapter),
             cdc_config: CdcConfig::default(),
             next_txn_id: AtomicU64::new(next_id),
+            next_commit_id: Arc::new(AtomicU64::new(next_id)),
+            snapshot_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -98,6 +118,8 @@ impl BfTreeDatabase {
             adapter: Arc::new(adapter),
             cdc_config,
             next_txn_id: AtomicU64::new(1),
+            next_commit_id: Arc::new(AtomicU64::new(1)),
+            snapshot_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -109,6 +131,8 @@ impl BfTreeDatabase {
             adapter: Arc::new(adapter),
             cdc_config,
             next_txn_id: AtomicU64::new(next_id),
+            next_commit_id: Arc::new(AtomicU64::new(next_id)),
+            snapshot_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -127,6 +151,8 @@ impl BfTreeDatabase {
             adapter: self.adapter.clone(),
             ops_count: AtomicU64::new(0),
             txn_id,
+            next_commit_id: self.next_commit_id.clone(),
+            snapshot_lock: self.snapshot_lock.clone(),
             cdc_log,
             cdc_config: self.cdc_config.clone(),
             buffer: Mutex::new(WriteBuffer::new()),
@@ -144,7 +170,10 @@ impl BfTreeDatabase {
     }
 
     /// Take a durability snapshot. All data is guaranteed recoverable after crash.
+    ///
+    /// Serialized with concurrent commit operations via the snapshot lock.
     pub fn snapshot(&self) -> std::path::PathBuf {
+        let _guard = self.snapshot_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.adapter.snapshot()
     }
 
@@ -315,6 +344,25 @@ pub(crate) fn table_prefix_end(table_name: &str, kind: TableKind) -> Vec<u8> {
     prefix
 }
 
+/// Prefix reserved for internal system tables.
+///
+/// User-created tables whose names start with this prefix are rejected to
+/// prevent accidental (or malicious) collision with internal tables such as
+/// `__cdc_log`, `__bf_blob_meta`, `__bf_history_meta`, etc.
+const RESERVED_TABLE_PREFIX: &str = "__";
+
+/// Validate that a user-supplied table name does not collide with reserved
+/// internal table names. Returns `Err(BfTreeError::ReservedTableName)` if
+/// the name starts with the reserved `"__"` prefix.
+fn validate_table_name(name: &str) -> Result<(), BfTreeError> {
+    if name.starts_with(RESERVED_TABLE_PREFIX) {
+        return Err(BfTreeError::ReservedTableName(alloc::string::String::from(
+            name,
+        )));
+    }
+    Ok(())
+}
+
 /// Write transaction for `BfTreeDatabase`.
 ///
 /// Provides typed insert/delete/get using shodh-redb's `Key`/`Value` traits.
@@ -324,6 +372,14 @@ pub struct BfTreeDatabaseWriteTxn {
     ops_count: AtomicU64,
     /// Monotonic transaction ID assigned at `begin_write()`.
     pub(crate) txn_id: u64,
+    /// Shared commit-order counter from the parent `BfTreeDatabase`.
+    ///
+    /// Allocated at `commit()` time to ensure CDC events are keyed in commit
+    /// order, preventing consumers from permanently missing events when
+    /// transactions commit out of creation order.
+    next_commit_id: Arc<AtomicU64>,
+    /// Serializes flush + snapshot operations across concurrent committers.
+    snapshot_lock: Arc<Mutex<()>>,
     /// Accumulated CDC events. `None` if CDC is disabled.
     pub(crate) cdc_log: Option<Mutex<Vec<CdcEvent>>>,
     /// CDC configuration (retention, etc.).
@@ -339,39 +395,56 @@ impl BfTreeDatabaseWriteTxn {
     ///
     /// This is the preferred API -- it mirrors the legacy `WriteTransaction::open_table()`
     /// pattern. The returned `BfTreeTable` provides `insert`, `get`, `remove`, and `scan`.
+    ///
+    /// Returns `Err(BfTreeError::ReservedTableName)` if the table name starts
+    /// with the reserved `"__"` prefix used by internal system tables.
     pub fn open_table<K: Key + 'static, V: Value + 'static>(
         &self,
         definition: TableDefinition<K, V>,
-    ) -> BfTreeTable<'_, K, V> {
-        BfTreeTable::new(
+    ) -> Result<BfTreeTable<'_, K, V>, BfTreeError> {
+        validate_table_name(definition.name())?;
+        Ok(BfTreeTable::new(
             definition.name(),
             &self.adapter,
             &self.ops_count,
             self.cdc_log.as_ref(),
             &self.buffer,
-        )
+        ))
     }
 
     /// Open a TTL table for read-write access.
+    ///
+    /// Returns `Err(BfTreeError::ReservedTableName)` if the table name starts
+    /// with the reserved `"__"` prefix used by internal system tables.
     pub fn open_ttl_table<K: Key + 'static, V: Value + 'static>(
         &self,
         definition: TableDefinition<K, V>,
-    ) -> BfTreeTtlTable<'_, K, V> {
-        BfTreeTtlTable::new(
+    ) -> Result<BfTreeTtlTable<'_, K, V>, BfTreeError> {
+        validate_table_name(definition.name())?;
+        Ok(BfTreeTtlTable::new(
             definition.name(),
             &self.adapter,
             &self.ops_count,
             self.cdc_log.as_ref(),
             &self.buffer,
-        )
+        ))
     }
 
     /// Open a multimap table for read-write access.
+    ///
+    /// Returns `Err(BfTreeError::ReservedTableName)` if the table name starts
+    /// with the reserved `"__"` prefix used by internal system tables.
     pub fn open_multimap_table<K: Key + 'static, V: Key + 'static>(
         &self,
         name: &str,
-    ) -> BfTreeMultimapTable<'_, K, V> {
-        BfTreeMultimapTable::new(name, &self.adapter, &self.ops_count, &self.buffer)
+    ) -> Result<BfTreeMultimapTable<'_, K, V>, BfTreeError> {
+        validate_table_name(name)?;
+        Ok(BfTreeMultimapTable::new(
+            name,
+            &self.adapter,
+            &self.ops_count,
+            &self.buffer,
+        ))
     }
 
     /// Open the blob store for read-write access.
@@ -489,21 +562,29 @@ impl BfTreeDatabaseWriteTxn {
     /// a crash after `commit()` returns could lose committed data.
     pub fn commit(self) -> Result<(), BfTreeError> {
         {
+            // Serialize flush + snapshot under the snapshot lock to prevent
+            // interleaving with concurrent committers (issue #209). Without
+            // this, Thread A's flush followed by Thread B's flush before
+            // Thread A's snapshot causes Thread A to capture B's partial state.
+            let _snap_guard = self.snapshot_lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             // Stage CDC log entries into the write buffer before flushing.
-            self.stage_cdc_into_buffer(&mut buffer)?;
+            // The commit_id is allocated here (not at begin_write time) to
+            // ensure CDC events are ordered by actual commit order.
+            let commit_id = self.stage_cdc_into_buffer(&mut buffer)?;
             // Persist the transaction ID counter so recovery works without CDC.
-            self.stage_txn_id_into_buffer(&mut buffer)?;
+            self.stage_txn_id_into_buffer(&mut buffer, commit_id)?;
             // Flush write buffer to BfTree (the atomic commit point).
             buffer.flush(&self.adapter)?;
-        }
-        // Ensure durability: for non-memory backends, take a snapshot so that
-        // all data written in this transaction is recoverable after a crash.
-        // The bf-tree WAL background thread flushes asynchronously on a timer;
-        // without an explicit snapshot here, commit() could return before the
-        // WAL is persisted, violating the durability contract.
-        if !self.adapter.inner().config().is_memory_backend() {
-            self.adapter.snapshot();
+            // Ensure durability: for non-memory backends, take a snapshot so
+            // that all data written in this transaction is recoverable after a
+            // crash. The bf-tree WAL background thread flushes asynchronously
+            // on a timer; without an explicit snapshot here, commit() could
+            // return before the WAL is persisted, violating the durability
+            // contract.
+            if !self.adapter.inner().config().is_memory_backend() {
+                self.adapter.snapshot();
+            }
         }
         self.committed.store(true, Ordering::SeqCst);
         // Retention pruning is post-commit and non-critical.
@@ -512,16 +593,21 @@ impl BfTreeDatabaseWriteTxn {
     }
 
     /// Commit with explicit snapshot for guaranteed crash recovery.
+    ///
+    /// The flush and snapshot are serialized under a database-level mutex to
+    /// prevent concurrent callers from interleaving their operations.
     pub fn commit_with_snapshot(self) -> Result<std::path::PathBuf, BfTreeError> {
-        {
+        let path = {
+            let _snap_guard = self.snapshot_lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            self.stage_cdc_into_buffer(&mut buffer)?;
-            self.stage_txn_id_into_buffer(&mut buffer)?;
+            let commit_id = self.stage_cdc_into_buffer(&mut buffer)?;
+            self.stage_txn_id_into_buffer(&mut buffer, commit_id)?;
             buffer.flush(&self.adapter)?;
-        }
+            self.adapter.snapshot()
+        };
         self.committed.store(true, Ordering::SeqCst);
         self.prune_cdc_retention();
-        Ok(self.adapter.snapshot())
+        Ok(path)
     }
 
     /// Number of operations performed.
@@ -551,19 +637,31 @@ impl BfTreeDatabaseWriteTxn {
 
     /// Stage accumulated CDC events into the write buffer as KV entries.
     ///
-    /// This ensures CDC log entries are atomically committed with the data
-    /// they describe -- both go into the same buffer flush.
-    fn stage_cdc_into_buffer(&self, buffer: &mut WriteBuffer) -> Result<(), BfTreeError> {
+    /// CDC events are keyed by a **commit-order ID** allocated from the shared
+    /// `next_commit_id` counter at commit time, not by the `txn_id` assigned at
+    /// `begin_write()` time. This guarantees monotonic ordering in the CDC log
+    /// with respect to actual commit order, so consumers that track progress by
+    /// scanning `transaction_id > last_seen` will never permanently miss events
+    /// from transactions that were started early but committed late.
+    ///
+    /// Returns the allocated commit ID (used for persisting the counter and for
+    /// retention pruning), or `None` if there were no CDC events to stage.
+    fn stage_cdc_into_buffer(&self, buffer: &mut WriteBuffer) -> Result<Option<u64>, BfTreeError> {
         let events = match self.cdc_log {
             Some(ref log) => {
                 let mut guard = log.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.is_empty() {
-                    return Ok(());
+                    return Ok(None);
                 }
                 core::mem::take(&mut *guard)
             }
-            None => return Ok(()),
+            None => return Ok(None),
         };
+
+        // Allocate a commit-order ID. This is the point of linearization: the
+        // fetch_add is atomic, so concurrent committers get strictly ordered IDs
+        // that reflect actual commit order rather than transaction creation order.
+        let commit_id = self.next_commit_id.fetch_add(1, Ordering::SeqCst);
 
         for (seq, event) in events.iter().enumerate() {
             let seq_u32 = u32::try_from(seq).map_err(|_| {
@@ -571,7 +669,7 @@ impl BfTreeDatabaseWriteTxn {
                     "CDC sequence {seq} exceeds u32::MAX; too many events in one transaction"
                 ))
             })?;
-            let key = CdcKey::new(self.txn_id, seq_u32);
+            let key = CdcKey::new(commit_id, seq_u32);
             let record = CdcRecord::from_event(event).map_err(|e| {
                 BfTreeError::InvalidKV(alloc::format!("CDC record serialization error: {e}"))
             })?;
@@ -581,16 +679,23 @@ impl BfTreeDatabaseWriteTxn {
             buffer.put(encoded_key, val_bytes)?;
         }
 
-        Ok(())
+        Ok(Some(commit_id))
     }
 
-    /// Persist `txn_id + 1` as the next transaction ID counter.
+    /// Persist the next ID counter so recovery works without CDC.
     ///
-    /// Written into the same write buffer so it is atomically committed with
-    /// data and CDC entries. On recovery the persisted value guarantees that
-    /// transaction IDs are never reused, even when CDC is disabled.
-    fn stage_txn_id_into_buffer(&self, buffer: &mut WriteBuffer) -> Result<(), BfTreeError> {
-        let next_id = self.txn_id.saturating_add(1);
+    /// Uses the maximum of `txn_id + 1` and `commit_id + 1` (if a CDC commit
+    /// ID was allocated) to guarantee that neither transaction IDs nor commit
+    /// IDs are ever reused after recovery.
+    fn stage_txn_id_into_buffer(
+        &self,
+        buffer: &mut WriteBuffer,
+        commit_id: Option<u64>,
+    ) -> Result<(), BfTreeError> {
+        let mut next_id = self.txn_id.saturating_add(1);
+        if let Some(cid) = commit_id {
+            next_id = next_id.max(cid.saturating_add(1));
+        }
         let encoded_key =
             encode_table_key(BF_META_TABLE_NAME, TableKind::Regular, BF_META_TXN_ID_KEY);
         buffer.put(encoded_key, next_id.to_le_bytes().to_vec())
@@ -663,27 +768,42 @@ impl BfTreeDatabaseReadTxn {
     /// Open a typed table handle for read-only access.
     ///
     /// Mirrors the legacy `ReadTransaction::open_table()` pattern.
+    ///
+    /// Returns `Err(BfTreeError::ReservedTableName)` if the table name starts
+    /// with the reserved `"__"` prefix used by internal system tables.
     pub fn open_table<K: Key + 'static, V: Value + 'static>(
         &self,
         definition: TableDefinition<K, V>,
-    ) -> BfTreeReadOnlyTable<'_, K, V> {
-        BfTreeReadOnlyTable::new(definition.name(), &self.adapter)
+    ) -> Result<BfTreeReadOnlyTable<'_, K, V>, BfTreeError> {
+        validate_table_name(definition.name())?;
+        Ok(BfTreeReadOnlyTable::new(definition.name(), &self.adapter))
     }
 
     /// Open a TTL table for read-only access.
+    ///
+    /// Returns `Err(BfTreeError::ReservedTableName)` if the table name starts
+    /// with the reserved `"__"` prefix used by internal system tables.
     pub fn open_ttl_table<K: Key + 'static, V: Value + 'static>(
         &self,
         definition: TableDefinition<K, V>,
-    ) -> BfTreeReadOnlyTtlTable<'_, K, V> {
-        BfTreeReadOnlyTtlTable::new(definition.name(), &self.adapter)
+    ) -> Result<BfTreeReadOnlyTtlTable<'_, K, V>, BfTreeError> {
+        validate_table_name(definition.name())?;
+        Ok(BfTreeReadOnlyTtlTable::new(
+            definition.name(),
+            &self.adapter,
+        ))
     }
 
     /// Open a multimap table for read-only access.
+    ///
+    /// Returns `Err(BfTreeError::ReservedTableName)` if the table name starts
+    /// with the reserved `"__"` prefix used by internal system tables.
     pub fn open_multimap_table<K: Key + 'static, V: Key + 'static>(
         &self,
         name: &str,
-    ) -> BfTreeReadOnlyMultimapTable<'_, K, V> {
-        BfTreeReadOnlyMultimapTable::new(name, &self.adapter)
+    ) -> Result<BfTreeReadOnlyMultimapTable<'_, K, V>, BfTreeError> {
+        validate_table_name(name)?;
+        Ok(BfTreeReadOnlyMultimapTable::new(name, &self.adapter))
     }
 
     /// Open the blob store for read-only access.
@@ -1091,7 +1211,7 @@ mod tests {
 
         let wtxn = db.begin_write();
         let txn_id = wtxn.txn_id();
-        let mut table = wtxn.open_table(USERS);
+        let mut table = wtxn.open_table(USERS).unwrap();
         table.insert(&"alice", &42u64).unwrap();
         table.insert(&"alice", &99u64).unwrap(); // update
         drop(table);
@@ -1121,7 +1241,7 @@ mod tests {
         let db = cdc_db();
 
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(USERS);
+        let mut table = wtxn.open_table(USERS).unwrap();
         table.insert(&"bob", &10u64).unwrap();
         table.remove(&"bob").unwrap();
         drop(table);
@@ -1143,7 +1263,7 @@ mod tests {
         // Transaction 1
         let wtxn1 = db.begin_write();
         let txn1_id = wtxn1.txn_id();
-        let mut t1 = wtxn1.open_table(USERS);
+        let mut t1 = wtxn1.open_table(USERS).unwrap();
         t1.insert(&"a", &1u64).unwrap();
         drop(t1);
         wtxn1.commit().unwrap();
@@ -1151,7 +1271,7 @@ mod tests {
         // Transaction 2
         let wtxn2 = db.begin_write();
         let txn2_id = wtxn2.txn_id();
-        let mut t2 = wtxn2.open_table(USERS);
+        let mut t2 = wtxn2.open_table(USERS).unwrap();
         t2.insert(&"b", &2u64).unwrap();
         drop(t2);
         wtxn2.commit().unwrap();
@@ -1171,21 +1291,21 @@ mod tests {
         // Three transactions
         let w1 = db.begin_write();
         let id1 = w1.txn_id();
-        let mut t = w1.open_table(USERS);
+        let mut t = w1.open_table(USERS).unwrap();
         t.insert(&"x", &1u64).unwrap();
         drop(t);
         w1.commit().unwrap();
 
         let w2 = db.begin_write();
         let id2 = w2.txn_id();
-        let mut t = w2.open_table(USERS);
+        let mut t = w2.open_table(USERS).unwrap();
         t.insert(&"y", &2u64).unwrap();
         drop(t);
         w2.commit().unwrap();
 
         let w3 = db.begin_write();
         let _id3 = w3.txn_id();
-        let mut t = w3.open_table(USERS);
+        let mut t = w3.open_table(USERS).unwrap();
         t.insert(&"z", &3u64).unwrap();
         drop(t);
         w3.commit().unwrap();
@@ -1207,7 +1327,7 @@ mod tests {
 
         let w = db.begin_write();
         let tid = w.txn_id();
-        let mut t = w.open_table(USERS);
+        let mut t = w.open_table(USERS).unwrap();
         t.insert(&"k", &1u64).unwrap();
         drop(t);
         w.commit().unwrap();
@@ -1222,7 +1342,7 @@ mod tests {
 
         let w = db.begin_write();
         let tid = w.txn_id();
-        let mut t = w.open_table(USERS);
+        let mut t = w.open_table(USERS).unwrap();
         t.insert(&"k", &1u64).unwrap();
         drop(t);
         w.advance_cdc_cursor("consumer1", tid).unwrap();
@@ -1240,7 +1360,7 @@ mod tests {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
 
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(USERS);
+        let mut table = wtxn.open_table(USERS).unwrap();
         table.insert(&"key", &1u64).unwrap();
         drop(table);
         wtxn.commit().unwrap();
@@ -1264,7 +1384,7 @@ mod tests {
         // Write 4 transactions
         for i in 0u64..4 {
             let w = db.begin_write();
-            let mut t = w.open_table(USERS);
+            let mut t = w.open_table(USERS).unwrap();
             let key = alloc::format!("k{i}");
             t.insert(&key.as_str(), &i).unwrap();
             drop(t);
@@ -1293,7 +1413,7 @@ mod tests {
             .unwrap();
 
         let w = db.begin_write();
-        let mut t = w.open_table(USERS);
+        let mut t = w.open_table(USERS).unwrap();
         t.insert(&"test", &42u64).unwrap();
         drop(t);
         w.commit().unwrap();
@@ -1309,10 +1429,10 @@ mod tests {
         let db = cdc_db();
 
         let w = db.begin_write();
-        let mut t1 = w.open_table(USERS);
+        let mut t1 = w.open_table(USERS).unwrap();
         t1.insert(&"a", &1u64).unwrap();
         drop(t1);
-        let mut t2 = w.open_table(SCORES);
+        let mut t2 = w.open_table(SCORES).unwrap();
         t2.insert(&"b", &2u64).unwrap();
         drop(t2);
         w.commit().unwrap();
@@ -1405,24 +1525,24 @@ mod tests {
 
         // Insert into a regular table named "shared".
         let regular_def: TableDefinition<&str, u64> = TableDefinition::new("shared");
-        let mut reg = wtxn.open_table(regular_def);
+        let mut reg = wtxn.open_table(regular_def).unwrap();
         reg.insert(&"key1", &100u64).unwrap();
         drop(reg);
 
         // Insert into a multimap table named "shared".
-        let mut mm = wtxn.open_multimap_table::<&str, &str>("shared");
+        let mut mm = wtxn.open_multimap_table::<&str, &str>("shared").unwrap();
         mm.insert(&"key1", &"val_a").unwrap();
         mm.insert(&"key1", &"val_b").unwrap();
         drop(mm);
 
         // Insert into a TTL table named "shared".
         let ttl_def: TableDefinition<&str, u64> = TableDefinition::new("shared");
-        let mut ttl = wtxn.open_ttl_table(ttl_def);
+        let mut ttl = wtxn.open_ttl_table(ttl_def).unwrap();
         ttl.insert(&"key1", &999u64).unwrap();
         drop(ttl);
 
         // Now read back from each table type and verify isolation.
-        let reg2 = wtxn.open_table(regular_def);
+        let reg2 = wtxn.open_table(regular_def).unwrap();
         let reg_val = reg2.get(&"key1").unwrap().unwrap();
         assert_eq!(
             u64::from_le_bytes(reg_val.as_slice().try_into().unwrap()),
@@ -1431,14 +1551,14 @@ mod tests {
         );
         drop(reg2);
 
-        let mm2 = wtxn.open_multimap_table::<&str, &str>("shared");
+        let mm2 = wtxn.open_multimap_table::<&str, &str>("shared").unwrap();
         let mm_vals = mm2.get_values(&"key1").unwrap();
         assert_eq!(mm_vals.len(), 2, "multimap must see its own two values");
         assert_eq!(mm_vals[0], b"val_a");
         assert_eq!(mm_vals[1], b"val_b");
         drop(mm2);
 
-        let ttl2 = wtxn.open_ttl_table(ttl_def);
+        let ttl2 = wtxn.open_ttl_table(ttl_def).unwrap();
         let ttl_val = ttl2.get(&"key1").unwrap().unwrap();
         assert_eq!(
             u64::from_le_bytes(ttl_val.as_slice().try_into().unwrap()),
@@ -1457,7 +1577,7 @@ mod tests {
 
         for i in 0u64..3 {
             let w = db.begin_write();
-            let mut t = w.open_table(USERS);
+            let mut t = w.open_table(USERS).unwrap();
             let key = alloc::format!("k{i}");
             t.insert(&key.as_str(), &i).unwrap();
             drop(t);

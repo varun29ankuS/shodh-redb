@@ -1,5 +1,6 @@
 //! Error types for the Bf-Tree storage bridge.
 
+use alloc::string::String;
 use core::fmt;
 
 /// Errors that can occur during Bf-Tree operations.
@@ -22,6 +23,25 @@ pub enum BfTreeError {
     Corruption(String),
     /// Invalid operation (e.g., write after finish).
     InvalidOperation(String),
+    /// The table name uses a reserved prefix (`"__"`) that is reserved for
+    /// internal system tables (CDC log, blob metadata, etc.).
+    ReservedTableName(String),
+    /// Invalid configuration (e.g., WAL disabled on a file-backed backend).
+    InvalidConfig(String),
+    /// A flush partially failed and the compensating rollback also failed.
+    ///
+    /// The database may be in an inconsistent state: some entries from the
+    /// write buffer were applied but could not be undone. The first field
+    /// describes the original flush error; the second describes which
+    /// rollback operations failed (number of failures and last error seen).
+    PartialFlushRollbackFailed {
+        /// Description of the original error that caused the flush to abort.
+        flush_error: String,
+        /// Number of compensating operations that failed during rollback.
+        rollback_failures: usize,
+        /// Description of the last rollback error encountered.
+        last_rollback_error: String,
+    },
 }
 
 impl fmt::Display for BfTreeError {
@@ -35,6 +55,21 @@ impl fmt::Display for BfTreeError {
             Self::Scan(e) => write!(f, "bf-tree scan error: {e:?}"),
             Self::Corruption(msg) => write!(f, "data corruption: {msg}"),
             Self::InvalidOperation(msg) => write!(f, "invalid operation: {msg}"),
+            Self::ReservedTableName(name) => write!(
+                f,
+                "table name \"{name}\" uses the reserved \"__\" prefix; \
+                 names starting with \"__\" are reserved for internal system tables"
+            ),
+            Self::InvalidConfig(msg) => write!(f, "invalid configuration: {msg}"),
+            Self::PartialFlushRollbackFailed {
+                flush_error,
+                rollback_failures,
+                last_rollback_error,
+            } => write!(
+                f,
+                "partial flush rollback failed: original error: {flush_error}; \
+                 rollback had {rollback_failures} failure(s), last: {last_rollback_error}"
+            ),
         }
     }
 }
@@ -92,6 +127,27 @@ impl From<BfTreeError> for crate::StorageError {
             BfTreeError::InvalidOperation(msg) => {
                 crate::StorageError::Corrupted(alloc::format!("invalid operation: {msg}"))
             }
+            BfTreeError::ReservedTableName(name) => {
+                crate::StorageError::Io(crate::BackendError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    alloc::format!("table name \"{name}\" uses the reserved \"__\" prefix"),
+                )))
+            }
+            BfTreeError::InvalidConfig(msg) => {
+                crate::StorageError::Io(crate::BackendError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    alloc::format!("bf-tree invalid config: {msg}"),
+                )))
+            }
+            BfTreeError::PartialFlushRollbackFailed {
+                flush_error,
+                rollback_failures,
+                last_rollback_error,
+            } => crate::StorageError::Corrupted(alloc::format!(
+                "bf-tree: partial flush with failed rollback ({rollback_failures} \
+                 rollback failure(s)): original: {flush_error}; last rollback error: \
+                 {last_rollback_error}"
+            )),
         }
     }
 }

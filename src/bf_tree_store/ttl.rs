@@ -138,9 +138,20 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         value: &V::SelfType<'_>,
         ttl: Duration,
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
-        #[allow(clippy::cast_possible_truncation)]
-        // u128 -> u64 truncation is safe: TTL durations will not exceed u64::MAX ms.
-        let expires_at_ms = now_millis().saturating_add(ttl.as_millis() as u64);
+        // Clamp the u128 millisecond value to u64::MAX before adding the current
+        // timestamp. Without this, a very large Duration (e.g. Duration::MAX)
+        // would silently truncate via `as u64`, wrapping the high bits to a small
+        // value and causing immediate or near-immediate expiry.
+        let ttl_ms_u128 = ttl.as_millis();
+        let ttl_ms = if ttl_ms_u128 > u128::from(u64::MAX) {
+            u64::MAX
+        } else {
+            #[allow(clippy::cast_possible_truncation)] // guarded by the u64::MAX check above
+            {
+                ttl_ms_u128 as u64
+            }
+        };
+        let expires_at_ms = now_millis().saturating_add(ttl_ms);
         self.insert_internal(key, value, expires_at_ms)
     }
 
@@ -468,7 +479,7 @@ mod tests {
     fn insert_and_get_no_expiry() {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_ttl_table(TTL_TABLE);
+        let mut table = wtxn.open_ttl_table(TTL_TABLE).unwrap();
 
         table.insert(&"key", &42u64).unwrap();
         let val = table.get(&"key").unwrap().unwrap();
@@ -479,7 +490,7 @@ mod tests {
     fn expired_entry_returns_none() {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_ttl_table(TTL_TABLE);
+        let mut table = wtxn.open_ttl_table(TTL_TABLE).unwrap();
 
         // Insert with expiry in the past.
         table.insert_with_expiry(&"old", &99u64, 1).unwrap();
@@ -491,7 +502,7 @@ mod tests {
     fn future_expiry_is_visible() {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_ttl_table(TTL_TABLE);
+        let mut table = wtxn.open_ttl_table(TTL_TABLE).unwrap();
 
         table
             .insert_with_ttl(&"future", &77u64, Duration::from_secs(3600))
@@ -504,7 +515,7 @@ mod tests {
     fn expires_at_ms_returns_timestamp() {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_ttl_table(TTL_TABLE);
+        let mut table = wtxn.open_ttl_table(TTL_TABLE).unwrap();
 
         table.insert(&"no_exp", &1u64).unwrap();
         assert_eq!(table.expires_at_ms(&"no_exp").unwrap(), Some(0));
@@ -519,7 +530,7 @@ mod tests {
     fn remove_returns_previous() {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_ttl_table(TTL_TABLE);
+        let mut table = wtxn.open_ttl_table(TTL_TABLE).unwrap();
 
         table.insert(&"k", &10u64).unwrap();
         let removed = table.remove(&"k").unwrap();
@@ -531,7 +542,7 @@ mod tests {
     fn purge_expired_removes_stale() {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_ttl_table(TTL_TABLE);
+        let mut table = wtxn.open_ttl_table(TTL_TABLE).unwrap();
 
         table.insert(&"alive", &1u64).unwrap();
         table.insert_with_expiry(&"dead1", &2u64, 1).unwrap();
@@ -550,7 +561,7 @@ mod tests {
 
         {
             let wtxn = db.begin_write();
-            let mut table = wtxn.open_ttl_table(TTL_TABLE);
+            let mut table = wtxn.open_ttl_table(TTL_TABLE).unwrap();
             table
                 .insert_with_ttl(&"durable", &55u64, Duration::from_secs(3600))
                 .unwrap();
@@ -560,8 +571,33 @@ mod tests {
 
         // Read via read-only TTL table.
         let rtxn = db.begin_read();
-        let ro = rtxn.open_ttl_table(TTL_TABLE);
+        let ro = rtxn.open_ttl_table(TTL_TABLE).unwrap();
         let val = ro.get(&"durable").unwrap().unwrap();
         assert_eq!(u64::from_le_bytes(val.as_slice().try_into().unwrap()), 55);
+    }
+
+    #[test]
+    fn huge_ttl_does_not_wrap_to_near_zero_expiry() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_ttl_table(TTL_TABLE).unwrap();
+
+        // Duration::MAX has u128 milliseconds far exceeding u64::MAX.
+        // Without the clamp fix, `as u64` truncation would wrap to a small
+        // value, causing the entry to expire immediately.
+        table
+            .insert_with_ttl(&"huge", &123u64, Duration::MAX)
+            .unwrap();
+
+        // The entry must still be visible (not expired).
+        let val = table.get(&"huge").unwrap();
+        assert!(
+            val.is_some(),
+            "entry with Duration::MAX TTL must not expire immediately"
+        );
+
+        // The stored expiry must be u64::MAX (saturated).
+        let expiry = table.expires_at_ms(&"huge").unwrap().unwrap();
+        assert_eq!(expiry, u64::MAX);
     }
 }

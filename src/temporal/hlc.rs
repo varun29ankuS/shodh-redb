@@ -89,8 +89,19 @@ impl HybridLogicalClock {
     }
 
     /// Create from explicit physical (ms) and logical components.
+    ///
+    /// # Panics
+    ///
+    /// Debug-asserts that `physical_ms` fits within 48 bits (< 2^48).
+    /// Timestamps beyond this range (~year 10889) would silently lose high
+    /// bits when shifted into the HLC encoding.
     #[must_use]
     pub fn from_parts(physical_ms: u64, logical: u16) -> Self {
+        debug_assert!(
+            physical_ms < (1u64 << 48),
+            "physical_ms {physical_ms} exceeds 48-bit HLC capacity (max {})",
+            (1u64 << 48) - 1
+        );
         Self((physical_ms << PHYSICAL_SHIFT) | u64::from(logical))
     }
 

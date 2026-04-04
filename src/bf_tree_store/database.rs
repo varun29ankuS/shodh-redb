@@ -40,6 +40,7 @@ use super::ttl::{BfTreeReadOnlyTtlTable, BfTreeTtlTable};
 use super::adapter::BfTreeAdapter;
 use super::config::BfTreeConfig;
 use super::error::BfTreeError;
+use super::verification::VerifyMode;
 
 /// Reserved table name for the CDC log in `BfTree`.
 const CDC_LOG_TABLE_NAME: &str = "__cdc_log";
@@ -61,6 +62,8 @@ const BF_META_TXN_ID_KEY: &[u8] = b"next_txn_id";
 pub struct BfTreeDatabase {
     adapter: Arc<BfTreeAdapter>,
     cdc_config: CdcConfig,
+    /// Per-entry checksum verification mode for read integrity checks.
+    verify_mode: Arc<VerifyMode>,
     /// Monotonically increasing transaction ID counter for CDC.
     next_txn_id: AtomicU64,
     /// Monotonically increasing commit-order counter for CDC event keys.
@@ -84,10 +87,12 @@ pub struct BfTreeDatabase {
 impl BfTreeDatabase {
     /// Create a new Bf-Tree database with the given configuration.
     pub fn create(config: BfTreeConfig) -> Result<Self, BfTreeError> {
+        let verify_mode = config.verify_mode.clone();
         let adapter = BfTreeAdapter::open(config)?;
         Ok(Self {
             adapter: Arc::new(adapter),
             cdc_config: CdcConfig::default(),
+            verify_mode: Arc::new(verify_mode),
             next_txn_id: AtomicU64::new(1),
             next_commit_id: Arc::new(AtomicU64::new(1)),
             snapshot_lock: Arc::new(Mutex::new(())),
@@ -96,12 +101,14 @@ impl BfTreeDatabase {
 
     /// Open an existing Bf-Tree database from a snapshot file.
     pub fn open(config: BfTreeConfig) -> Result<Self, BfTreeError> {
+        let verify_mode = config.verify_mode.clone();
         let adapter = BfTreeAdapter::open_from_snapshot(config)?;
         // Recover the next transaction ID from the latest CDC log entry.
         let next_id = recover_next_txn_id(&adapter).unwrap_or(1);
         Ok(Self {
             adapter: Arc::new(adapter),
             cdc_config: CdcConfig::default(),
+            verify_mode: Arc::new(verify_mode),
             next_txn_id: AtomicU64::new(next_id),
             next_commit_id: Arc::new(AtomicU64::new(next_id)),
             snapshot_lock: Arc::new(Mutex::new(())),
@@ -113,10 +120,12 @@ impl BfTreeDatabase {
         config: BfTreeConfig,
         cdc_config: CdcConfig,
     ) -> Result<Self, BfTreeError> {
+        let verify_mode = config.verify_mode.clone();
         let adapter = BfTreeAdapter::open(config)?;
         Ok(Self {
             adapter: Arc::new(adapter),
             cdc_config,
+            verify_mode: Arc::new(verify_mode),
             next_txn_id: AtomicU64::new(1),
             next_commit_id: Arc::new(AtomicU64::new(1)),
             snapshot_lock: Arc::new(Mutex::new(())),
@@ -125,11 +134,13 @@ impl BfTreeDatabase {
 
     /// Open an existing Bf-Tree database with the given CDC settings.
     pub fn open_with_cdc(config: BfTreeConfig, cdc_config: CdcConfig) -> Result<Self, BfTreeError> {
+        let verify_mode = config.verify_mode.clone();
         let adapter = BfTreeAdapter::open_from_snapshot(config)?;
         let next_id = recover_next_txn_id(&adapter).unwrap_or(1);
         Ok(Self {
             adapter: Arc::new(adapter),
             cdc_config,
+            verify_mode: Arc::new(verify_mode),
             next_txn_id: AtomicU64::new(next_id),
             next_commit_id: Arc::new(AtomicU64::new(next_id)),
             snapshot_lock: Arc::new(Mutex::new(())),
@@ -142,6 +153,10 @@ impl BfTreeDatabase {
     /// Multiple write transactions can coexist and execute concurrently.
     pub fn begin_write(&self) -> BfTreeDatabaseWriteTxn {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            txn_id < u64::MAX,
+            "transaction ID counter exhausted (u64::MAX reached)"
+        );
         let cdc_log = if self.cdc_config.enabled {
             Some(Mutex::new(Vec::new()))
         } else {
@@ -155,6 +170,7 @@ impl BfTreeDatabase {
             snapshot_lock: self.snapshot_lock.clone(),
             cdc_log,
             cdc_config: self.cdc_config.clone(),
+            verify_mode: self.verify_mode.clone(),
             buffer: Mutex::new(WriteBuffer::new()),
             committed: core::sync::atomic::AtomicBool::new(false),
         }
@@ -166,6 +182,7 @@ impl BfTreeDatabase {
     pub fn begin_read(&self) -> BfTreeDatabaseReadTxn {
         BfTreeDatabaseReadTxn {
             adapter: self.adapter.clone(),
+            verify_mode: self.verify_mode.clone(),
         }
     }
 
@@ -384,6 +401,8 @@ pub struct BfTreeDatabaseWriteTxn {
     pub(crate) cdc_log: Option<Mutex<Vec<CdcEvent>>>,
     /// CDC configuration (retention, etc.).
     pub(crate) cdc_config: CdcConfig,
+    /// Per-entry checksum verification mode.
+    pub(crate) verify_mode: Arc<VerifyMode>,
     /// Write buffer for atomic commit/rollback semantics.
     pub(crate) buffer: Mutex<WriteBuffer>,
     /// Track whether buffer has been flushed (committed).
@@ -409,6 +428,7 @@ impl BfTreeDatabaseWriteTxn {
             &self.ops_count,
             self.cdc_log.as_ref(),
             &self.buffer,
+            &self.verify_mode,
         ))
     }
 
@@ -443,13 +463,19 @@ impl BfTreeDatabaseWriteTxn {
             name,
             &self.adapter,
             &self.ops_count,
+            self.cdc_log.as_ref(),
             &self.buffer,
         ))
     }
 
     /// Open the blob store for read-write access.
     pub fn open_blob_store(&self) -> BfTreeBlobStore<'_> {
-        BfTreeBlobStore::new(&self.adapter, &self.buffer, &self.ops_count)
+        BfTreeBlobStore::new(
+            &self.adapter,
+            &self.buffer,
+            &self.ops_count,
+            self.cdc_log.as_ref(),
+        )
     }
 
     /// Insert a typed key-value pair into the specified table.
@@ -620,6 +646,29 @@ impl BfTreeDatabaseWriteTxn {
         self.txn_id
     }
 
+    /// Merge the write buffer from another transaction into this one.
+    ///
+    /// Used by `concurrent_group_commit` to combine isolated per-batch buffers
+    /// into a single transaction before committing. Entries from `other` are
+    /// applied on top of existing entries in this transaction's buffer (last
+    /// writer wins on key collision).
+    ///
+    /// The other transaction is consumed; its buffer is drained and merged.
+    pub(crate) fn merge_buffer_from(
+        &self,
+        other: &BfTreeDatabaseWriteTxn,
+    ) -> Result<(), BfTreeError> {
+        let other_buffer = {
+            let mut guard = other.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            core::mem::replace(&mut *guard, WriteBuffer::new())
+        };
+        // Mark the source as committed so its Drop impl does not discard
+        // (the buffer is now empty anyway, but this is semantically correct).
+        other.committed.store(true, Ordering::SeqCst);
+        let mut self_buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        self_buffer.merge_from(other_buffer)
+    }
+
     /// Advance a named CDC cursor to the given transaction ID.
     ///
     /// Routed through the write buffer so that cursor advances are rolled back
@@ -662,6 +711,11 @@ impl BfTreeDatabaseWriteTxn {
         // fetch_add is atomic, so concurrent committers get strictly ordered IDs
         // that reflect actual commit order rather than transaction creation order.
         let commit_id = self.next_commit_id.fetch_add(1, Ordering::SeqCst);
+        if commit_id == u64::MAX {
+            return Err(BfTreeError::InvalidOperation(alloc::string::String::from(
+                "commit ID counter exhausted (u64::MAX reached)",
+            )));
+        }
 
         for (seq, event) in events.iter().enumerate() {
             let seq_u32 = u32::try_from(seq).map_err(|_| {
@@ -703,6 +757,10 @@ impl BfTreeDatabaseWriteTxn {
 
     /// Post-commit retention pruning of old CDC log entries.
     ///
+    /// Deletes at transaction-ID granularity: all entries for a given `txn_id`
+    /// are deleted together so that concurrent `read_cdc_since()` never
+    /// observes a partially-pruned transaction.
+    ///
     /// This runs after the commit is finalized. Failures are non-fatal --
     /// old entries accumulate but do not affect correctness.
     fn prune_cdc_retention(&self) {
@@ -723,20 +781,39 @@ impl BfTreeDatabaseWriteTxn {
         let prefix_len = prefix.len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
 
-        // Collect keys to delete (must drop iterator before deleting).
-        let keys_to_delete = {
+        // Collect keys grouped by transaction ID for atomic per-txn deletion.
+        // Since the scan is sorted by (txn_id, seq) in big-endian byte order,
+        // consecutive entries with the same txn_id are naturally grouped.
+        let keys_by_txn: Vec<(u64, Vec<Vec<u8>>)> = {
             let mut buf = vec![0u8; max_record * 2];
-            let mut keys: Vec<Vec<u8>> = Vec::new();
+            let mut groups: Vec<(u64, Vec<Vec<u8>>)> = Vec::new();
             if let Ok(mut iter) = self.adapter.scan_range(&prefix, &cutoff_encoded) {
                 while let Some((key_len, _val_len)) = iter.next(&mut buf) {
-                    keys.push(buf[..key_len].to_vec());
+                    if key_len <= prefix_len {
+                        continue;
+                    }
+                    let key_bytes = &buf[prefix_len..key_len];
+                    if key_bytes.len() < CdcKey::SERIALIZED_SIZE {
+                        continue;
+                    }
+                    let txn_id = CdcKey::from_be_bytes(key_bytes).transaction_id;
+                    let encoded = buf[..key_len].to_vec();
+                    match groups.last_mut() {
+                        Some((last_txn, keys)) if *last_txn == txn_id => {
+                            keys.push(encoded);
+                        }
+                        _ => {
+                            groups.push((txn_id, vec![encoded]));
+                        }
+                    }
                 }
             }
-            keys
+            groups
         };
 
-        for encoded_key in &keys_to_delete {
-            if encoded_key.len() > prefix_len {
+        // Delete all entries for each complete transaction group.
+        for (_txn_id, keys) in &keys_by_txn {
+            for encoded_key in keys {
                 self.adapter.delete(encoded_key);
             }
         }
@@ -762,6 +839,8 @@ impl Drop for BfTreeDatabaseWriteTxn {
 /// Provides typed get/scan using shodh-redb's `Key`/`Value` traits.
 pub struct BfTreeDatabaseReadTxn {
     pub(crate) adapter: Arc<BfTreeAdapter>,
+    /// Per-entry checksum verification mode.
+    pub(crate) verify_mode: Arc<VerifyMode>,
 }
 
 impl BfTreeDatabaseReadTxn {
@@ -776,7 +855,11 @@ impl BfTreeDatabaseReadTxn {
         definition: TableDefinition<K, V>,
     ) -> Result<BfTreeReadOnlyTable<'_, K, V>, BfTreeError> {
         validate_table_name(definition.name())?;
-        Ok(BfTreeReadOnlyTable::new(definition.name(), &self.adapter))
+        Ok(BfTreeReadOnlyTable::new(
+            definition.name(),
+            &self.adapter,
+            &self.verify_mode,
+        ))
     }
 
     /// Open a TTL table for read-only access.

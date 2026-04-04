@@ -493,6 +493,12 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         let query_owned;
         let q = if self.config.metric == DistanceMetric::Cosine {
+            // Zero-norm query in cosine space is undefined (division by zero
+            // in the distance computation). Return empty results rather than
+            // producing arbitrary rankings.
+            if crate::vector_ops::l2_norm(query) == 0.0 {
+                return Ok(Vec::new());
+            }
             query_owned = crate::vector_ops::l2_normalized(query);
             &query_owned
         } else {
@@ -861,6 +867,12 @@ impl ReadOnlyIvfPqIndex {
 
         let query_owned;
         let q = if self.config.metric == DistanceMetric::Cosine {
+            // Zero-norm query in cosine space is undefined (division by zero
+            // in the distance computation). Return empty results rather than
+            // producing arbitrary rankings.
+            if crate::vector_ops::l2_norm(query) == 0.0 {
+                return Ok(Vec::new());
+            }
             query_owned = crate::vector_ops::l2_normalized(query);
             &query_owned
         } else {
@@ -996,11 +1008,7 @@ impl CandidateHeap {
                 distance: e.distance,
             })
             .collect();
-        items.sort_unstable_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(CmpOrdering::Equal)
-        });
+        items.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
         items
     }
 }

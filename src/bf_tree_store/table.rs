@@ -30,6 +30,7 @@ use super::database::{
     BfTreeTableScan, TableKind, encode_table_key, table_prefix, table_prefix_end,
 };
 use super::error::BfTreeError;
+use super::verification::{VerifyMode, should_verify, unwrap_value, wrap_value};
 
 /// A writable table handle backed by Bf-Tree.
 ///
@@ -52,6 +53,7 @@ pub struct BfTreeTable<'txn, K: Key + 'static, V: Value + 'static> {
     ops_count: &'txn AtomicU64,
     cdc_log: Option<&'txn Mutex<Vec<CdcEvent>>>,
     buffer: &'txn Mutex<WriteBuffer>,
+    verify_mode: &'txn Arc<VerifyMode>,
     _key: PhantomData<K>,
     _val: PhantomData<V>,
 }
@@ -71,6 +73,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         ops_count: &'txn AtomicU64,
         cdc_log: Option<&'txn Mutex<Vec<CdcEvent>>>,
         buffer: &'txn Mutex<WriteBuffer>,
+        verify_mode: &'txn Arc<VerifyMode>,
     ) -> Self {
         Self {
             name: String::from(name),
@@ -78,6 +81,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
             ops_count,
             cdc_log,
             buffer,
+            verify_mode,
             _key: PhantomData,
             _val: PhantomData,
         }
@@ -107,12 +111,19 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let val_bytes = V::as_bytes(value);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
 
+        let checksumming = self.verify_mode.is_enabled();
+        let store_bytes = if checksumming {
+            wrap_value(val_bytes.as_ref())
+        } else {
+            val_bytes.as_ref().to_vec()
+        };
+
         // Hold the buffer lock across the entire read-modify-write to prevent
         // TOCTOU races where a concurrent writer could interleave between the
         // old-value read and the new-value write, causing stale CDC events.
         let previous = {
             let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = match buffer.get(&encoded_key) {
+            let prev_raw = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
                 BufferLookup::NotInBuffer => {
@@ -125,8 +136,15 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                     }
                 }
             };
-            buffer.put(encoded_key, val_bytes.as_ref().to_vec())?;
-            prev
+            buffer.put(encoded_key, store_bytes)?;
+            // Strip checksum wrapper from the previous value before returning.
+            match prev_raw {
+                Some(raw) if checksumming => {
+                    let verify = should_verify(self.verify_mode.as_ref());
+                    Some(unwrap_value(&raw, verify)?.to_vec())
+                }
+                other => other,
+            }
         };
 
         self.ops_count.fetch_add(1, Ordering::Relaxed);
@@ -160,13 +178,14 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     pub fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let checksumming = self.verify_mode.is_enabled();
 
         // Hold the buffer lock across the entire read + tombstone-write to
         // prevent TOCTOU races where a concurrent writer could insert between
         // the old-value read and the tombstone write.
         let previous = {
             let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = match buffer.get(&encoded_key) {
+            let prev_raw = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
                 BufferLookup::NotInBuffer => {
@@ -179,10 +198,17 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                     }
                 }
             };
-            if prev.is_some() {
+            if prev_raw.is_some() {
                 buffer.delete(encoded_key);
             }
-            prev
+            // Strip checksum wrapper from the previous value before returning.
+            match prev_raw {
+                Some(raw) if checksumming => {
+                    let verify = should_verify(self.verify_mode.as_ref());
+                    Some(unwrap_value(&raw, verify)?.to_vec())
+                }
+                other => other,
+            }
         };
 
         if previous.is_some() {
@@ -210,10 +236,18 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     pub fn get(&self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let checksumming = self.verify_mode.is_enabled();
 
         let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         match buffer.get(&encoded_key) {
-            BufferLookup::Found(v) => return Ok(Some(v)),
+            BufferLookup::Found(v) => {
+                return if checksumming {
+                    let verify = should_verify(self.verify_mode.as_ref());
+                    Ok(Some(unwrap_value(&v, verify)?.to_vec()))
+                } else {
+                    Ok(Some(v))
+                };
+            }
             BufferLookup::Tombstone => return Ok(None),
             BufferLookup::NotInBuffer => {}
         }
@@ -222,7 +256,15 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.adapter.read(&encoded_key, &mut buf) {
-            Ok(len) => Ok(Some(buf[..len as usize].to_vec())),
+            Ok(len) => {
+                let raw = &buf[..len as usize];
+                if checksumming {
+                    let verify = should_verify(self.verify_mode.as_ref());
+                    Ok(Some(unwrap_value(raw, verify)?.to_vec()))
+                } else {
+                    Ok(Some(raw.to_vec()))
+                }
+            }
             Err(BfTreeError::NotFound | BfTreeError::Deleted) => Ok(None),
             Err(e) => Err(e),
         }
@@ -244,13 +286,14 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     ) -> Result<(), BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let checksumming = self.verify_mode.is_enabled();
 
         // Hold the buffer lock across the entire read-merge-write to prevent
         // TOCTOU races where a concurrent merge could read the same stale
         // value, causing a classic lost-update problem.
-        {
+        let (old_value, new_value) = {
             let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            let existing = match buffer.get(&encoded_key) {
+            let existing_raw = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
                 BufferLookup::NotInBuffer => {
@@ -263,13 +306,49 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                     }
                 }
             };
-            match operator.merge(key_bytes.as_ref(), existing.as_deref(), operand) {
-                Some(new_val) => buffer.put(encoded_key, new_val)?,
+            // Unwrap checksum before passing to merge operator.
+            let existing = match existing_raw {
+                Some(ref raw) if checksumming => {
+                    let verify = should_verify(self.verify_mode.as_ref());
+                    Some(unwrap_value(raw, verify)?.to_vec())
+                }
+                other => other,
+            };
+            let merged = operator.merge(key_bytes.as_ref(), existing.as_deref(), operand);
+            match merged {
+                Some(ref new_val) => {
+                    let store = if checksumming {
+                        wrap_value(new_val)
+                    } else {
+                        new_val.clone()
+                    };
+                    buffer.put(encoded_key, store)?;
+                }
                 None => buffer.delete(encoded_key),
             }
-        }
+            (existing, merged)
+        };
 
         self.ops_count.fetch_add(1, Ordering::Relaxed);
+
+        // MERGE-03: Record CDC events for merge mutations, mirroring the
+        // insert()/remove() logic so CDC consumers see all changes.
+        if self.cdc_log.is_some() {
+            let (op, cdc_new, cdc_old) = match (&old_value, &new_value) {
+                (None, Some(nv)) => (ChangeOp::Insert, Some(nv.clone()), None),
+                (Some(_), Some(nv)) => (ChangeOp::Update, Some(nv.clone()), old_value.clone()),
+                (Some(_), None) => (ChangeOp::Delete, None, old_value.clone()),
+                (None, None) => return Ok(()),
+            };
+            self.record_cdc(CdcEvent {
+                table_name: self.name.clone(),
+                op,
+                key: key_bytes.as_ref().to_vec(),
+                new_value: cdc_new,
+                old_value: cdc_old,
+            });
+        }
+
         Ok(())
     }
 
@@ -298,6 +377,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
 pub struct BfTreeReadOnlyTable<'txn, K: Key + 'static, V: Value + 'static> {
     name: String,
     adapter: &'txn Arc<BfTreeAdapter>,
+    verify_mode: &'txn Arc<VerifyMode>,
     _key: PhantomData<K>,
     _val: PhantomData<V>,
 }
@@ -311,10 +391,15 @@ impl<K: Key + 'static, V: Value + 'static> TableHandle for BfTreeReadOnlyTable<'
 }
 
 impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V> {
-    pub(crate) fn new(name: &str, adapter: &'txn Arc<BfTreeAdapter>) -> Self {
+    pub(crate) fn new(
+        name: &str,
+        adapter: &'txn Arc<BfTreeAdapter>,
+        verify_mode: &'txn Arc<VerifyMode>,
+    ) -> Self {
         Self {
             name: String::from(name),
             adapter,
+            verify_mode,
             _key: PhantomData,
             _val: PhantomData,
         }
@@ -324,10 +409,19 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
     pub fn get(&self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let checksumming = self.verify_mode.is_enabled();
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.adapter.read(&encoded_key, &mut buf) {
-            Ok(len) => Ok(Some(buf[..len as usize].to_vec())),
+            Ok(len) => {
+                let raw = &buf[..len as usize];
+                if checksumming {
+                    let verify = should_verify(self.verify_mode.as_ref());
+                    Ok(Some(unwrap_value(raw, verify)?.to_vec()))
+                } else {
+                    Ok(Some(raw.to_vec()))
+                }
+            }
             Err(BfTreeError::NotFound | BfTreeError::Deleted) => Ok(None),
             Err(e) => Err(e),
         }
@@ -649,6 +743,18 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
         }
 
         self.ops_count.fetch_add(total_count, Ordering::Relaxed);
+
+        // Record a single CDC drain event summarizing the bulk delete.
+        if self.cdc_log.is_some() && total_count > 0 {
+            self.record_cdc(CdcEvent {
+                table_name: self.name.clone(),
+                op: ChangeOp::Delete,
+                key: Vec::new(),
+                new_value: None,
+                old_value: None,
+            });
+        }
+
         Ok(total_count)
     }
 }

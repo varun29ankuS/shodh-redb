@@ -1,6 +1,6 @@
 //! Per-entry read verification for `BfTree`.
 //!
-//! Wraps stored values with a 4-byte XXH3-32 checksum prefix for integrity
+//! Wraps stored values with a 4-byte FNV-1a checksum prefix for integrity
 //! verification on read. This catches silent data corruption in the storage
 //! layer.
 //!
@@ -34,6 +34,13 @@ pub enum VerifyMode {
 impl Default for VerifyMode {
     fn default() -> Self {
         Self::None
+    }
+}
+
+impl VerifyMode {
+    /// Returns `true` if checksumming is active (any mode other than `None`).
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::None)
     }
 }
 

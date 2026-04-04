@@ -27,21 +27,31 @@ use super::error::BfTreeError;
 /// checkpoints with crash-recovery support.
 pub struct BfTreeAdapter {
     inner: BfTree,
+    /// Maximum key length in bytes, captured from `BfTreeConfig` at construction
+    /// time for pre-validation in the write buffer flush path.
+    max_key_len: usize,
 }
 
 impl BfTreeAdapter {
     /// Create a new Bf-Tree storage engine with the given configuration.
     pub fn open(config: BfTreeConfig) -> Result<Self, BfTreeError> {
+        let max_key_len = config.max_key_len;
         let bf_config = config.into_bf_config()?;
         let inner = BfTree::with_config(bf_config, None)?;
-        Ok(Self { inner })
+        Ok(Self { inner, max_key_len })
     }
 
     /// Open a Bf-Tree from an existing snapshot file for crash recovery.
     pub fn open_from_snapshot(config: BfTreeConfig) -> Result<Self, BfTreeError> {
+        let max_key_len = config.max_key_len;
         let bf_config = config.into_bf_config()?;
         let inner = BfTree::new_from_snapshot(bf_config, None)?;
-        Ok(Self { inner })
+        Ok(Self { inner, max_key_len })
+    }
+
+    /// Maximum key length in bytes, as configured at construction time.
+    pub fn max_key_len(&self) -> usize {
+        self.max_key_len
     }
 
     /// Insert or update a key-value pair.

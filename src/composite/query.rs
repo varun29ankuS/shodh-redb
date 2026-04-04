@@ -3,6 +3,7 @@ use crate::blob_store::types::BlobId;
 use crate::compat::HashMap;
 use crate::fractal::{FractalSearchParams, ReadOnlyFractalIndex};
 use crate::ivfpq::{ReadOnlyIvfPqIndex, SearchParams};
+use crate::storage_traits::StorageRead;
 use crate::transactions::ReadTransaction;
 use alloc::collections::BinaryHeap;
 use alloc::string::ToString;
@@ -23,6 +24,11 @@ use super::types::{
 /// The type parameter `P` is the blob query provider -- typically a
 /// `ReadTransaction` (legacy B-tree) or `BfTreeReadOnlyBlobStore` (`BfTree`).
 ///
+/// The type parameter `R` is the storage reader used for vector index search
+/// (IVF-PQ / Fractal). Both `ReadTransaction` and `BfTreeDatabaseReadTxn`
+/// implement `StorageRead`. When the provider is also the storage reader (the
+/// common legacy case), use [`CompositeQuery::new()`] which sets both.
+///
 /// # Example
 ///
 /// ```rust,ignore
@@ -36,12 +42,17 @@ use super::types::{
 ///     .top_k(10)
 ///     .execute()?;
 /// ```
-pub struct CompositeQuery<'a, P: BlobQueryProvider = ReadTransaction> {
+pub struct CompositeQuery<
+    'a,
+    P: BlobQueryProvider = ReadTransaction,
+    R: StorageRead = ReadTransaction,
+> {
     provider: &'a P,
 
-    /// Legacy transaction reference -- needed for vector index search which
-    /// takes `&ReadTransaction` directly. `None` when using `BfTree` backend.
-    legacy_txn: Option<&'a ReadTransaction>,
+    /// Storage reader for vector index search (IVF-PQ / Fractal). Generic over
+    /// `StorageRead` so that both legacy `ReadTransaction` and `BfTree` backends
+    /// can be used. `None` when no semantic signal is needed.
+    storage_reader: Option<&'a R>,
 
     // Semantic signal (IVF-PQ or Fractal)
     vector_index: Option<&'a ReadOnlyIvfPqIndex>,
@@ -68,12 +79,15 @@ pub struct CompositeQuery<'a, P: BlobQueryProvider = ReadTransaction> {
 }
 
 /// Convenience constructor for legacy `ReadTransaction`.
-impl<'a> CompositeQuery<'a, ReadTransaction> {
+///
+/// `ReadTransaction` implements both `BlobQueryProvider` and `StorageRead`, so
+/// a single reference is used as both the blob provider and storage reader.
+impl<'a> CompositeQuery<'a, ReadTransaction, ReadTransaction> {
     /// Start building a composite query on the given legacy read transaction.
     pub fn new(txn: &'a ReadTransaction) -> Self {
         Self {
             provider: txn,
-            legacy_txn: Some(txn),
+            storage_reader: Some(txn),
             vector_index: None,
             fractal_index: None,
             query_vector: None,
@@ -91,7 +105,7 @@ impl<'a> CompositeQuery<'a, ReadTransaction> {
     }
 }
 
-impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
+impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
     /// Start building a composite query on any `BlobQueryProvider`.
     ///
     /// For the legacy backend, prefer [`CompositeQuery::new()`] which
@@ -99,7 +113,7 @@ impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
     pub fn with_provider(provider: &'a P) -> Self {
         Self {
             provider,
-            legacy_txn: None,
+            storage_reader: None,
             vector_index: None,
             fractal_index: None,
             query_vector: None,
@@ -116,13 +130,13 @@ impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
         }
     }
 
-    /// Attach a legacy `ReadTransaction` for vector index search.
+    /// Attach a `StorageRead` implementation for vector index search.
     ///
-    /// Required when using `BfTree` provider with IVF-PQ or Fractal vector
-    /// indices, since those indices currently require a `ReadTransaction`.
+    /// Required when semantic search is enabled, since IVF-PQ and Fractal
+    /// indices need a `StorageRead` to access their on-disk tables.
     #[must_use]
-    pub fn with_legacy_txn(mut self, txn: &'a ReadTransaction) -> Self {
-        self.legacy_txn = Some(txn);
+    pub fn with_storage_reader(mut self, reader: &'a R) -> Self {
+        self.storage_reader = Some(reader);
         self
     }
 
@@ -259,10 +273,10 @@ impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
             })?;
             let k = self.semantic_candidates.unwrap_or(self.top_k.max(1) * 5);
 
-            // Vector index search requires a legacy ReadTransaction.
-            let txn = self.legacy_txn.ok_or_else(|| {
+            // Vector index search requires a StorageRead implementation.
+            let reader = self.storage_reader.ok_or_else(|| {
                 StorageError::Corrupted(
-                    "semantic search requires a ReadTransaction (use with_legacy_txn)".to_string(),
+                    "semantic search requires a StorageRead (use with_storage_reader)".to_string(),
                 )
             })?;
 
@@ -275,7 +289,7 @@ impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
                     min_hlc: 0,
                     diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
                 });
-                fi.search(txn, query, &params)?
+                fi.search(reader, query, &params)?
             } else {
                 let index = self.vector_index.ok_or_else(|| {
                     StorageError::Corrupted(
@@ -289,7 +303,7 @@ impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
                     rerank: true,
                     diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
                 });
-                index.search(txn, query, &params)?
+                index.search(reader, query, &params)?
             };
 
             for neighbor in &results {
@@ -497,9 +511,9 @@ impl<'a, P: BlobQueryProvider> CompositeQuery<'a, P> {
                 "CompositeQuery: semantic signal requires an index (IVF-PQ or fractal)".to_string(),
             ));
         }
-        if self.weights.semantic > 0.0 && self.legacy_txn.is_none() {
+        if self.weights.semantic > 0.0 && self.storage_reader.is_none() {
             return Err(StorageError::Corrupted(
-                "CompositeQuery: semantic signal requires a ReadTransaction (use with_legacy_txn)"
+                "CompositeQuery: semantic signal requires a StorageRead (use with_storage_reader)"
                     .to_string(),
             ));
         }

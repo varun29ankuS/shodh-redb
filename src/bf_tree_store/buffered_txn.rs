@@ -129,6 +129,39 @@ impl WriteBuffer {
         ))
     }
 
+    /// Get a sorted range of buffered entries with an exclusive end bound.
+    ///
+    /// Returns entries where `start <= key < end`. Use this when the upper
+    /// bound is a computed "next prefix" that must not itself be included in
+    /// the result set.
+    pub(crate) fn range_excluded_end(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> alloc::collections::btree_map::Range<'_, Vec<u8>, Option<Vec<u8>>> {
+        use core::ops::Bound;
+        self.entries.range::<Vec<u8>, _>((
+            Bound::Included(start.to_vec()),
+            Bound::Excluded(end.to_vec()),
+        ))
+    }
+
+    /// Get all buffered entries whose key starts with the given prefix.
+    ///
+    /// This is safe for all-0xFF prefixes where `increment_prefix` overflows,
+    /// because it filters by actual prefix match rather than relying on a
+    /// computed upper bound.
+    pub(crate) fn prefix_range(
+        &self,
+        prefix: &[u8],
+    ) -> impl Iterator<Item = (&Vec<u8>, &Option<Vec<u8>>)> {
+        use core::ops::Bound;
+        let prefix_vec = prefix.to_vec();
+        self.entries
+            .range::<Vec<u8>, _>((Bound::Included(prefix_vec.clone()), Bound::Unbounded))
+            .take_while(move |(k, _)| k.starts_with(&prefix_vec))
+    }
+
     /// Number of buffered entries.
     #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
@@ -151,17 +184,25 @@ impl WriteBuffer {
     /// deletes are rolled back via re-insert of the previously-read value.
     pub(crate) fn flush(&mut self, adapter: &BfTreeAdapter) -> Result<(), BfTreeError> {
         let max_record_size = adapter.inner().config().get_cb_max_record_size();
+        let max_key_len = adapter.max_key_len();
 
-        // Phase 1: Pre-validate all insert entries against BfTree's value size limit.
-        // Reject the entire flush upfront if any entry would exceed limits, avoiding
-        // partial writes. Key size validation is handled by adapter.insert() with
-        // compensating rollback as a safety net.
+        // Phase 1: Pre-validate all entries against BfTree's key and value size
+        // limits before writing anything. Reject the entire flush upfront if any
+        // entry would exceed limits, preventing partial writes and avoiding
+        // panics during the flush phase.
         for (key, value) in &self.entries {
             // Reject empty keys for both inserts and tombstones. An empty key
             // is invalid regardless of the operation type.
             if key.is_empty() {
                 return Err(BfTreeError::InvalidKV(alloc::string::String::from(
                     "key must not be empty",
+                )));
+            }
+            if key.len() > max_key_len {
+                return Err(BfTreeError::InvalidKV(alloc::format!(
+                    "key size {} exceeds max {}",
+                    key.len(),
+                    max_key_len
                 )));
             }
             if let Some(val) = value.as_ref().filter(|v| v.len() > max_record_size) {
@@ -258,6 +299,36 @@ impl WriteBuffer {
     /// Discard all buffered entries (rollback).
     pub(crate) fn discard(&mut self) {
         self.entries.clear();
+    }
+
+    /// Merge another write buffer into this one.
+    ///
+    /// Entries from `other` are applied on top of entries already in `self`.
+    /// If both buffers contain the same key, `other`'s entry wins (last-writer
+    /// wins), matching the semantics of sequential batch execution.
+    ///
+    /// The entry limit is checked against the post-merge size to prevent
+    /// exceeding the maximum buffer capacity.
+    pub(crate) fn merge_from(&mut self, other: WriteBuffer) -> Result<(), BfTreeError> {
+        // Pre-check: will the merge exceed the entry limit? Count net new keys
+        // (keys in `other` that are not already in `self`).
+        let new_keys = other
+            .entries
+            .keys()
+            .filter(|k| !self.entries.contains_key(*k))
+            .count();
+        let post_merge_len = self.entries.len() + new_keys;
+        if post_merge_len > self.max_buffer_entries {
+            return Err(BfTreeError::InvalidKV(alloc::format!(
+                "merged buffer would have {} entries, exceeding limit of {}",
+                post_merge_len,
+                self.max_buffer_entries,
+            )));
+        }
+        for (key, value) in other.entries {
+            self.entries.insert(key, value);
+        }
+        Ok(())
     }
 
     /// Drain a table: tombstone all visible entries in `[prefix, prefix_end)`.

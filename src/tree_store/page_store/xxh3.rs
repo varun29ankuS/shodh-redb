@@ -64,6 +64,9 @@ pub fn hash64_with_seed(data: &[u8], seed: u64) -> u64 {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             if is_x86_feature_detected!("avx2") {
+                // SAFETY: AVX2 availability is verified by the runtime check above.
+                // `hash64_large_avx2` is `#[target_feature(enable = "avx2")]` and
+                // requires the caller to guarantee the feature is present.
                 unsafe {
                     return hash64_large_avx2(data, seed);
                 }
@@ -71,6 +74,9 @@ pub fn hash64_with_seed(data: &[u8], seed: u64) -> u64 {
         }
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: This block is only compiled on aarch64 where NEON is
+            // always available. `hash64_large_neon` uses NEON intrinsics that
+            // are guaranteed present on all AArch64 targets.
             unsafe { hash64_large_neon(data, seed) }
         }
         #[cfg(not(target_arch = "aarch64"))]
@@ -90,11 +96,17 @@ pub fn hash128_with_seed(data: &[u8], seed: u64) -> u128 {
     } else {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 availability is verified by the runtime check above.
+            // `hash128_large_avx2` is `#[target_feature(enable = "avx2")]` and
+            // requires the caller to guarantee the feature is present.
             unsafe {
                 return hash128_large_avx2(data, seed);
             }
         }
         #[cfg(target_arch = "aarch64")]
+        // SAFETY: This block is only compiled on aarch64 where NEON is always
+        // available. `hash128_large_neon` uses NEON intrinsics that are
+        // guaranteed present on all AArch64 targets.
         unsafe {
             hash128_large_neon(data, seed)
         }
@@ -164,6 +176,10 @@ unsafe fn scramble_accumulators_avx2(
     accumulators: &mut [u64; INIT_ACCUMULATORS.len()],
     secret: &[u8],
 ) {
+    // SAFETY: Caller guarantees AVX2 is available (via `#[target_feature]`).
+    // `accumulators` is a `[u64; 8]` (64 bytes = STRIPE_LENGTH) and `secret`
+    // is at least STRIPE_LENGTH bytes, satisfying alignment and size
+    // requirements for 256-bit SIMD loads/stores.
     unsafe {
         #[cfg(target_arch = "x86")]
         use core::arch::x86::*;
@@ -203,6 +219,9 @@ unsafe fn scramble_accumulators_neon(
     #[cfg(target_arch = "arm")]
     use core::arch::arm::*;
 
+    // SAFETY: Caller guarantees NEON is available (always true on aarch64).
+    // `accumulators` is a `[u64; 8]` (64 bytes) and `secret` is asserted to
+    // be at least STRIPE_LENGTH bytes, so all NEON loads/stores are in bounds.
     unsafe {
         let prime = vdup_n_u32(PRIME32[0].try_into().unwrap());
 
@@ -292,6 +311,10 @@ fn gen_secret_generic(seed: u64) -> [u8; DEFAULT_SECRET.len()] {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn gen_secret_avx2(seed: u64) -> [u8; DEFAULT_SECRET.len()] {
+    // SAFETY: Caller guarantees AVX2 is available (via `#[target_feature]`).
+    // `DEFAULT_SECRET` is 192 bytes and `output` is the same size; the loop
+    // performs 6 iterations of 32-byte AVX2 loads/stores (6*32 = 192), so all
+    // accesses are in bounds.
     unsafe {
         #[cfg(target_arch = "x86")]
         use core::arch::x86::*;
@@ -325,6 +348,9 @@ unsafe fn accumulate_stripe_neon(accumulators: &mut [u64; 8], data: &[u8], secre
     #[cfg(target_arch = "arm")]
     use core::arch::arm::*;
 
+    // SAFETY: Caller guarantees NEON is available. Both `data` and `secret`
+    // are asserted to be at least STRIPE_LENGTH (64) bytes, and `accumulators`
+    // is `[u64; 8]` (64 bytes). All NEON loads/stores stay within these bounds.
     unsafe {
         let accum_ptr = accumulators.as_mut_ptr();
         let data_ptr = data.as_ptr();
@@ -353,6 +379,10 @@ unsafe fn accumulate_stripe_neon(accumulators: &mut [u64; 8], data: &[u8], secre
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn accumulate_stripe_avx2(accumulators: &mut [u64; 8], data: &[u8], secret: &[u8]) {
+    // SAFETY: Caller guarantees AVX2 is available (via `#[target_feature]`).
+    // Both `data` and `secret` are asserted to be at least STRIPE_LENGTH (64)
+    // bytes, and `accumulators` is `[u64; 8]` (64 bytes). The loop performs
+    // 2 iterations of 32-byte AVX2 loads/stores, all within bounds.
     unsafe {
         #[cfg(target_arch = "x86")]
         use core::arch::x86::*;
@@ -402,6 +432,10 @@ fn accumulate_block(
     accum_stripe: unsafe fn(&mut [u64; 8], &[u8], &[u8]),
 ) {
     for i in 0..stripes {
+        // SAFETY: `accum_stripe` is a function pointer to either a SIMD or
+        // generic implementation. The caller ensures the appropriate CPU
+        // feature is available. `data` and `secret` slicing is bounded by
+        // `stripes` which is derived from `(data.len() - 1) / STRIPE_LENGTH`.
         unsafe {
             accum_stripe(
                 accumulators,
@@ -434,6 +468,10 @@ fn hash_large_helper(
             stripes_per_block,
             accum_stripe,
         );
+        // SAFETY: `scramble` is a function pointer to either a SIMD or generic
+        // implementation. The caller ensures the appropriate CPU feature is
+        // available. The secret slice starts at `secret.len() - STRIPE_LENGTH`,
+        // providing exactly STRIPE_LENGTH bytes.
         unsafe { scramble(&mut accumulators, &secret[secret.len() - STRIPE_LENGTH..]) };
     }
 
@@ -448,6 +486,11 @@ fn hash_large_helper(
     );
 
     // trailing stripe
+    // SAFETY: `accum_stripe` is a function pointer whose CPU feature
+    // requirement is satisfied by the caller. `data.len() > 240 >=
+    // STRIPE_LENGTH` (enforced by the call sites), so the trailing slice
+    // has exactly STRIPE_LENGTH bytes. The secret slice is similarly valid
+    // because `secret.len() >= MIN_SECRET_SIZE > STRIPE_LENGTH + 7`.
     unsafe {
         accum_stripe(
             &mut accumulators,
@@ -589,6 +632,9 @@ fn hash64_large_generic(
     scramble: unsafe fn(&mut [u64; 8], &[u8]),
     accum_stripe: unsafe fn(&mut [u64; 8], &[u8], &[u8]),
 ) -> u64 {
+    // SAFETY: `generate` is either `gen_secret_generic` (safe, no CPU
+    // requirement) or `gen_secret_avx2` (caller guarantees AVX2 is available
+    // via `is_x86_feature_detected!` or `#[target_feature]`).
     let secret = unsafe { generate(seed) };
     let accumulators = hash_large_helper(data, &secret, scramble, accum_stripe);
 
@@ -795,6 +841,9 @@ fn hash128_large_generic(
     scramble: unsafe fn(&mut [u64; 8], &[u8]),
     accum_stripe: unsafe fn(&mut [u64; 8], &[u8], &[u8]),
 ) -> u128 {
+    // SAFETY: `generate` is either `gen_secret_generic` (safe, no CPU
+    // requirement) or `gen_secret_avx2` (caller guarantees AVX2 is available
+    // via `is_x86_feature_detected!` or `#[target_feature]`).
     let secret = unsafe { generate(seed) };
     let accumulators = hash_large_helper(data, &secret, scramble, accum_stripe);
 

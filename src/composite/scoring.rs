@@ -8,7 +8,9 @@ use super::provider::BlobQueryProvider;
 /// casts on the u64 inputs. Scales the ratio into u32 via u128 arithmetic,
 /// then uses lossless `f64::from(u32)` for the final division.
 fn ratio_u64(numerator: u64, denominator: u64) -> f64 {
-    debug_assert!(denominator > 0);
+    if denominator == 0 {
+        return 0.0;
+    }
     debug_assert!(numerator <= denominator);
     let wide = u128::from(numerator) * u128::from(u32::MAX) / u128::from(denominator);
     // numerator <= denominator guarantees wide <= u32::MAX, so this never saturates.
@@ -160,6 +162,11 @@ mod tests {
         assert!((ratio_u64(0, 100) - 0.0).abs() < 1e-6);
         assert!((ratio_u64(100, 100) - 1.0).abs() < 1e-6);
         assert!((ratio_u64(50, 100) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ratio_u64_zero_denominator() {
+        assert!((ratio_u64(0, 0) - 0.0).abs() < 1e-6);
     }
 
     #[test]

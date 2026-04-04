@@ -75,9 +75,13 @@ impl GroupCommit {
 
 /// Execute a group of write batches concurrently, then commit atomically.
 ///
-/// All batches share a single write transaction protected by a mutex. Each
-/// batch runs in its own thread, acquiring the mutex to interact with the
-/// transaction. A single `commit()` at the end ensures atomicity.
+/// Each batch runs in its own thread with an isolated write transaction
+/// (and therefore its own `WriteBuffer`). This provides batch-level isolation:
+/// batch X cannot observe keys written by batch Y during execution.
+///
+/// After all batches complete, their individual write buffers are merged into
+/// a single commit transaction. A single `commit()` at the end ensures
+/// atomicity -- either all batches are persisted or none are.
 ///
 /// An `AtomicBool` abort flag is shared across all batch threads. When any
 /// batch fails, it sets the flag, and other batches bail out early instead
@@ -90,37 +94,41 @@ pub fn concurrent_group_commit(
     use std::thread;
 
     let count = batches.len();
-    let wtxn = Arc::new(db.begin_write());
     let abort = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::with_capacity(count);
 
     for batch in batches {
-        let wtxn = wtxn.clone();
+        let db = db.clone();
         let abort = abort.clone();
-        handles.push(thread::spawn(move || -> Result<(), BfTreeError> {
-            // Check abort flag before executing this batch. If another batch
-            // has already failed, skip execution to avoid wasted work.
-            if abort.load(Ordering::Acquire) {
-                return Err(BfTreeError::InvalidOperation(
-                    "batch aborted due to earlier failure".into(),
-                ));
-            }
-            match batch(&wtxn) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    // Signal other batches to bail out.
-                    abort.store(true, Ordering::Release);
-                    Err(e)
+        handles.push(thread::spawn(
+            move || -> Result<BfTreeDatabaseWriteTxn, BfTreeError> {
+                // Check abort flag before executing this batch. If another batch
+                // has already failed, skip execution to avoid wasted work.
+                if abort.load(Ordering::Acquire) {
+                    return Err(BfTreeError::InvalidOperation(
+                        "batch aborted due to earlier failure".into(),
+                    ));
                 }
-            }
-        }));
+                // Each batch gets its own write transaction for isolation.
+                let batch_txn = db.begin_write();
+                match batch(&batch_txn) {
+                    Ok(()) => Ok(batch_txn),
+                    Err(e) => {
+                        // Signal other batches to bail out.
+                        abort.store(true, Ordering::Release);
+                        Err(e)
+                    }
+                }
+            },
+        ));
     }
 
-    // Join all threads and collect errors.
+    // Join all threads and collect completed batch transactions.
+    let mut batch_txns: Vec<BfTreeDatabaseWriteTxn> = Vec::with_capacity(count);
     let mut first_error: Option<BfTreeError> = None;
     for handle in handles {
         match handle.join() {
-            Ok(Ok(())) => {}
+            Ok(Ok(txn)) => batch_txns.push(txn),
             Ok(Err(e)) => {
                 if first_error.is_none() {
                     first_error = Some(e);
@@ -137,16 +145,17 @@ pub fn concurrent_group_commit(
     }
 
     if let Some(err) = first_error {
-        // Transaction is dropped without commit -- automatic rollback.
+        // Batch transactions are dropped without commit -- automatic rollback.
         return Err(err);
     }
 
-    // All batches completed successfully -- commit atomically.
-    // unwrap Arc: all thread handles have been joined so we hold the only reference.
-    let wtxn = Arc::into_inner(wtxn).ok_or_else(|| {
-        BfTreeError::InvalidOperation("outstanding references to write transaction".into())
-    })?;
-    wtxn.commit()?;
+    // All batches completed successfully. Merge their buffers into a single
+    // commit transaction to preserve atomicity.
+    let commit_txn = db.begin_write();
+    for batch_txn in &batch_txns {
+        commit_txn.merge_buffer_from(batch_txn)?;
+    }
+    commit_txn.commit()?;
 
     Ok(count)
 }

@@ -86,11 +86,7 @@ impl CandidateHeap {
 
     fn into_sorted(self, k: usize) -> Vec<Neighbor<u64>> {
         let mut entries: Vec<_> = self.heap.into_vec();
-        entries.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(CmpOrdering::Equal)
-        });
+        entries.sort_by(|a, b| a.distance.total_cmp(&b.distance));
         entries
             .into_iter()
             .take(k)
@@ -120,6 +116,12 @@ pub(crate) fn search_write<T: StorageWrite>(
     }
 
     let q = if idx.config.metric == DistanceMetric::Cosine {
+        // Zero-norm query in cosine space is undefined (division by zero
+        // in the distance computation). Return empty results rather than
+        // producing arbitrary rankings.
+        if crate::vector_ops::l2_norm(query) == 0.0 {
+            return Ok(Vec::new());
+        }
         let mut v = query.to_vec();
         l2_normalize(&mut v);
         v
@@ -248,6 +250,12 @@ pub(crate) fn search_read<R: StorageRead>(
     }
 
     let q = if idx.config.metric == DistanceMetric::Cosine {
+        // Zero-norm query in cosine space is undefined (division by zero
+        // in the distance computation). Return empty results rather than
+        // producing arbitrary rankings.
+        if crate::vector_ops::l2_norm(query) == 0.0 {
+            return Ok(Vec::new());
+        }
         let mut v = query.to_vec();
         l2_normalize(&mut v);
         v
@@ -455,7 +463,7 @@ fn beam_search_leaves_write<T: StorageWrite>(
                 .enumerate()
                 .map(|(i, &(id, d))| (i, id, d))
                 .collect();
-            indexed.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(CmpOrdering::Equal));
+            indexed.sort_by(|a, b| a.2.total_cmp(&b.2));
 
             let sorted_candidates: Vec<(u32, f32)> =
                 indexed.iter().map(|&(_, id, d)| (id, d)).collect();
@@ -476,7 +484,7 @@ fn beam_search_leaves_write<T: StorageWrite>(
             current_level = selected.iter().map(|(id, _)| *id).collect();
         } else {
             // Fast path: pure distance ranking
-            next_level.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(CmpOrdering::Equal));
+            next_level.sort_by(|a, b| a.1.total_cmp(&b.1));
             if next_level.len() > nprobe_usize {
                 next_level.truncate(nprobe_usize);
             }
@@ -585,7 +593,7 @@ fn beam_search_leaves_read<R: StorageRead>(
                 .enumerate()
                 .map(|(i, &(id, d))| (i, id, d))
                 .collect();
-            indexed.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(CmpOrdering::Equal));
+            indexed.sort_by(|a, b| a.2.total_cmp(&b.2));
 
             let sorted_candidates: Vec<(u32, f32)> =
                 indexed.iter().map(|&(_, id, d)| (id, d)).collect();
@@ -605,7 +613,7 @@ fn beam_search_leaves_read<R: StorageRead>(
             );
             current_level = selected.iter().map(|(id, _)| *id).collect();
         } else {
-            next_level.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(CmpOrdering::Equal));
+            next_level.sort_by(|a, b| a.1.total_cmp(&b.1));
             if next_level.len() > nprobe_usize {
                 next_level.truncate(nprobe_usize);
             }

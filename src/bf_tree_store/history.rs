@@ -26,6 +26,10 @@ use super::error::BfTreeError;
 /// System table for history metadata.
 const HISTORY_META_TABLE: &str = "__bf_history_meta";
 
+/// Dedicated key for persisting the high-water-mark snapshot ID.
+/// Stored in the history meta table to prevent ID reuse after full prune.
+const HISTORY_HWM_KEY: &[u8] = b"__hwm_snapshot_id";
+
 /// Maximum snapshot path length in bytes.
 const MAX_PATH_LEN: usize = 1024;
 
@@ -117,6 +121,32 @@ fn now_ns() -> u64 {
 
 use alloc::string::ToString;
 
+/// Validate that a snapshot path is safe to use for file operations.
+///
+/// Rejects paths containing path traversal components (`..`) to prevent a
+/// crafted PENDING entry from causing `remove_file` to delete arbitrary
+/// files on the filesystem.
+fn validate_snapshot_path(snapshot_path: &str) -> Result<(), BfTreeError> {
+    if snapshot_path.is_empty() {
+        // Empty paths are allowed (e.g., legacy PENDING entries).
+        // Recovery will skip file deletion for empty paths.
+        return Ok(());
+    }
+
+    let path = Path::new(snapshot_path);
+
+    // Reject any path component that is ".." to prevent directory traversal.
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(BfTreeError::InvalidOperation(alloc::format!(
+                "snapshot path contains illegal '..' component: {snapshot_path}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// History manager for `BfTree` -- manages point-in-time snapshots.
 pub struct BfTreeHistory {
     db: Arc<BfTreeDatabase>,
@@ -131,6 +161,8 @@ impl BfTreeHistory {
     /// snapshot completion).
     pub fn new(db: Arc<BfTreeDatabase>) -> Self {
         // Recover next snapshot ID and clean up pending entries.
+        // The high-water-mark ID is checked first (prevents ID reuse after
+        // full prune), then scan entries for the max ID as a fallback.
         let next_id = {
             let rtxn = db.begin_read();
             let prefix = table_prefix(HISTORY_META_TABLE, TableKind::Regular);
@@ -140,6 +172,16 @@ impl BfTreeHistory {
             let mut buf = vec![0u8; max_record * 2];
             let mut max_id: u64 = 0;
             let mut pending_keys: Vec<(Vec<u8>, String)> = Vec::new();
+
+            // Read the persisted high-water-mark ID.
+            let hwm_key = encode_table_key(HISTORY_META_TABLE, TableKind::Regular, HISTORY_HWM_KEY);
+            let mut hwm_buf = [0u8; 8];
+            if let Ok(len) = db.adapter().read(&hwm_key, &mut hwm_buf)
+                && len as usize >= 8
+            {
+                max_id = u64::from_le_bytes(hwm_buf);
+            }
+
             if let Ok(mut iter) = rtxn.adapter.scan_range(&prefix, &prefix_end) {
                 while let Some((key_len, val_len)) = iter.next(&mut buf) {
                     if key_len > prefix_len + 8 {
@@ -166,9 +208,13 @@ impl BfTreeHistory {
 
             // Delete pending entries and their snapshot files.
             for (full_key, snap_path) in pending_keys {
-                let path = Path::new(&snap_path);
-                if path.exists() {
-                    let _ = std::fs::remove_file(path);
+                // Validate the path before attempting file deletion to prevent
+                // path traversal attacks via crafted PENDING entries.
+                if !snap_path.is_empty() && validate_snapshot_path(&snap_path).is_ok() {
+                    let path = Path::new(&snap_path);
+                    if path.exists() {
+                        let _ = std::fs::remove_file(path);
+                    }
                 }
                 db.adapter().delete(&full_key);
             }
@@ -188,11 +234,14 @@ impl BfTreeHistory {
     ///
     /// Uses a two-phase approach to prevent orphaned snapshot files on crash:
     ///
-    /// 1. Write a "pending" metadata entry first.
-    /// 2. Create the snapshot file.
+    /// 1. Take the `BfTree` snapshot to determine the file path.
+    /// 2. Write a "pending" metadata entry with the real path.
     /// 3. Update the metadata entry to "complete".
     ///
-    /// On recovery, `new()` cleans up any pending entries and their files.
+    /// If we crash between phases 1 and 2, the snapshot file is orphaned but
+    /// harmless (no metadata references it). If we crash between phases 2 and
+    /// 3, recovery finds the PENDING entry with the real path and deletes the
+    /// file.
     pub fn commit_snapshot(&self) -> Result<(u64, PathBuf), BfTreeError> {
         let snapshot_id = self.next_snapshot_id.fetch_add(1, Ordering::SeqCst);
         let txn_id = {
@@ -208,27 +257,36 @@ impl BfTreeHistory {
             &snapshot_id.to_le_bytes(),
         );
 
-        // Phase 1: Write a pending metadata entry before creating the snapshot.
-        // If we crash after this but before the snapshot completes, recovery
-        // will find the pending entry and clean it up.
+        // Persist the high-water-mark ID so that after a full prune + restart
+        // the counter does not reset to 1 and cause ID collisions.
+        let hwm_key = encode_table_key(HISTORY_META_TABLE, TableKind::Regular, HISTORY_HWM_KEY);
+        self.db
+            .adapter()
+            .insert(&hwm_key, &snapshot_id.to_le_bytes())?;
+
+        // Phase 1: Take the BfTree snapshot to determine the file path.
+        let snapshot_path = self.db.snapshot();
+        let snapshot_path_str = snapshot_path.to_string_lossy().to_string();
+        let timestamp = now_ns();
+
+        // Phase 2: Write a pending metadata entry with the real path.
+        // If we crash after this but before phase 3, recovery will find the
+        // pending entry and delete the snapshot file using the stored path.
         let pending_entry = HistoryEntry {
             txn_id,
-            timestamp_ns: now_ns(),
-            snapshot_path: String::new(), // Path not yet known.
+            timestamp_ns: timestamp,
+            snapshot_path: snapshot_path_str.clone(),
             status: HISTORY_STATUS_PENDING,
         };
         self.db
             .adapter()
             .insert(&key, &pending_entry.to_le_bytes()?)?;
 
-        // Phase 2: Take the BfTree snapshot.
-        let snapshot_path = self.db.snapshot();
-
-        // Phase 3: Update the metadata entry to "complete" with the real path.
+        // Phase 3: Update the metadata entry to "complete".
         let complete_entry = HistoryEntry {
             txn_id,
-            timestamp_ns: pending_entry.timestamp_ns,
-            snapshot_path: snapshot_path.to_string_lossy().to_string(),
+            timestamp_ns: timestamp,
+            snapshot_path: snapshot_path_str,
             status: HISTORY_STATUS_COMPLETE,
         };
         self.db
@@ -293,8 +351,14 @@ impl BfTreeHistory {
 
     /// Open a historical snapshot as a read-only database.
     /// The returned database is independent and can be read concurrently.
+    ///
+    /// Validates the snapshot path to prevent path traversal attacks from
+    /// crafted history entries.
     pub fn open_historical(&self, snapshot_id: u64) -> Result<BfTreeDatabase, BfTreeError> {
         let entry = self.get(snapshot_id)?.ok_or(BfTreeError::NotFound)?;
+
+        // Validate the path before using it to prevent directory traversal.
+        validate_snapshot_path(&entry.snapshot_path)?;
 
         let path = PathBuf::from(&entry.snapshot_path);
         if !path.exists() {
@@ -324,6 +388,16 @@ impl BfTreeHistory {
         let mut first_error: Option<BfTreeError> = None;
 
         for (id, entry) in to_remove {
+            // Validate the path to prevent directory traversal via crafted entries.
+            if validate_snapshot_path(&entry.snapshot_path).is_err() {
+                // Skip entries with invalid paths -- delete the metadata but
+                // do not attempt file operations on potentially malicious paths.
+                let key =
+                    encode_table_key(HISTORY_META_TABLE, TableKind::Regular, &id.to_le_bytes());
+                self.db.adapter().delete(&key);
+                removed += 1;
+                continue;
+            }
             let path = Path::new(&entry.snapshot_path);
             if path.exists() && std::fs::remove_file(path).is_err() {
                 // If we cannot remove the snapshot file, skip metadata

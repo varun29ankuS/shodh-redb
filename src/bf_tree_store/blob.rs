@@ -492,6 +492,10 @@ impl<'txn> BfTreeBlobStore<'txn> {
 
             // Delete causal edges where this blob is the parent.
             self.delete_causal_edges_for_parent(&mut buf, blob_id);
+
+            // Delete causal edges where this blob is the child, preventing
+            // dangling edges that would reference a non-existent blob.
+            self.delete_causal_edges_for_child(&mut buf, blob_id);
         }
 
         self.ops_count
@@ -694,6 +698,11 @@ impl<'txn> BfTreeBlobStore<'txn> {
     /// This does NOT increment the ref-count. The caller is responsible for calling
     /// `increment_dedup_ref_count()` only after the dedup operation fully succeeds
     /// (e.g., after `write_dedup_chunk_refs()` completes).
+    ///
+    /// Validates that the target blob still exists before returning a dedup hit.
+    /// If the target blob has been deleted (stale dedup pointer), the dedup entry
+    /// is cleaned up and `None` is returned, forcing the caller to write fresh
+    /// chunk data instead of referencing non-existent chunks.
     pub fn check_dedup(&self, sha256: &Sha256Key) -> Result<Option<BlobId>, BfTreeError> {
         let key = encode_dedup_key(sha256);
         match read_raw_buffered(self.buffer, self.adapter, &key)? {
@@ -702,6 +711,19 @@ impl<'txn> BfTreeBlobStore<'txn> {
                     let blob_id_bytes = &bytes[DedupVal::SERIALIZED_SIZE
                         ..DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE];
                     let blob_id = BlobId::from_be_bytes(blob_id_bytes.try_into().unwrap());
+
+                    // Verify the target blob still exists. If it was deleted,
+                    // the dedup entry is stale and must be cleaned up.
+                    if self.get_meta(blob_id)?.is_none() {
+                        // Target blob no longer exists -- remove the stale
+                        // dedup entry so future lookups skip it.
+                        self.buffer
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .delete(key);
+                        return Ok(None);
+                    }
+
                     Ok(Some(blob_id))
                 } else {
                     Ok(None)
@@ -880,6 +902,67 @@ impl<'txn> BfTreeBlobStore<'txn> {
             }
             if !keys_to_delete.contains(key) {
                 keys_to_delete.push(key.clone());
+            }
+        }
+
+        for key in keys_to_delete {
+            buf.delete(key);
+        }
+    }
+
+    /// Delete all causal edges where the given blob is the **child**.
+    ///
+    /// Because `CausalEdgeKey` is encoded as `(parent, child)`, there is no
+    /// prefix scan for the child position. We must scan the entire causal table
+    /// and filter by child blob ID. This is acceptable because causal edge
+    /// deletion only occurs during `blob.delete()`, which is already an
+    /// expensive operation that scans multiple index tables.
+    fn delete_causal_edges_for_child(&self, buf: &mut WriteBuffer, child: BlobId) {
+        let prefix = table_prefix(BLOB_CAUSAL_TABLE, TableKind::Regular);
+        let prefix_end = table_prefix_end(BLOB_CAUSAL_TABLE, TableKind::Regular);
+        let prefix_len = prefix.len();
+        let max_record = self.adapter.inner().config().get_cb_max_record_size();
+        let mut scan_buf = vec![0u8; max_record * 2];
+
+        let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
+
+        // Scan committed BfTree entries.
+        if let Ok(mut iter) = self.adapter.scan_range(&prefix, &prefix_end) {
+            while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+                if key_len <= prefix_len {
+                    continue;
+                }
+                let key_bytes = &scan_buf[prefix_len..key_len];
+                if key_bytes.len() >= CausalEdgeKey::SERIALIZED_SIZE {
+                    let cek = CausalEdgeKey::from_be_bytes(
+                        key_bytes[..CausalEdgeKey::SERIALIZED_SIZE]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    if cek.child == child {
+                        keys_to_delete.push(scan_buf[..key_len].to_vec());
+                    }
+                }
+            }
+        }
+
+        // Also scan the write buffer for causal edges added in this transaction.
+        for (key, value) in buf.range(&prefix, &prefix_end) {
+            if value.is_none() {
+                continue; // Already a tombstone.
+            }
+            if key.len() > prefix_len {
+                let key_bytes = &key[prefix_len..];
+                if key_bytes.len() >= CausalEdgeKey::SERIALIZED_SIZE {
+                    let cek = CausalEdgeKey::from_be_bytes(
+                        key_bytes[..CausalEdgeKey::SERIALIZED_SIZE]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    if cek.child == child && !keys_to_delete.contains(key) {
+                        keys_to_delete.push(key.clone());
+                    }
+                }
             }
         }
 

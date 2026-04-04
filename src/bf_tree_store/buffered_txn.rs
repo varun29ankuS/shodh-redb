@@ -187,10 +187,18 @@ impl WriteBuffer {
 
         for (key, value) in &self.entries {
             if let Some(val) = value {
-                if let Err(e) = adapter.insert(key, val) {
+                if let Err(flush_err) = adapter.insert(key, val) {
                     // Compensate: undo all previously flushed entries.
-                    Self::compensate_rollback(adapter, &flushed_inserts, &flushed_deletes);
-                    return Err(e);
+                    if let Err((rollback_failures, last_rollback_error)) =
+                        Self::compensate_rollback(adapter, &flushed_inserts, &flushed_deletes)
+                    {
+                        return Err(BfTreeError::PartialFlushRollbackFailed {
+                            flush_error: alloc::format!("{flush_err}"),
+                            rollback_failures,
+                            last_rollback_error,
+                        });
+                    }
+                    return Err(flush_err);
                 }
                 flushed_inserts.push(key.clone());
             } else {
@@ -210,23 +218,40 @@ impl WriteBuffer {
 
     /// Compensating rollback: undo already-flushed entries on partial failure.
     ///
-    /// Best-effort: individual compensation failures are silently ignored since
-    /// the original error is already being propagated to the caller. This gives
-    /// stronger atomicity than the previous no-rollback approach.
+    /// Returns `Ok(())` if all compensating operations succeeded. Returns
+    /// `Err((failure_count, last_error_message))` if any re-insert failed,
+    /// so callers can surface a compound error indicating potential
+    /// inconsistency.
+    ///
+    /// Note: undo-deletes (reverting a delete by re-inserting the old value)
+    /// are the operations that can fail. Undo-inserts use `adapter.delete()`
+    /// which is infallible in the `BfTree` API.
     fn compensate_rollback(
         adapter: &BfTreeAdapter,
         flushed_inserts: &[Vec<u8>],
         flushed_deletes: &[(Vec<u8>, Option<Vec<u8>>)],
-    ) {
+    ) -> Result<(), (usize, alloc::string::String)> {
+        let mut failure_count: usize = 0;
+        let mut last_error = alloc::string::String::new();
+
         // Undo inserts by deleting the keys.
         for key in flushed_inserts {
             adapter.delete(key);
         }
         // Undo deletes by re-inserting the previous values.
         for (key, prev) in flushed_deletes {
-            if let Some(val) = prev {
-                let _ = adapter.insert(key, val);
+            if let Some(val) = prev
+                && let Err(e) = adapter.insert(key, val)
+            {
+                failure_count += 1;
+                last_error = alloc::format!("{e}");
             }
+        }
+
+        if failure_count > 0 {
+            Err((failure_count, last_error))
+        } else {
+            Ok(())
         }
     }
 
@@ -612,7 +637,7 @@ mod tests {
     fn buffered_write_txn_read_your_writes() {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(ITEMS);
+        let mut table = wtxn.open_table(ITEMS).unwrap();
 
         // Insert via buffered write.
         WriteTable::st_insert(&mut table, &"hello", &42u64).unwrap();
@@ -629,7 +654,7 @@ mod tests {
 
         {
             let wtxn = db.begin_write();
-            let mut table = wtxn.open_table(ITEMS);
+            let mut table = wtxn.open_table(ITEMS).unwrap();
             WriteTable::st_insert(&mut table, &"temp", &99u64).unwrap();
             drop(table);
             // Drop without commit -- should rollback.
@@ -637,7 +662,7 @@ mod tests {
 
         // Verify not visible via read transaction.
         let rtxn = db.begin_read();
-        let ro = rtxn.open_table(ITEMS);
+        let ro = rtxn.open_table(ITEMS).unwrap();
         assert!(ro.get(&"temp").unwrap().is_none());
     }
 
@@ -646,14 +671,14 @@ mod tests {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
 
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(ITEMS);
+        let mut table = wtxn.open_table(ITEMS).unwrap();
         WriteTable::st_insert(&mut table, &"committed", &77u64).unwrap();
         drop(table);
         wtxn.commit().unwrap();
 
         // Should be visible.
         let rtxn = db.begin_read();
-        let ro = rtxn.open_table(ITEMS);
+        let ro = rtxn.open_table(ITEMS).unwrap();
         let val = ro.get(&"committed").unwrap().unwrap();
         assert_eq!(u64::from_le_bytes(val.as_slice().try_into().unwrap()), 77);
     }
@@ -665,7 +690,7 @@ mod tests {
         // Pre-populate BfTree with some data.
         {
             let wtxn = db.begin_write();
-            let mut table = wtxn.open_table(ITEMS);
+            let mut table = wtxn.open_table(ITEMS).unwrap();
             WriteTable::st_insert(&mut table, &"a", &1u64).unwrap();
             WriteTable::st_insert(&mut table, &"c", &3u64).unwrap();
             WriteTable::st_insert(&mut table, &"e", &5u64).unwrap();
@@ -675,7 +700,7 @@ mod tests {
 
         // New transaction: add "b" and "d" in buffer, delete "c".
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(ITEMS);
+        let mut table = wtxn.open_table(ITEMS).unwrap();
         WriteTable::st_insert(&mut table, &"b", &2u64).unwrap();
         WriteTable::st_insert(&mut table, &"d", &4u64).unwrap();
         WriteTable::st_remove(&mut table, &"c").unwrap();
@@ -697,7 +722,7 @@ mod tests {
         // Pre-populate.
         {
             let wtxn = db.begin_write();
-            let mut table = wtxn.open_table(ITEMS);
+            let mut table = wtxn.open_table(ITEMS).unwrap();
             WriteTable::st_insert(&mut table, &"key", &100u64).unwrap();
             drop(table);
             wtxn.commit().unwrap();
@@ -705,7 +730,7 @@ mod tests {
 
         // Overwrite in buffer.
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(ITEMS);
+        let mut table = wtxn.open_table(ITEMS).unwrap();
         WriteTable::st_insert(&mut table, &"key", &200u64).unwrap();
 
         let val = WriteTable::st_get(&table, &"key").unwrap().unwrap();
@@ -725,7 +750,7 @@ mod tests {
         // Pre-populate.
         {
             let wtxn = db.begin_write();
-            let mut table = wtxn.open_table(ITEMS);
+            let mut table = wtxn.open_table(ITEMS).unwrap();
             WriteTable::st_insert(&mut table, &"visible", &1u64).unwrap();
             WriteTable::st_insert(&mut table, &"hidden", &2u64).unwrap();
             drop(table);
@@ -734,7 +759,7 @@ mod tests {
 
         // Delete "hidden" in buffer.
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(ITEMS);
+        let mut table = wtxn.open_table(ITEMS).unwrap();
         WriteTable::st_remove(&mut table, &"hidden").unwrap();
 
         // Point lookup.

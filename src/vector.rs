@@ -333,6 +333,16 @@ impl<const N: usize> Value for ScalarQuantized<N> {
         }
         let min_val = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let max_val = f32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        // Reject NaN/Inf scale factors from corrupted pages -- dequantizing
+        // with non-finite bounds produces garbage values that silently
+        // corrupt all downstream distance computations.
+        if !min_val.is_finite() || !max_val.is_finite() {
+            return SQVec {
+                min_val: 0.0,
+                max_val: 0.0,
+                codes: [0u8; N],
+            };
+        }
         let mut codes = [0u8; N];
         codes.copy_from_slice(&data[SQ_HEADER..SQ_HEADER + N]);
         SQVec {

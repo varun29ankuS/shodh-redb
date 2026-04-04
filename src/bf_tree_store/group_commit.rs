@@ -173,17 +173,17 @@ mod tests {
         let mut gc = GroupCommit::new(db.clone());
 
         gc.add(|txn| {
-            let mut t = txn.open_table(DATA);
+            let mut t = txn.open_table(DATA)?;
             t.insert(&"a", &1u64)?;
             Ok(())
         });
         gc.add(|txn| {
-            let mut t = txn.open_table(DATA);
+            let mut t = txn.open_table(DATA)?;
             t.insert(&"b", &2u64)?;
             Ok(())
         });
         gc.add(|txn| {
-            let mut t = txn.open_table(DATA);
+            let mut t = txn.open_table(DATA)?;
             t.insert(&"c", &3u64)?;
             Ok(())
         });
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(count, 3);
 
         let rtxn = db.begin_read();
-        let t = rtxn.open_table(DATA);
+        let t = rtxn.open_table(DATA).unwrap();
         assert!(t.get(&"a").unwrap().is_some());
         assert!(t.get(&"b").unwrap().is_some());
         assert!(t.get(&"c").unwrap().is_some());
@@ -205,7 +205,7 @@ mod tests {
         let batches: Vec<WriteBatchFn> = (0u64..4)
             .map(|i| {
                 let batch: WriteBatchFn = Box::new(move |txn| {
-                    let mut t = txn.open_table(DATA);
+                    let mut t = txn.open_table(DATA)?;
                     let key = alloc::format!("key_{i}");
                     t.insert(&key.as_str(), &(i * 10))?;
                     Ok(())
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(count, 4);
 
         let rtxn = db.begin_read();
-        let t = rtxn.open_table(DATA);
+        let t = rtxn.open_table(DATA).unwrap();
         for i in 0u64..4 {
             let key = alloc::format!("key_{i}");
             assert!(t.get(&key.as_str()).unwrap().is_some());

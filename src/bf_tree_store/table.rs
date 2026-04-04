@@ -94,6 +94,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     ///
     /// Writes are buffered -- they become visible within this transaction
     /// immediately (read-your-writes) but are only flushed to `BfTree` on commit.
+    ///
+    /// The buffer lock is held across the entire read-old + write-new sequence
+    /// to prevent concurrent writers from interleaving and causing stale CDC
+    /// events or lost updates.
     pub fn insert(
         &mut self,
         key: &K::SelfType<'_>,
@@ -103,17 +107,15 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let val_bytes = V::as_bytes(value);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
 
-        // Determine previous visible value: check buffer first, then BfTree.
-        // Release the buffer lock before performing BfTree I/O to avoid
-        // holding the mutex across potentially slow disk reads.
+        // Hold the buffer lock across the entire read-modify-write to prevent
+        // TOCTOU races where a concurrent writer could interleave between the
+        // old-value read and the new-value write, causing stale CDC events.
         let previous = {
-            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            match buffer.get(&encoded_key) {
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
                 BufferLookup::NotInBuffer => {
-                    drop(buffer);
-                    // Read from BfTree without holding the buffer lock.
                     let max_val = self.adapter.inner().config().get_cb_max_record_size();
                     let mut buf = vec![0u8; max_val];
                     match self.adapter.read(&encoded_key, &mut buf) {
@@ -122,14 +124,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                         Err(e) => return Err(e),
                     }
                 }
-            }
-        };
-
-        // Re-acquire the lock to write the new value into the buffer.
-        {
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            };
             buffer.put(encoded_key, val_bytes.as_ref().to_vec())?;
-        }
+            prev
+        };
 
         self.ops_count.fetch_add(1, Ordering::Relaxed);
 
@@ -155,21 +153,23 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     ///
     /// Writes a tombstone to the buffer. On commit, the tombstone deletes the
     /// entry from `BfTree`. On abort, the tombstone is discarded.
+    ///
+    /// The buffer lock is held across the entire read-old + tombstone-write
+    /// sequence to prevent concurrent writers from interleaving and causing
+    /// stale CDC events or a tombstone overwriting a concurrent insert.
     pub fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
 
-        // Determine previous visible value: check buffer first, then BfTree.
-        // Release the buffer lock before performing BfTree I/O to avoid
-        // holding the mutex across potentially slow disk reads.
+        // Hold the buffer lock across the entire read + tombstone-write to
+        // prevent TOCTOU races where a concurrent writer could insert between
+        // the old-value read and the tombstone write.
         let previous = {
-            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            match buffer.get(&encoded_key) {
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
                 BufferLookup::NotInBuffer => {
-                    drop(buffer);
-                    // Read from BfTree without holding the buffer lock.
                     let max_val = self.adapter.inner().config().get_cb_max_record_size();
                     let mut buf = vec![0u8; max_val];
                     match self.adapter.read(&encoded_key, &mut buf) {
@@ -178,15 +178,14 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                         Err(e) => return Err(e),
                     }
                 }
+            };
+            if prev.is_some() {
+                buffer.delete(encoded_key);
             }
+            prev
         };
 
         if previous.is_some() {
-            // Re-acquire buffer lock to write tombstone.
-            self.buffer
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .delete(encoded_key);
             self.ops_count.fetch_add(1, Ordering::Relaxed);
 
             // Record CDC event if enabled.
@@ -234,6 +233,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     /// Reads the current value (buffer-aware), applies the merge operator, and
     /// writes the result back to the buffer. The merge is atomic within the
     /// transaction -- other transactions see either the old or the new value.
+    ///
+    /// The buffer lock is held across the entire read + merge + write sequence
+    /// to prevent lost updates (e.g., counter 10 + 5 + 5 = 15 instead of 20).
     pub fn merge(
         &mut self,
         key: &K::SelfType<'_>,
@@ -243,16 +245,15 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
 
-        // Read existing value: check buffer first, then BfTree.
-        // Release the buffer lock before performing BfTree I/O to avoid
-        // holding the mutex across potentially slow disk reads.
-        let existing = {
-            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            match buffer.get(&encoded_key) {
+        // Hold the buffer lock across the entire read-merge-write to prevent
+        // TOCTOU races where a concurrent merge could read the same stale
+        // value, causing a classic lost-update problem.
+        {
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let existing = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
                 BufferLookup::NotInBuffer => {
-                    drop(buffer);
                     let max_val = self.adapter.inner().config().get_cb_max_record_size();
                     let mut buf = vec![0u8; max_val];
                     match self.adapter.read(&encoded_key, &mut buf) {
@@ -261,12 +262,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                         Err(e) => return Err(e),
                     }
                 }
-            }
-        };
-
-        // Re-acquire buffer lock to apply the merge result.
-        {
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            };
             match operator.merge(key_bytes.as_ref(), existing.as_deref(), operand) {
                 Some(new_val) => buffer.put(encoded_key, new_val)?,
                 None => buffer.delete(encoded_key),
@@ -618,28 +614,42 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
         let prefix = table_prefix(&self.name, TableKind::Regular);
         let prefix_end = table_prefix_end(&self.name, TableKind::Regular);
         let max_record_size = self.adapter.inner().config().get_cb_max_record_size();
+        let mut total_count = 0u64;
 
-        // Collect all BfTree keys for this table (scan must complete before
-        // we can modify the buffer, since ScanIter holds internal locks).
-        let bftree_encoded_keys = {
-            let mut buf = vec![0u8; max_record_size * 2];
-            let mut keys: Vec<Vec<u8>> = Vec::new();
-            let mut iter = self
-                .adapter
-                .scan_range(&prefix, &prefix_end)
-                .map_err(crate::StorageError::from)?;
-            while let Some((key_len, _val_len)) = iter.next(&mut buf) {
-                keys.push(buf[..key_len].to_vec());
+        // Loop to handle TOCTOU: between scanning BfTree keys and acquiring
+        // the buffer lock to tombstone them, concurrent commits may insert
+        // new keys via CAS. Each iteration drains what it sees; the loop
+        // terminates when a full pass finds no new entries to drain.
+        loop {
+            // Collect all BfTree keys for this table (scan must complete
+            // before we can modify the buffer, since ScanIter holds internal
+            // locks).
+            let bftree_encoded_keys = {
+                let mut buf = vec![0u8; max_record_size * 2];
+                let mut keys: Vec<Vec<u8>> = Vec::new();
+                let mut iter = self
+                    .adapter
+                    .scan_range(&prefix, &prefix_end)
+                    .map_err(crate::StorageError::from)?;
+                while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+                    keys.push(buf[..key_len].to_vec());
+                }
+                keys
+            };
+
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let pass_count = buffer.drain_table(&bftree_encoded_keys, &prefix, &prefix_end);
+            drop(buffer);
+
+            total_count = total_count.saturating_add(pass_count);
+
+            if pass_count == 0 {
+                break;
             }
-            keys
-        };
+        }
 
-        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-        let count = buffer.drain_table(&bftree_encoded_keys, &prefix, &prefix_end);
-        drop(buffer);
-
-        self.ops_count.fetch_add(count, Ordering::Relaxed);
-        Ok(count)
+        self.ops_count.fetch_add(total_count, Ordering::Relaxed);
+        Ok(total_count)
     }
 }
 
@@ -728,7 +738,7 @@ impl crate::storage_traits::StorageWrite for super::database::BfTreeDatabaseWrit
         &self,
         definition: crate::TableDefinition<K, V>,
     ) -> crate::Result<Self::Table<'_, K, V>> {
-        Ok(self.open_table(definition))
+        Ok(self.open_table(definition)?)
     }
 }
 
@@ -746,7 +756,7 @@ impl crate::storage_traits::StorageRead for super::database::BfTreeDatabaseReadT
         &self,
         definition: crate::TableDefinition<K, V>,
     ) -> crate::Result<Self::Table<'_, K, V>> {
-        Ok(self.open_table(definition))
+        Ok(self.open_table(definition)?)
     }
 }
 
@@ -764,7 +774,7 @@ mod tests {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
 
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(ITEMS);
+        let mut table = wtxn.open_table(ITEMS).unwrap();
         let prev = table.insert(&"apple", &10u64).unwrap();
         assert!(prev.is_none());
 
@@ -779,7 +789,7 @@ mod tests {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
 
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(ITEMS);
+        let mut table = wtxn.open_table(ITEMS).unwrap();
         table.insert(&"key", &1u64).unwrap();
         let prev = table.insert(&"key", &2u64).unwrap();
         assert!(prev.is_some());
@@ -794,7 +804,7 @@ mod tests {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
 
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(ITEMS);
+        let mut table = wtxn.open_table(ITEMS).unwrap();
         table.insert(&"temp", &99u64).unwrap();
         let removed = table.remove(&"temp").unwrap();
         assert!(removed.is_some());
@@ -813,7 +823,7 @@ mod tests {
 
         // Write some data.
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(ITEMS);
+        let mut table = wtxn.open_table(ITEMS).unwrap();
         table.insert(&"x", &42u64).unwrap();
         table.insert(&"y", &43u64).unwrap();
         drop(table);
@@ -821,7 +831,7 @@ mod tests {
 
         // Read via read transaction.
         let rtxn = db.begin_read();
-        let ro_table = rtxn.open_table(ITEMS);
+        let ro_table = rtxn.open_table(ITEMS).unwrap();
         assert!(ro_table.contains_key(&"x"));
         assert!(!ro_table.contains_key(&"z"));
         let val = ro_table.get(&"x").unwrap().unwrap();
@@ -833,7 +843,7 @@ mod tests {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
 
         let wtxn = db.begin_write();
-        let mut table = wtxn.open_table(ITEMS);
+        let mut table = wtxn.open_table(ITEMS).unwrap();
         table.insert(&"a", &1u64).unwrap();
         table.insert(&"b", &2u64).unwrap();
         table.insert(&"c", &3u64).unwrap();
@@ -841,7 +851,7 @@ mod tests {
         wtxn.commit().unwrap();
 
         let rtxn = db.begin_read();
-        let ro_table = rtxn.open_table(ITEMS);
+        let ro_table = rtxn.open_table(ITEMS).unwrap();
         let mut scan = ro_table.scan().unwrap();
         let mut buf = vec![0u8; 4096];
         let mut count = 0;

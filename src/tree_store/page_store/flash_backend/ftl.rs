@@ -530,7 +530,15 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             )));
         }
 
-        let best = state.erase_counts.pick_lowest(free).unwrap_or(free[0]);
+        // Free list contains data-region-relative indices; translate to global
+        // physical indices for erase count lookup, then translate the winner back.
+        let drs = state.data_region_start;
+        let global_free: Vec<u32> = free.iter().map(|&b| drs + b).collect();
+        let best_global = state
+            .erase_counts
+            .pick_lowest(&global_free)
+            .unwrap_or(global_free[0]);
+        let best = best_global - drs;
 
         // Remove from free list via swap_remove for O(1) instead of O(n) retain
         if let Some(pos) = state.block_map.free_list.iter().position(|&b| b == best) {
@@ -539,75 +547,118 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         Ok(best)
     }
 
-    /// Attempt a static wear-leveling swap: move cold data from a low-wear block
-    /// to a high-wear block to distribute erase cycles evenly.
+    /// Attempt a static wear-leveling swap: move cold (rarely-written) data off
+    /// a low-wear in-use block onto a high-wear free block, freeing the low-wear
+    /// block for future writes and distributing erase cycles evenly.
+    ///
+    /// The swap is journaled immediately so that a crash mid-swap cannot lose
+    /// the logical-to-physical mapping update.
     fn try_static_wear_level(state: &mut FtlState<H>) -> core::result::Result<(), BackendError> {
         let ebs = state.geometry.erase_block_size;
         let ebs_u64 = u64::from(ebs);
         let wps = state.geometry.write_page_size as usize;
         debug_assert!(ebs > 0 && wps > 0, "geometry validated at construction");
 
-        // Collect in-use physical blocks (data-region-relative indices)
-        let in_use: Vec<u32> = state
+        let drs = state.data_region_start;
+
+        // Collect in-use physical blocks as global indices for correct erase
+        // count lookup (EraseCountTable is indexed by global physical block).
+        let in_use_global: Vec<u32> = state
             .block_map
             .forward
             .iter()
-            .filter_map(|&p| if p != UNMAPPED { Some(p) } else { None })
+            .filter_map(|&p| if p != UNMAPPED { Some(drs + p) } else { None })
             .collect();
 
-        let swap = state.erase_counts.check_static_swap(
-            STATIC_WL_THRESHOLD,
-            &in_use,
-            state.block_map.free_blocks(),
-        );
+        let free_global: Vec<u32> = state
+            .block_map
+            .free_blocks()
+            .iter()
+            .map(|&b| drs + b)
+            .collect();
 
-        if let Some((hot_phys, cold_phys)) = swap {
-            // Widen to u64 before adding to prevent u32 overflow
-            let hot_global = u64::from(state.data_region_start) + u64::from(hot_phys);
-            let cold_global = u64::from(state.data_region_start) + u64::from(cold_phys);
-            let cold_global_u32 = u32::try_from(cold_global).map_err(|_| {
-                #[cfg(feature = "std")]
-                {
-                    BackendError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "block index exceeds u32 range",
-                    ))
-                }
-                #[cfg(not(feature = "std"))]
-                {
-                    BackendError::Message(String::from("block index exceeds u32 range"))
-                }
-            })?;
+        let swap =
+            state
+                .erase_counts
+                .check_static_swap(STATIC_WL_THRESHOLD, &in_use_global, &free_global);
 
-            // Read hot block data
-            let mut buf = vec![0u8; ebs as usize];
-            state.hw.read(hot_global * ebs_u64, &mut buf)?;
-
-            // Erase cold block and write data there
-            state.hw.erase_block(cold_global_u32)?;
-            state.erase_counts.increment(cold_global_u32);
-
-            let phys_base = cold_global * ebs_u64;
-            let mut page_offset = 0usize;
-            while page_offset < ebs as usize {
-                let write_len = wps.min(ebs as usize - page_offset);
-                state.hw.write_page(
-                    phys_base + page_offset as u64,
-                    &buf[page_offset..page_offset + write_len],
-                )?;
-                page_offset += wps;
-            }
-
-            // Find which logical block maps to `hot_phys` and remap to `cold_phys`
-            if let Some(logical) = state
-                .block_map
-                .reverse
-                .get(hot_phys as usize)
+        if swap.is_some() {
+            // check_static_swap confirmed the erase count delta exceeds the
+            // threshold. For static wear leveling we move cold data (least-worn
+            // in-use block) onto a high-wear free block, freeing the low-wear
+            // block for future hot writes and evening out erase distribution.
+            let cold_data_global = in_use_global
+                .iter()
                 .copied()
-                .filter(|&l| l != UNMAPPED)
-            {
-                state.block_map.assign(logical, cold_phys);
-                state.block_map.free_list.push(hot_phys);
+                .min_by_key(|&b| state.erase_counts.get(b));
+            let hot_free_global = free_global
+                .iter()
+                .copied()
+                .max_by_key(|&b| state.erase_counts.get(b));
+
+            if let (Some(src_global), Some(dst_global)) = (cold_data_global, hot_free_global) {
+                // Convert back to data-region-relative indices
+                let src_rel = src_global - drs;
+                let dst_rel = dst_global - drs;
+
+                // dst_global is already u32 from the erase count table, but
+                // validate it has not overflowed during arithmetic above.
+                let dst_global_u32 = u32::try_from(u64::from(dst_global)).map_err(|_| {
+                    #[cfg(feature = "std")]
+                    {
+                        BackendError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "block index exceeds u32 range",
+                        ))
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        BackendError::Message(String::from("block index exceeds u32 range"))
+                    }
+                })?;
+
+                // Read cold data from the low-wear in-use block
+                let mut buf = vec![0u8; ebs as usize];
+                state.hw.read(u64::from(src_global) * ebs_u64, &mut buf)?;
+
+                // Erase the high-wear free block and write cold data there
+                state.hw.erase_block(dst_global_u32)?;
+                state.erase_counts.increment(dst_global_u32);
+
+                let phys_base = u64::from(dst_global) * ebs_u64;
+                let mut page_offset = 0usize;
+                while page_offset < ebs as usize {
+                    let write_len = wps.min(ebs as usize - page_offset);
+                    state.hw.write_page(
+                        phys_base + page_offset as u64,
+                        &buf[page_offset..page_offset + write_len],
+                    )?;
+                    page_offset += wps;
+                }
+
+                // Update the block map: remap logical block from src to dst
+                if let Some(logical) = state
+                    .block_map
+                    .reverse
+                    .get(src_rel as usize)
+                    .copied()
+                    .filter(|&l| l != UNMAPPED)
+                {
+                    state.block_map.assign(logical, dst_rel);
+                    state.block_map.free_list.push(src_rel);
+                }
+
+                // Journal-commit immediately so the mapping update survives a
+                // crash. Without this, recovery would replay the old mapping
+                // while the physical data has already moved, causing silent
+                // data corruption.
+                let metadata = Self::serialize_metadata_inner(state);
+                let FtlState {
+                    ref hw,
+                    ref mut journal,
+                    ..
+                } = *state;
+                journal.commit(hw, &metadata)?;
             }
         }
 

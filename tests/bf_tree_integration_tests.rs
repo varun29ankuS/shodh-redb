@@ -54,7 +54,7 @@ fn crud_insert_get_update_delete() {
 
     // Insert
     let wtxn = db.begin_write();
-    let mut t = wtxn.open_table(USERS);
+    let mut t = wtxn.open_table(USERS).unwrap();
     t.insert(&"alice", &"engineer").unwrap();
     t.insert(&"bob", &"designer").unwrap();
     t.insert(&"carol", &"pm").unwrap();
@@ -63,7 +63,7 @@ fn crud_insert_get_update_delete() {
 
     // Read back
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(USERS);
+    let t = rtxn.open_table(USERS).unwrap();
     assert_eq!(t.get(&"alice").unwrap().unwrap(), b"engineer");
     assert_eq!(t.get(&"bob").unwrap().unwrap(), b"designer");
     assert_eq!(t.get(&"carol").unwrap().unwrap(), b"pm");
@@ -71,24 +71,24 @@ fn crud_insert_get_update_delete() {
 
     // Update
     let wtxn = db.begin_write();
-    let mut t = wtxn.open_table(USERS);
+    let mut t = wtxn.open_table(USERS).unwrap();
     t.insert(&"alice", &"staff engineer").unwrap();
     let _ = t;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(USERS);
+    let t = rtxn.open_table(USERS).unwrap();
     assert_eq!(t.get(&"alice").unwrap().unwrap(), b"staff engineer");
 
     // Delete
     let wtxn = db.begin_write();
-    let mut t = wtxn.open_table(USERS);
+    let mut t = wtxn.open_table(USERS).unwrap();
     t.remove(&"bob").unwrap();
     let _ = t;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(USERS);
+    let t = rtxn.open_table(USERS).unwrap();
     assert!(t.get(&"bob").unwrap().is_none());
     assert!(t.get(&"alice").unwrap().is_some());
 }
@@ -99,7 +99,7 @@ fn transaction_rollback_on_drop() {
 
     // Commit some data
     let wtxn = db.begin_write();
-    let mut t = wtxn.open_table(COUNTERS);
+    let mut t = wtxn.open_table(COUNTERS).unwrap();
     t.insert(&"x", &100u64).unwrap();
     let _ = t;
     wtxn.commit().unwrap();
@@ -107,7 +107,7 @@ fn transaction_rollback_on_drop() {
     // Start a write txn, mutate, but DROP without committing
     {
         let wtxn = db.begin_write();
-        let mut t = wtxn.open_table(COUNTERS);
+        let mut t = wtxn.open_table(COUNTERS).unwrap();
         t.insert(&"x", &999u64).unwrap();
         t.insert(&"y", &42u64).unwrap();
         let _ = t;
@@ -116,7 +116,7 @@ fn transaction_rollback_on_drop() {
 
     // Original value should be intact, new key should not exist
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(COUNTERS);
+    let t = rtxn.open_table(COUNTERS).unwrap();
     let val = t.get(&"x").unwrap().unwrap();
     assert_eq!(u64::from_le_bytes(val[..8].try_into().unwrap()), 100);
     assert!(t.get(&"y").unwrap().is_none());
@@ -127,7 +127,7 @@ fn range_scan_ordered() {
     let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
 
     let wtxn = db.begin_write();
-    let mut t = wtxn.open_table(SCORES);
+    let mut t = wtxn.open_table(SCORES).unwrap();
     for i in 0u64..20 {
         t.insert(&i, &(i * 10)).unwrap();
     }
@@ -135,7 +135,7 @@ fn range_scan_ordered() {
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(SCORES);
+    let t = rtxn.open_table(SCORES).unwrap();
     let results = collect_scan(t.scan().unwrap());
     assert_eq!(results.len(), 20);
 
@@ -186,7 +186,7 @@ fn ttl_table_expiry() {
     let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
 
     let wtxn = db.begin_write();
-    let mut ttl = wtxn.open_ttl_table(USERS);
+    let mut ttl = wtxn.open_ttl_table(USERS).unwrap();
 
     ttl.insert_with_ttl(&"ephemeral", &"goes away", Duration::from_millis(100))
         .unwrap();
@@ -199,7 +199,7 @@ fn ttl_table_expiry() {
     thread::sleep(Duration::from_millis(200));
 
     let rtxn = db.begin_read();
-    let ttl = rtxn.open_ttl_table(USERS);
+    let ttl = rtxn.open_ttl_table(USERS).unwrap();
     assert!(
         ttl.get(&"ephemeral").unwrap().is_none(),
         "expired entry should be invisible"
@@ -219,7 +219,7 @@ fn multimap_multiple_values_per_key() {
     let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
 
     let wtxn = db.begin_write();
-    let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+    let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
     mm.insert(&"post:1", &"rust").unwrap();
     mm.insert(&"post:1", &"database").unwrap();
     mm.insert(&"post:1", &"embedded").unwrap();
@@ -229,7 +229,7 @@ fn multimap_multiple_values_per_key() {
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
-    let mm = rtxn.open_multimap_table::<&str, &str>("tags");
+    let mm = rtxn.open_multimap_table::<&str, &str>("tags").unwrap();
 
     let post1_tags = mm.get_values(&"post:1").unwrap();
     assert_eq!(post1_tags.len(), 3);
@@ -239,13 +239,13 @@ fn multimap_multiple_values_per_key() {
 
     // Remove one value
     let wtxn = db.begin_write();
-    let mut mm = wtxn.open_multimap_table::<&str, &str>("tags");
+    let mut mm = wtxn.open_multimap_table::<&str, &str>("tags").unwrap();
     mm.remove(&"post:1", &"database").unwrap();
     let _ = mm;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
-    let mm = rtxn.open_multimap_table::<&str, &str>("tags");
+    let mm = rtxn.open_multimap_table::<&str, &str>("tags").unwrap();
     let post1_tags = mm.get_values(&"post:1").unwrap();
     assert_eq!(post1_tags.len(), 2);
 }
@@ -461,17 +461,17 @@ fn group_commit_sequential() {
     let mut gc = GroupCommit::new(db.clone());
 
     gc.add(|txn| {
-        let mut t = txn.open_table(COUNTERS);
+        let mut t = txn.open_table(COUNTERS).unwrap();
         t.insert(&"batch_a", &10u64)?;
         Ok(())
     });
     gc.add(|txn| {
-        let mut t = txn.open_table(COUNTERS);
+        let mut t = txn.open_table(COUNTERS).unwrap();
         t.insert(&"batch_b", &20u64)?;
         Ok(())
     });
     gc.add(|txn| {
-        let mut t = txn.open_table(COUNTERS);
+        let mut t = txn.open_table(COUNTERS).unwrap();
         t.insert(&"batch_c", &30u64)?;
         Ok(())
     });
@@ -480,7 +480,7 @@ fn group_commit_sequential() {
     assert_eq!(count, 3);
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(COUNTERS);
+    let t = rtxn.open_table(COUNTERS).unwrap();
     assert!(t.get(&"batch_a").unwrap().is_some());
     assert!(t.get(&"batch_b").unwrap().is_some());
     assert!(t.get(&"batch_c").unwrap().is_some());
@@ -493,7 +493,7 @@ fn group_commit_concurrent() {
     let batches: Vec<WriteBatchFn> = (0u64..8)
         .map(|i| {
             let batch: WriteBatchFn = Box::new(move |txn| {
-                let mut t = txn.open_table(SCORES);
+                let mut t = txn.open_table(SCORES).unwrap();
                 t.insert(&(i * 100), &(i * 1000))?;
                 Ok(())
             });
@@ -505,7 +505,7 @@ fn group_commit_concurrent() {
     assert_eq!(count, 8);
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(SCORES);
+    let t = rtxn.open_table(SCORES).unwrap();
     for i in 0u64..8 {
         assert!(
             t.get(&(i * 100)).unwrap().is_some(),
@@ -527,7 +527,7 @@ fn history_snapshot_and_restore() {
 
     // Write V1 data
     let wtxn = db.begin_write();
-    let mut t = wtxn.open_table(USERS);
+    let mut t = wtxn.open_table(USERS).unwrap();
     t.insert(&"alice", &"v1").unwrap();
     let _ = t;
     wtxn.commit().unwrap();
@@ -539,7 +539,7 @@ fn history_snapshot_and_restore() {
     // Open historical snapshot -- should be a valid, readable database
     let historical = history.open_historical(snap_id).unwrap();
     let rtxn_hist = historical.begin_read();
-    let t_hist = rtxn_hist.open_table(USERS);
+    let t_hist = rtxn_hist.open_table(USERS).unwrap();
     // The snapshot captured the state at snapshot time -- alice should exist
     let alice_val = t_hist.get(&"alice").unwrap();
     assert!(alice_val.is_some(), "snapshot should contain alice");
@@ -551,7 +551,7 @@ fn history_snapshot_and_restore() {
 
     // Take a second snapshot after more writes
     let wtxn = db.begin_write();
-    let mut t = wtxn.open_table(USERS);
+    let mut t = wtxn.open_table(USERS).unwrap();
     t.insert(&"bob", &"new").unwrap();
     let _ = t;
     wtxn.commit().unwrap();
@@ -610,13 +610,13 @@ fn unified_api_bftree_backend() {
 
     let db = udb.as_bf_tree().unwrap();
     let wtxn = db.begin_write();
-    let mut t = wtxn.open_table(COUNTERS);
+    let mut t = wtxn.open_table(COUNTERS).unwrap();
     t.insert(&"unified", &42u64).unwrap();
     let _ = t;
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(COUNTERS);
+    let t = rtxn.open_table(COUNTERS).unwrap();
     let val = t.get(&"unified").unwrap().unwrap();
     assert_eq!(u64::from_le_bytes(val[..8].try_into().unwrap()), 42);
 }
@@ -655,7 +655,7 @@ fn cdc_records_changes() {
     let db = builder.create(config).unwrap();
 
     let wtxn = db.begin_write();
-    let mut t = wtxn.open_table(USERS);
+    let mut t = wtxn.open_table(USERS).unwrap();
     t.insert(&"alice", &"engineer").unwrap();
     t.insert(&"bob", &"designer").unwrap();
     let _ = t;
@@ -684,7 +684,7 @@ fn concurrent_readers_and_writers() {
         write_handles.push(thread::spawn(move || {
             for i in 0u64..50 {
                 let wtxn = db.begin_write();
-                let mut t = wtxn.open_table(SCORES);
+                let mut t = wtxn.open_table(SCORES).unwrap();
                 let key = thread_id * 1000 + i;
                 t.insert(&key, &(key * 10)).unwrap();
                 let _ = t;
@@ -699,7 +699,7 @@ fn concurrent_readers_and_writers() {
         let mut reads = 0u64;
         for _ in 0..100 {
             let rtxn = db_r.begin_read();
-            let t = rtxn.open_table(SCORES);
+            let t = rtxn.open_table(SCORES).unwrap();
             let _ = collect_scan(t.scan().unwrap());
             reads += 1;
             thread::sleep(Duration::from_millis(1));
@@ -715,7 +715,7 @@ fn concurrent_readers_and_writers() {
 
     // Verify all 200 writes landed
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(SCORES);
+    let t = rtxn.open_table(SCORES).unwrap();
     let results = collect_scan(t.scan().unwrap());
     assert_eq!(results.len(), 200, "4 threads * 50 keys = 200");
 }
@@ -734,7 +734,7 @@ fn iot_sensor_pipeline() {
     let mut gc = GroupCommit::new(db.clone());
     for sensor_id in 0u64..5 {
         gc.add(move |txn| {
-            let mut t = txn.open_table(READINGS);
+            let mut t = txn.open_table(READINGS).unwrap();
             for ts in 0u64..10 {
                 let key = sensor_id * 10000 + ts;
                 let value = sensor_id * 100 + ts;
@@ -798,7 +798,7 @@ fn iot_sensor_pipeline() {
     // Phase 3: TTL for ephemeral sensor data
     {
         let wtxn = db.begin_write();
-        let mut ttl = wtxn.open_ttl_table(READINGS);
+        let mut ttl = wtxn.open_ttl_table(READINGS).unwrap();
 
         ttl.insert_with_ttl(&99999u64, &12345u64, Duration::from_secs(3600))
             .unwrap();
@@ -806,14 +806,14 @@ fn iot_sensor_pipeline() {
         wtxn.commit().unwrap();
 
         let rtxn = db.begin_read();
-        let ttl = rtxn.open_ttl_table(READINGS);
+        let ttl = rtxn.open_ttl_table(READINGS).unwrap();
         assert!(ttl.get(&99999u64).unwrap().is_some());
     }
 
     // Phase 4: Verify all sensor readings persisted
     {
         let rtxn = db.begin_read();
-        let t = rtxn.open_table(READINGS);
+        let t = rtxn.open_table(READINGS).unwrap();
         let all = collect_scan(t.scan().unwrap());
         assert!(
             all.len() >= 50,
@@ -866,7 +866,7 @@ fn knowledge_graph_workflow() {
     let _ = bs;
 
     // Multimap: tag -> doc sequence index
-    let mut mm = wtxn.open_multimap_table::<&str, u64>("doc_tags");
+    let mut mm = wtxn.open_multimap_table::<&str, u64>("doc_tags").unwrap();
     mm.insert(&"rust", &doc1.sequence).unwrap();
     mm.insert(&"programming", &doc1.sequence).unwrap();
     mm.insert(&"bftree", &doc2.sequence).unwrap();
@@ -876,7 +876,7 @@ fn knowledge_graph_workflow() {
 
     // Query
     let rtxn = db.begin_read();
-    let mm = rtxn.open_multimap_table::<&str, u64>("doc_tags");
+    let mm = rtxn.open_multimap_table::<&str, u64>("doc_tags").unwrap();
 
     let rust_docs = mm.get_values(&"rust").unwrap();
     assert_eq!(rust_docs.len(), 1);

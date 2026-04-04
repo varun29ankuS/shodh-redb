@@ -65,6 +65,20 @@ impl Default for BfTreeConfig {
     }
 }
 
+impl BfTreeBackend {
+    /// Returns `true` if this backend persists data to a file.
+    fn is_file_backed(&self) -> bool {
+        match self {
+            BfTreeBackend::Memory => false,
+            BfTreeBackend::Std => true,
+            #[cfg(target_os = "linux")]
+            BfTreeBackend::IoUringBlocking => true,
+            #[cfg(target_os = "linux")]
+            BfTreeBackend::IoUringPolling => true,
+        }
+    }
+}
+
 impl BfTreeConfig {
     /// Create a configuration for file-backed storage.
     pub fn new_file(path: impl AsRef<Path>, buffer_size_mib: usize) -> Self {
@@ -104,7 +118,22 @@ impl BfTreeConfig {
     }
 
     /// Convert to bf-tree's native `Config`.
+    ///
+    /// Returns `Err(BfTreeError::InvalidConfig)` if WAL is disabled on a
+    /// file-backed backend. Without WAL, committed data is only durable after
+    /// an explicit `snapshot()` call; any crash between `commit()` and
+    /// `snapshot()` silently loses data. This configuration is rejected to
+    /// prevent silent data loss.
     pub(crate) fn into_bf_config(self) -> Result<Config, BfTreeError> {
+        if self.backend.is_file_backed() && !self.enable_wal {
+            return Err(BfTreeError::InvalidConfig(String::from(
+                "WAL must be enabled for file-backed storage backends; \
+                 disabling WAL on a file backend causes silent data loss on crash. \
+                 Use enable_wal: true, or switch to BfTreeBackend::Memory for \
+                 non-durable in-memory usage",
+            )));
+        }
+
         let mut config = Config::new(&self.file_path, self.circular_buffer_size);
 
         let storage_backend = match self.backend {

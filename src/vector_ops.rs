@@ -79,14 +79,25 @@ impl DistanceMetric {
     /// Computes the distance between two f32 vectors using this metric.
     ///
     /// Lower values indicate more similar vectors for all metrics.
+    ///
+    /// Returns [`f32::MAX`] when the vectors have mismatched dimensions
+    /// (truncated or corrupted data) to prevent garbage results from being
+    /// promoted to the top of nearest-neighbor heaps. Also returns
+    /// [`f32::MAX`] when the computed distance is NaN (e.g. due to NaN
+    /// elements in the input vectors) to avoid silent NaN propagation
+    /// through search results.
     #[inline]
     pub fn compute(&self, a: &[f32], b: &[f32]) -> f32 {
-        match self {
+        if a.len() != b.len() {
+            return f32::MAX;
+        }
+        let d = match self {
             Self::Cosine => cosine_distance(a, b),
             Self::EuclideanSq => euclidean_distance_sq(a, b),
             Self::DotProduct => -dot_product(a, b),
             Self::Manhattan => manhattan_distance(a, b),
-        }
+        };
+        if d.is_nan() { f32::MAX } else { d }
     }
 }
 
@@ -107,7 +118,8 @@ impl fmt::Display for DistanceMetric {
 
 /// Computes the dot product of two f32 slices.
 ///
-/// If lengths differ, computes over the shorter length.
+/// Returns `0.0` if lengths differ (callers that need worst-distance
+/// semantics on mismatch should use [`DistanceMetric::compute`]).
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "dot_product: vector dimension mismatch");
@@ -361,18 +373,25 @@ pub fn dequantize_scalar<const N: usize>(sq: &SQVec<N>) -> [f32; N] {
 ///
 /// This avoids materializing the full f32 vector when doing distance
 /// comparisons during search, reducing memory bandwidth.
+///
+/// Returns [`f32::MAX`] if the scale factors are non-finite or the result
+/// is NaN, preventing silent corruption of search rankings.
 #[inline]
 pub fn sq_euclidean_distance_sq<const N: usize>(query: &[f32; N], sq: &SQVec<N>) -> f32 {
     let range = sq.max_val - sq.min_val;
+    if !range.is_finite() {
+        return f32::MAX;
+    }
     if range == 0.0 {
         // All codes dequantize to min_val -- compute exact per-dimension distances.
-        return query
+        let d: f32 = query
             .iter()
             .map(|&q| {
-                let d = q - sq.min_val;
-                d * d
+                let diff = q - sq.min_val;
+                diff * diff
             })
             .sum();
+        return if d.is_nan() { f32::MAX } else { d };
     }
     let scale = range / 255.0;
     let mut sum = 0.0f32;
@@ -381,16 +400,24 @@ pub fn sq_euclidean_distance_sq<const N: usize>(query: &[f32; N], sq: &SQVec<N>)
         let diff = q - dequant;
         sum += diff * diff;
     }
-    sum
+    if sum.is_nan() { f32::MAX } else { sum }
 }
 
 /// Computes approximate dot product between an f32 query and a scalar-quantized
 /// vector, dequantizing on the fly.
+///
+/// Returns `0.0` if the scale factors are non-finite. Returns the raw dot
+/// product otherwise (callers negate for distance ranking via
+/// [`DistanceMetric::DotProduct`]).
 #[inline]
 pub fn sq_dot_product<const N: usize>(query: &[f32; N], sq: &SQVec<N>) -> f32 {
     let range = sq.max_val - sq.min_val;
+    if !range.is_finite() {
+        return 0.0;
+    }
     if range == 0.0 {
-        return query.iter().sum::<f32>() * sq.min_val;
+        let d = query.iter().sum::<f32>() * sq.min_val;
+        return if d.is_nan() { 0.0 } else { d };
     }
     let scale = range / 255.0;
     let mut sum = 0.0f32;
@@ -398,7 +425,7 @@ pub fn sq_dot_product<const N: usize>(query: &[f32; N], sq: &SQVec<N>) -> f32 {
         let dequant = sq.min_val + f32::from(sq.codes[i]) * scale;
         sum += q * dequant;
     }
-    sum
+    if sum.is_nan() { 0.0 } else { sum }
 }
 
 // ---------------------------------------------------------------------------

@@ -207,13 +207,13 @@ mod tests {
 
         let db = udb.as_bf_tree().unwrap();
         let wtxn = db.begin_write();
-        let mut t = wtxn.open_table(TABLE);
+        let mut t = wtxn.open_table(TABLE).unwrap();
         t.insert(&"hello", &42u64).unwrap();
         drop(t);
         wtxn.commit().unwrap();
 
         let rtxn = db.begin_read();
-        let t = rtxn.open_table(TABLE);
+        let t = rtxn.open_table(TABLE).unwrap();
         let val = t.get(&"hello").unwrap().unwrap();
         assert_eq!(u64::from_le_bytes(val[..8].try_into().unwrap()), 42);
     }

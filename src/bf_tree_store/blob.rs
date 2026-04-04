@@ -232,7 +232,11 @@ fn next_sequence(buffer: &Mutex<WriteBuffer>, adapter: &BfTreeAdapter) -> Result
         Some(bytes) if bytes.len() >= 8 => u64::from_le_bytes(bytes[..8].try_into().unwrap()),
         _ => 1,
     };
-    let next = seq.saturating_add(1);
+    let next = seq.checked_add(1).ok_or_else(|| {
+        BfTreeError::InvalidOperation(alloc::string::String::from(
+            "blob sequence counter exhausted (u64::MAX reached)",
+        ))
+    })?;
     buf_guard.put(seq_key, next.to_le_bytes().to_vec())?;
     drop(buf_guard);
     Ok(seq)
@@ -285,6 +289,7 @@ pub struct BfTreeBlobStore<'txn> {
     adapter: &'txn BfTreeAdapter,
     buffer: &'txn Mutex<WriteBuffer>,
     ops_count: &'txn AtomicU64,
+    cdc_log: Option<&'txn Mutex<Vec<crate::cdc::types::CdcEvent>>>,
 }
 
 impl<'txn> BfTreeBlobStore<'txn> {
@@ -292,11 +297,20 @@ impl<'txn> BfTreeBlobStore<'txn> {
         adapter: &'txn BfTreeAdapter,
         buffer: &'txn Mutex<WriteBuffer>,
         ops_count: &'txn AtomicU64,
+        cdc_log: Option<&'txn Mutex<Vec<crate::cdc::types::CdcEvent>>>,
     ) -> Self {
         Self {
             adapter,
             buffer,
             ops_count,
+            cdc_log,
+        }
+    }
+
+    /// Record a CDC event if CDC is enabled.
+    fn record_cdc(&self, event: crate::cdc::types::CdcEvent) {
+        if let Some(log) = self.cdc_log {
+            log.lock().unwrap_or_else(|e| e.into_inner()).push(event);
         }
     }
 
@@ -313,7 +327,19 @@ impl<'txn> BfTreeBlobStore<'txn> {
     ) -> Result<BlobId, BfTreeError> {
         let mut writer = self.begin_write(content_type, label, opts)?;
         writer.write(data)?;
-        writer.finish()
+        let blob_id = writer.finish()?;
+
+        if self.cdc_log.is_some() {
+            self.record_cdc(crate::cdc::types::CdcEvent {
+                table_name: alloc::string::String::from(BLOB_META_TABLE),
+                op: crate::cdc::types::ChangeOp::Insert,
+                key: blob_id.to_be_bytes().to_vec(),
+                new_value: None,
+                old_value: None,
+            });
+        }
+
+        Ok(blob_id)
     }
 
     /// Begin a streaming blob write. Call `write()` one or more times, then `finish()`.
@@ -365,6 +391,21 @@ impl<'txn> BfTreeBlobStore<'txn> {
 
         // Truncate to exact length (last chunk may be padded by BfTree).
         result.truncate(total_len);
+
+        // BLOB-10: Verify checksum after reassembly to detect corrupted chunks.
+        // The stored checksum is derived from the first 16 bytes of the SHA-256
+        // digest computed at write time. Recompute and compare.
+        if meta.blob_ref.checksum != 0 {
+            let read_sha256: [u8; 32] = Sha256::digest(&result).into();
+            let read_checksum = full_blob_checksum_from_sha256(&read_sha256);
+            if read_checksum != meta.blob_ref.checksum {
+                return Err(BfTreeError::Corruption(alloc::format!(
+                    "blob {blob_id:?} checksum mismatch: expected {:032x}, got {:032x}",
+                    meta.blob_ref.checksum, read_checksum
+                )));
+            }
+        }
+
         Ok(Some(result))
     }
 
@@ -500,6 +541,17 @@ impl<'txn> BfTreeBlobStore<'txn> {
 
         self.ops_count
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+        if self.cdc_log.is_some() {
+            self.record_cdc(crate::cdc::types::CdcEvent {
+                table_name: alloc::string::String::from(BLOB_META_TABLE),
+                op: crate::cdc::types::ChangeOp::Delete,
+                key: blob_id.to_be_bytes().to_vec(),
+                new_value: None,
+                old_value: None,
+            });
+        }
+
         Ok(true)
     }
 
@@ -708,15 +760,36 @@ impl<'txn> BfTreeBlobStore<'txn> {
         match read_raw_buffered(self.buffer, self.adapter, &key)? {
             Some(bytes) if bytes.len() >= DedupVal::SERIALIZED_SIZE => {
                 if bytes.len() >= DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE {
+                    // Parse the stored dedup record to access its checksum.
+                    let mut arr = [0u8; DedupVal::SERIALIZED_SIZE];
+                    arr.copy_from_slice(&bytes[..DedupVal::SERIALIZED_SIZE]);
+                    let dedup = DedupVal::from_le_bytes(arr);
+
                     let blob_id_bytes = &bytes[DedupVal::SERIALIZED_SIZE
                         ..DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE];
                     let blob_id = BlobId::from_be_bytes(blob_id_bytes.try_into().unwrap());
 
                     // Verify the target blob still exists. If it was deleted,
                     // the dedup entry is stale and must be cleaned up.
-                    if self.get_meta(blob_id)?.is_none() {
+                    let meta = self.get_meta(blob_id)?;
+                    if meta.is_none() {
                         // Target blob no longer exists -- remove the stale
                         // dedup entry so future lookups skip it.
+                        self.buffer
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .delete(key);
+                        return Ok(None);
+                    }
+
+                    // BLOB-03: Verify the stored checksum matches the target
+                    // blob's metadata checksum. A bit flip in the SHA-256 hash
+                    // could cause a false dedup match; the checksum cross-check
+                    // catches this.
+                    let meta = meta.unwrap();
+                    if meta.blob_ref.checksum != dedup.checksum {
+                        // Checksum mismatch -- the dedup entry is inconsistent.
+                        // Remove the stale entry and fall through to non-dedup path.
                         self.buffer
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -1208,9 +1281,19 @@ impl BfTreeBlobWriter<'_, '_> {
                         read_raw(self.store.adapter, &src_key)?
                     }
                 };
-                if let Some(bytes) = chunk_bytes {
-                    let dst_key = encode_chunk_key(new_id, idx_u32);
-                    buf_guard.put(dst_key, bytes)?;
+                // BLOB-04: Missing source chunks during dedup copy indicate
+                // data corruption in the source blob. Return an error instead
+                // of silently producing a partial blob.
+                match chunk_bytes {
+                    Some(bytes) => {
+                        let dst_key = encode_chunk_key(new_id, idx_u32);
+                        buf_guard.put(dst_key, bytes)?;
+                    }
+                    None => {
+                        return Err(BfTreeError::Corruption(alloc::format!(
+                            "dedup source blob {existing_id:?} missing chunk {idx}"
+                        )));
+                    }
                 }
             }
         }

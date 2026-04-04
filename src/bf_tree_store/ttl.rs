@@ -1,13 +1,15 @@
 //! TTL (Time-To-Live) table support for `BfTree`.
 //!
-//! Wraps standard `BfTree` table operations with an 8-byte expiry header prepended
-//! to each value. Expired entries are transparent to callers -- `get()` and range
-//! scans return `None` for expired keys. Use `purge_expired()` to reclaim storage.
+//! Wraps standard `BfTree` table operations with a 9-byte header (1-byte magic tag +
+//! 8-byte expiry timestamp) prepended to each value. Expired entries are transparent
+//! to callers — `get()` and range scans return `None` for expired keys. Use
+//! `purge_expired()` to reclaim storage.
 //!
 //! # Value Encoding
 //!
 //! ```text
-//! [u64 LE expires_at_ms][original value bytes]
+//! [0xE7][u64 LE expires_at_ms][original value bytes]
+//! +-- 1-byte magic tag (TTL_MAGIC = 0xE7): distinguishes TTL values from plain values
 //! +-- 8-byte header: milliseconds since UNIX epoch (0 = never expires)
 //! +-- Remaining bytes: the raw V serialized value
 //! ```
@@ -29,7 +31,14 @@ use super::buffered_txn::{BufferLookup, WriteBuffer};
 use super::database::{TableKind, encode_table_key, table_prefix, table_prefix_end};
 use super::error::BfTreeError;
 
-const EXPIRY_HEADER_SIZE: usize = 8;
+/// Magic byte prefix that distinguishes TTL-encoded values from plain values.
+/// If the same table is opened as both a TTL table and a regular table, this
+/// tag prevents misinterpreting the 8-byte expiry header as user data (or
+/// vice versa).
+const TTL_MAGIC: u8 = 0xE7;
+
+/// Total header size: 1-byte magic tag + 8-byte expiry timestamp.
+const EXPIRY_HEADER_SIZE: usize = 1 + 8;
 
 /// Returns the current wall-clock time as milliseconds since the UNIX epoch.
 ///
@@ -45,36 +54,59 @@ const EXPIRY_HEADER_SIZE: usize = 8;
 fn now_millis() -> u64 {
     // u128 -> u64 truncation is safe: milliseconds since epoch will not
     // overflow u64 for ~584 million years.
-    SystemTime::now()
+    let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64
+        .as_millis() as u64;
+
+    // TTL-04: If the system clock is before the UNIX epoch (or returns 0),
+    // all non-zero expiry timestamps would compare as `expires_at < 0` which
+    // is always false for u64, making every entry immortal. Use a minimum
+    // floor of 1 so that expiry comparisons remain meaningful.
+    if ms == 0 { 1 } else { ms }
 }
 
 fn encode_ttl_value(expires_at_ms: u64, value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(EXPIRY_HEADER_SIZE + value.len());
+    buf.push(TTL_MAGIC);
     buf.extend_from_slice(&expires_at_ms.to_le_bytes());
     buf.extend_from_slice(value);
     buf
 }
 
-fn read_expiry(data: &[u8]) -> u64 {
-    if data.len() < EXPIRY_HEADER_SIZE {
-        return 0;
+/// Read the expiry timestamp from a TTL-encoded value.
+///
+/// Returns `Ok(timestamp)` on success, or `Err(())` if the value is missing
+/// the TTL magic byte or is too short to contain a valid header. The caller
+/// must handle the error (e.g., return `BfTreeError::Corruption`).
+fn read_expiry(data: &[u8]) -> Result<u64, ()> {
+    // TTL-03 / TTL-06: Validate magic byte and minimum header size.
+    if data.len() < EXPIRY_HEADER_SIZE || data[0] != TTL_MAGIC {
+        return Err(());
     }
-    u64::from_le_bytes(data[..EXPIRY_HEADER_SIZE].try_into().unwrap())
+    let mut ts_buf = [0u8; 8];
+    ts_buf.copy_from_slice(&data[1..EXPIRY_HEADER_SIZE]);
+    Ok(u64::from_le_bytes(ts_buf))
 }
 
 fn strip_expiry(data: &[u8]) -> &[u8] {
-    if data.len() > EXPIRY_HEADER_SIZE {
+    if data.len() > EXPIRY_HEADER_SIZE && data[0] == TTL_MAGIC {
         &data[EXPIRY_HEADER_SIZE..]
     } else {
         &[]
     }
 }
 
-fn is_expired(expires_at_ms: u64) -> bool {
-    expires_at_ms != 0 && expires_at_ms <= now_millis()
+/// Check if a TTL timestamp is expired relative to a given `now` value.
+///
+/// TTL-08: The `now` parameter should be captured once at method entry to
+/// ensure consistent expiry decisions within a single operation.
+fn is_expired_at(expires_at_ms: u64, now: u64) -> bool {
+    // TTL-01: Use strict less-than so that an entry whose expiry equals the
+    // current millisecond is still readable during that millisecond. The
+    // previous `<=` caused entries with a TTL landing exactly on `now` to be
+    // treated as expired the instant they were written.
+    expires_at_ms != 0 && expires_at_ms < now
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +203,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         value: &V::SelfType<'_>,
         expires_at_ms: u64,
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
+        // TTL-08: Capture timestamp once for consistent expiry decisions.
+        let now = now_millis();
         let key_bytes = K::as_bytes(key);
         let val_bytes = V::as_bytes(value);
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
@@ -185,7 +219,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
 
         // Record CDC event if enabled.
         if self.cdc_log.is_some() {
-            let previous_value = Self::unwrap_if_not_expired(previous_raw.clone());
+            let previous_value = Self::unwrap_if_not_expired(previous_raw.clone(), now);
             self.record_cdc(CdcEvent {
                 table_name: self.name.clone(),
                 op: if previous_value.is_some() {
@@ -199,11 +233,13 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
             });
         }
 
-        Ok(Self::unwrap_if_not_expired(previous_raw))
+        Ok(Self::unwrap_if_not_expired(previous_raw, now))
     }
 
     /// Get a value, returning `None` if expired or absent.
     pub fn get(&self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
+        // TTL-08: Capture timestamp once for consistent expiry decisions.
+        let now = now_millis();
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
@@ -211,7 +247,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         let raw = self.read_raw_locked(&buffer, &encoded_key)?;
         drop(buffer);
 
-        Ok(Self::unwrap_if_not_expired(raw))
+        Ok(Self::unwrap_if_not_expired(raw, now))
     }
 
     /// Get the expiry timestamp (ms since epoch) for a key, or `None` if absent.
@@ -223,18 +259,29 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         let raw = self.read_raw_locked(&buffer, &encoded_key)?;
         drop(buffer);
 
-        Ok(raw.map(|data| read_expiry(&data)))
+        match raw {
+            Some(data) => match read_expiry(&data) {
+                Ok(ts) => Ok(Some(ts)),
+                Err(()) => Err(BfTreeError::Corruption(alloc::format!(
+                    "ttl table {:?}: value missing TTL header",
+                    self.name
+                ))),
+            },
+            None => Ok(None),
+        }
     }
 
     /// Remove a key, returning the previous non-expired value if any.
     pub fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
+        // TTL-08: Capture timestamp once for consistent expiry decisions.
+        let now = now_millis();
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
         let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         let previous_raw = self.read_raw_locked(&buffer, &encoded_key)?;
 
-        let previous_value = Self::unwrap_if_not_expired(previous_raw);
+        let previous_value = Self::unwrap_if_not_expired(previous_raw, now);
 
         if previous_value.is_some() {
             buffer.delete(encoded_key);
@@ -268,6 +315,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
     /// before tombstoning, closing the TOCTOU window for entries that were
     /// updated or removed after the scan.
     pub fn purge_expired(&mut self) -> Result<u64, BfTreeError> {
+        // TTL-08: Capture timestamp once for consistent expiry decisions.
+        let now = now_millis();
         let prefix = table_prefix(&self.name, TableKind::Ttl);
         let prefix_end = table_prefix_end(&self.name, TableKind::Ttl);
         let prefix_len = prefix.len();
@@ -310,7 +359,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
                     }
                 }
             };
-            if is_expired(read_expiry(&raw)) {
+            if let Ok(exp) = read_expiry(&raw)
+                && is_expired_at(exp, now)
+            {
                 buffer.delete(encoded_key.clone());
                 purged += 1;
                 if self.cdc_log.is_some() {
@@ -336,7 +387,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
             .collect();
 
         for (encoded_key, raw_val) in buf_only {
-            if is_expired(read_expiry(&raw_val)) {
+            if let Ok(exp) = read_expiry(&raw_val) && is_expired_at(exp, now) {
                 if self.cdc_log.is_some() {
                     let user_key = encoded_key.get(prefix_len..).unwrap_or(&[]).to_vec();
                     let old_value = strip_expiry(&raw_val).to_vec();
@@ -390,11 +441,15 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         }
     }
 
-    /// Strip expiry header and return value bytes, or `None` if expired.
-    fn unwrap_if_not_expired(raw: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    /// Strip expiry header and return value bytes, or `None` if expired or
+    /// if the value does not carry a valid TTL header (missing magic byte or
+    /// sub-header-size).
+    ///
+    /// TTL-08: `now` is captured once at the top of the calling method.
+    fn unwrap_if_not_expired(raw: Option<Vec<u8>>, now: u64) -> Option<Vec<u8>> {
         raw.and_then(|data| {
-            let exp = read_expiry(&data);
-            if is_expired(exp) {
+            let exp = read_expiry(&data).ok()?;
+            if is_expired_at(exp, now) {
                 None
             } else {
                 Some(strip_expiry(&data).to_vec())
@@ -429,6 +484,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTtlTable<'txn, K,
 
     /// Get a value, returning `None` if expired or absent.
     pub fn get(&self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
+        // TTL-08: Capture timestamp once for consistent expiry decisions.
+        let now = now_millis();
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
@@ -436,8 +493,13 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTtlTable<'txn, K,
         match self.adapter.read(&encoded_key, &mut buf) {
             Ok(len) => {
                 let raw = &buf[..len as usize];
-                let exp = read_expiry(raw);
-                if is_expired(exp) {
+                let Ok(exp) = read_expiry(raw) else {
+                    return Err(BfTreeError::Corruption(alloc::format!(
+                        "ttl table {:?}: value missing TTL header",
+                        self.name
+                    )));
+                };
+                if is_expired_at(exp, now) {
                     Ok(None)
                 } else {
                     Ok(Some(strip_expiry(raw).to_vec()))
@@ -455,7 +517,13 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTtlTable<'txn, K,
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.adapter.read(&encoded_key, &mut buf) {
-            Ok(len) => Ok(Some(read_expiry(&buf[..len as usize]))),
+            Ok(len) => match read_expiry(&buf[..len as usize]) {
+                Ok(ts) => Ok(Some(ts)),
+                Err(()) => Err(BfTreeError::Corruption(alloc::format!(
+                    "ttl table {:?}: value missing TTL header",
+                    self.name
+                ))),
+            },
             Err(BfTreeError::NotFound | BfTreeError::Deleted) => Ok(None),
             Err(e) => Err(e),
         }

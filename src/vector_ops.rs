@@ -176,7 +176,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         norm_b += y * y;
     }
     let denom = sqrt_f32(norm_a) * sqrt_f32(norm_b);
-    if denom == 0.0 { 0.0 } else { dot / denom }
+    if denom == 0.0 { 0.0 } else { (dot / denom).clamp(-1.0, 1.0) }
 }
 
 /// Computes the cosine distance between two f32 slices.
@@ -245,14 +245,38 @@ pub fn l2_norm(v: &[f32]) -> f32 {
 /// After normalization, `dot_product(v, v) ~= 1.0` and `cosine_similarity`
 /// reduces to a simple `dot_product`, which is significantly faster.
 ///
-/// If the vector has zero magnitude, it is left unchanged.
+/// If the vector has zero magnitude, it is left unchanged. For vectors with
+/// extremely large elements (where the raw norm overflows to infinity), the
+/// vector is first scaled down by the maximum absolute element value before
+/// computing the norm to avoid producing a zero vector.
 #[inline]
 pub fn l2_normalize(v: &mut [f32]) {
     let norm = l2_norm(v);
-    if norm > 0.0 {
+    if norm.is_finite() && norm > 0.0 {
         let inv = 1.0 / norm;
         for x in v.iter_mut() {
             *x *= inv;
+        }
+    } else if !norm.is_finite() {
+        // Norm overflowed to Inf. Scale down by max absolute value first,
+        // then normalize the scaled vector to get correct unit direction.
+        let max_abs = v.iter().fold(0.0f32, |acc, &x| {
+            let a = x.abs();
+            if a > acc { a } else { acc }
+        });
+        if max_abs == 0.0 || !max_abs.is_finite() {
+            return;
+        }
+        let inv_max = 1.0 / max_abs;
+        for x in v.iter_mut() {
+            *x *= inv_max;
+        }
+        let scaled_norm = l2_norm(v);
+        if scaled_norm.is_finite() && scaled_norm > 0.0 {
+            let inv = 1.0 / scaled_norm;
+            for x in v.iter_mut() {
+                *x *= inv;
+            }
         }
     }
 }

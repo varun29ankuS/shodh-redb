@@ -171,7 +171,7 @@ pub fn select_diverse_probes(
     }
 
     // Sort by original distance for consistent downstream processing
-    result.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
+    result.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
     result
 }
 
@@ -195,7 +195,7 @@ mod tests {
             })
             .collect();
         candidates
-            .sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
+            .sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
         // Build centroids in sorted order
         let mut centroids = Vec::with_capacity(candidates.len() * dim);
@@ -381,7 +381,7 @@ mod tests {
             })
             .collect();
         candidates
-            .sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
+            .sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
         let mut centroids_flat = Vec::with_capacity(candidates.len() * dim);
         for &(id, _) in &candidates {
@@ -447,7 +447,7 @@ mod tests {
             })
             .collect();
         candidates
-            .sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
+            .sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
         let mut centroids_flat = Vec::with_capacity(candidates.len() * dim);
         for &(id, _) in &candidates {

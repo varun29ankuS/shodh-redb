@@ -1,4 +1,4 @@
-use crate::compat::Mutex;
+use crate::compat::RwLock;
 use crate::error::BackendError;
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
@@ -115,10 +115,9 @@ impl BlockMap {
             *r = logical_block;
         }
 
-        // Remove from free list via swap_remove for O(1) instead of O(n) retain
-        if let Some(pos) = self.free_list.iter().position(|&b| b == physical_block) {
-            self.free_list.swap_remove(pos);
-        }
+        // NOTE: No free_list removal here. Callers (allocate_block,
+        // try_static_wear_level) already manage free_list membership before
+        // calling assign(), so an O(n) scan here would be redundant.
     }
 
     fn release(&mut self, logical_block: u32) {
@@ -140,7 +139,7 @@ impl BlockMap {
     }
 }
 
-/// Internal mutable state of the FTL, protected by a Mutex.
+/// Internal mutable state of the FTL, protected by a `RwLock`.
 struct FtlState<H: FlashHardware> {
     hw: H,
     geometry: FlashGeometry,
@@ -159,7 +158,7 @@ struct FtlState<H: FlashHardware> {
 /// Flash Translation Layer providing logical-to-physical block mapping, wear
 /// leveling, bad block management, and power-loss-safe metadata journaling.
 pub(super) struct FlashTranslationLayer<H: FlashHardware> {
-    state: Mutex<FtlState<H>>,
+    state: RwLock<FtlState<H>>,
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -207,7 +206,7 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                     Self::deserialize_metadata(&data, data_physical_blocks, geo.total_blocks)?;
 
                 Ok(Self {
-                    state: Mutex::new(FtlState {
+                    state: RwLock::new(FtlState {
                         hw,
                         geometry: geo,
                         block_map,
@@ -299,13 +298,16 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         journal.commit(hw, &metadata)?;
 
         Ok(Self {
-            state: Mutex::new(state),
+            state: RwLock::new(state),
         })
     }
 
     /// Read `buf.len()` bytes starting at logical offset.
+    ///
+    /// Uses a read lock so multiple concurrent reads do not block each other.
+    /// Only writes acquire the exclusive write lock.
     pub fn read(&self, offset: u64, buf: &mut [u8]) -> core::result::Result<(), BackendError> {
-        let state = self.state.lock();
+        let state = self.state.read();
         let ebs = u64::from(state.geometry.erase_block_size);
         debug_assert!(ebs > 0, "erase_block_size validated at construction");
 
@@ -347,7 +349,7 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
     /// a buffer, overlays the new data, allocates a fresh physical block, writes
     /// the combined data, and releases the old block.
     pub fn write(&self, offset: u64, data: &[u8]) -> core::result::Result<(), BackendError> {
-        let mut state = self.state.lock();
+        let mut state = self.state.write();
         let ebs = state.geometry.erase_block_size;
         let ebs_u64 = u64::from(ebs);
         let wps = state.geometry.write_page_size as usize;
@@ -386,7 +388,8 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             // Allocate fresh physical block (lowest erase count)
             let new_phys = Self::allocate_block(&mut state)?;
 
-            // Erase the new block -- widen to u64 before adding to prevent u32 overflow
+            // Erase and write the new block, retrying with a fresh block if the
+            // hardware reports a failure (runtime bad-block detection for NAND).
             let global_new = u64::from(state.data_region_start) + u64::from(new_phys);
             let global_new_u32 = u32::try_from(global_new).map_err(|_| {
                 #[cfg(feature = "std")]
@@ -401,28 +404,95 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                     BackendError::Message(String::from("block index exceeds u32 range"))
                 }
             })?;
-            state.hw.erase_block(global_new_u32)?;
-            state.erase_counts.increment(global_new_u32);
-            state.ops_since_static_wl += 1;
 
-            // Write the full block in write-page-sized chunks
-            let phys_base = global_new * ebs_u64;
-            let mut page_offset = 0usize;
-            while page_offset < ebs as usize {
-                let write_len = wps.min(ebs as usize - page_offset);
-                state.hw.write_page(
-                    phys_base + page_offset as u64,
-                    &block_buf[page_offset..page_offset + write_len],
-                )?;
-                page_offset += wps;
-            }
+            if let Err(erase_err) = state.hw.erase_block(global_new_u32) {
+                // Mark the block as bad in both the software table and hardware.
+                state.bad_blocks.mark_bad(global_new_u32);
+                let _ = state.hw.mark_bad_block(global_new_u32);
+                // Do NOT return block to free list -- it is now permanently bad.
+                // Allocate a replacement and retry from the erase step.
+                let replacement = Self::allocate_block(&mut state)?;
+                let repl_global = u64::from(state.data_region_start) + u64::from(replacement);
+                let repl_global_u32 = u32::try_from(repl_global).map_err(|_| {
+                    #[cfg(feature = "std")]
+                    {
+                        BackendError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "block index exceeds u32 range",
+                        ))
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        BackendError::Message(String::from("block index exceeds u32 range"))
+                    }
+                })?;
+                // If the replacement also fails, propagate the error -- two
+                // consecutive bad blocks likely indicates a hardware problem.
+                if state.hw.erase_block(repl_global_u32).is_err() {
+                    state.bad_blocks.mark_bad(repl_global_u32);
+                    let _ = state.hw.mark_bad_block(repl_global_u32);
+                    return Err(erase_err);
+                }
+                state.erase_counts.increment(repl_global_u32);
+                state.ops_since_static_wl += 1;
+                Self::write_block_pages(&state, repl_global, &block_buf, wps, ebs as usize)?;
+                state.block_map.assign(logical_block, replacement);
+                if let Some(old) = old_phys {
+                    deferred_free.push(old);
+                }
+            } else {
+                state.erase_counts.increment(global_new_u32);
+                state.ops_since_static_wl += 1;
 
-            // Update mapping
-            state.block_map.assign(logical_block, new_phys);
-
-            // Defer releasing the old physical block until after the loop
-            if let Some(old) = old_phys {
-                deferred_free.push(old);
+                // Write the full block in write-page-sized chunks. On write
+                // failure, mark the block bad and retry with a replacement.
+                if let Err(write_err) =
+                    Self::write_block_pages(&state, global_new, &block_buf, wps, ebs as usize)
+                {
+                    state.bad_blocks.mark_bad(global_new_u32);
+                    let _ = state.hw.mark_bad_block(global_new_u32);
+                    let replacement = Self::allocate_block(&mut state)?;
+                    let repl_global =
+                        u64::from(state.data_region_start) + u64::from(replacement);
+                    let repl_global_u32 = u32::try_from(repl_global).map_err(|_| {
+                        #[cfg(feature = "std")]
+                        {
+                            BackendError::Io(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "block index exceeds u32 range",
+                            ))
+                        }
+                        #[cfg(not(feature = "std"))]
+                        {
+                            BackendError::Message(String::from("block index exceeds u32 range"))
+                        }
+                    })?;
+                    state.hw.erase_block(repl_global_u32)?;
+                    state.erase_counts.increment(repl_global_u32);
+                    if Self::write_block_pages(
+                        &state,
+                        repl_global,
+                        &block_buf,
+                        wps,
+                        ebs as usize,
+                    )
+                    .is_err()
+                    {
+                        state.bad_blocks.mark_bad(repl_global_u32);
+                        let _ = state.hw.mark_bad_block(repl_global_u32);
+                        return Err(write_err);
+                    }
+                    state.block_map.assign(logical_block, replacement);
+                    if let Some(old) = old_phys {
+                        deferred_free.push(old);
+                    }
+                } else {
+                    // Successful erase + write: update mapping normally.
+                    state.block_map.assign(logical_block, new_phys);
+                    if let Some(old) = old_phys {
+                        deferred_free.push(old);
+                    }
+                }
             }
 
             // Check for static wear leveling
@@ -456,7 +526,7 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
 
     /// Set the logical length of the storage.
     pub fn set_len(&self, len: u64) -> core::result::Result<(), BackendError> {
-        let mut state = self.state.lock();
+        let mut state = self.state.write();
         let ebs = u64::from(state.geometry.erase_block_size);
         debug_assert!(ebs > 0, "erase_block_size validated at construction");
         let old_blocks = u32::try_from(state.logical_len.div_ceil(ebs)).unwrap_or(u32::MAX);
@@ -495,12 +565,12 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
 
     /// Return current logical length.
     pub fn len(&self) -> core::result::Result<u64, BackendError> {
-        Ok(self.state.lock().logical_len)
+        Ok(self.state.read().logical_len)
     }
 
     /// Flush: persist current FTL metadata to journal and sync hardware.
     pub fn sync(&self) -> core::result::Result<(), BackendError> {
-        let mut state = self.state.lock();
+        let mut state = self.state.write();
         let metadata = Self::serialize_metadata_inner(&state);
         let FtlState {
             ref hw,
@@ -514,6 +584,31 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
     /// Shutdown: final metadata persist.
     pub fn close(&self) -> core::result::Result<(), BackendError> {
         self.sync()
+    }
+
+    /// Write an entire block buffer to flash in write-page-sized chunks.
+    ///
+    /// `global_block` is the global (not data-region-relative) block index,
+    /// expressed as u64 to avoid overflow during address arithmetic.
+    fn write_block_pages(
+        state: &FtlState<H>,
+        global_block: u64,
+        block_buf: &[u8],
+        wps: usize,
+        ebs: usize,
+    ) -> core::result::Result<(), BackendError> {
+        let ebs_u64 = u64::from(state.geometry.erase_block_size);
+        let phys_base = global_block * ebs_u64;
+        let mut page_offset = 0usize;
+        while page_offset < ebs {
+            let write_len = wps.min(ebs - page_offset);
+            state.hw.write_page(
+                phys_base + page_offset as u64,
+                &block_buf[page_offset..page_offset + write_len],
+            )?;
+            page_offset += wps;
+        }
+        Ok(())
     }
 
     /// Allocate a free physical block with the lowest erase count.
@@ -621,19 +716,38 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                 let mut buf = vec![0u8; ebs as usize];
                 state.hw.read(u64::from(src_global) * ebs_u64, &mut buf)?;
 
-                // Erase the high-wear free block and write cold data there
-                state.hw.erase_block(dst_global_u32)?;
+                // Erase the high-wear free block and write cold data there.
+                // On erase/write failure, mark the block bad and abort the
+                // swap -- wear leveling is best-effort and will retry on the
+                // next interval.
+                if state.hw.erase_block(dst_global_u32).is_err() {
+                    state.bad_blocks.mark_bad(dst_global_u32);
+                    let _ = state.hw.mark_bad_block(dst_global_u32);
+                    // Remove from free list since this block is now bad.
+                    if let Some(pos) = state.block_map.free_list.iter().position(|&b| b == dst_rel)
+                    {
+                        state.block_map.free_list.swap_remove(pos);
+                    }
+                    return Ok(());
+                }
                 state.erase_counts.increment(dst_global_u32);
 
-                let phys_base = u64::from(dst_global) * ebs_u64;
-                let mut page_offset = 0usize;
-                while page_offset < ebs as usize {
-                    let write_len = wps.min(ebs as usize - page_offset);
-                    state.hw.write_page(
-                        phys_base + page_offset as u64,
-                        &buf[page_offset..page_offset + write_len],
-                    )?;
-                    page_offset += wps;
+                if Self::write_block_pages(
+                    state,
+                    u64::from(dst_global),
+                    &buf,
+                    wps,
+                    ebs as usize,
+                )
+                .is_err()
+                {
+                    state.bad_blocks.mark_bad(dst_global_u32);
+                    let _ = state.hw.mark_bad_block(dst_global_u32);
+                    if let Some(pos) = state.block_map.free_list.iter().position(|&b| b == dst_rel)
+                    {
+                        state.block_map.free_list.swap_remove(pos);
+                    }
+                    return Ok(());
                 }
 
                 // Update the block map: remap logical block from src to dst

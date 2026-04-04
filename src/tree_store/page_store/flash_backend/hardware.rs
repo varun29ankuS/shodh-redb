@@ -57,9 +57,21 @@ impl FlashGeometry {
         journal_blocks + spare_blocks
     }
 
-    /// Number of logical blocks available for data storage after reserving FTL overhead.
+    /// Minimum number of spare data-region blocks reserved for copy-on-write
+    /// headroom. Without these, a fully-allocated device has no room to write
+    /// a new physical block before releasing the old one.
+    const COW_HEADROOM_BLOCKS: u32 = 2;
+
+    /// Number of logical blocks available for data storage after reserving
+    /// FTL overhead and COW headroom.
+    ///
+    /// The COW headroom ensures that even when all logical blocks are
+    /// allocated, `allocate_block()` can still find free physical blocks for
+    /// copy-on-write operations.
     pub fn logical_block_count(&self) -> u32 {
-        self.total_blocks.saturating_sub(self.reserved_blocks())
+        self.total_blocks
+            .saturating_sub(self.reserved_blocks())
+            .saturating_sub(Self::COW_HEADROOM_BLOCKS)
     }
 }
 

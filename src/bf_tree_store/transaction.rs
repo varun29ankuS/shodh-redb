@@ -82,13 +82,14 @@ impl BfTreeWriteTxn {
 
     /// Commit this transaction for durability.
     ///
-    /// For file-backed databases, a snapshot is taken to ensure all committed
-    /// data is durable (fsync'd to disk) before returning. The bf-tree WAL
-    /// background thread flushes asynchronously on a timer; without an explicit
-    /// snapshot, `commit()` could return before the WAL is persisted, creating a
-    /// window where a crash loses committed data.
+    /// For file-backed databases, this method takes an explicit snapshot
+    /// (fsync'd to disk) before returning, ensuring all writes from this
+    /// transaction are recoverable after a crash. The snapshot is necessary
+    /// because the bf-tree WAL background thread flushes asynchronously on
+    /// a timer; without the snapshot, a crash between commit and the next WAL
+    /// flush could lose data.
     ///
-    /// For in-memory databases, this is a no-op (no persistence).
+    /// For in-memory databases, this is a no-op (data is not persisted).
     pub fn commit(mut self) -> Result<(), BfTreeError> {
         self.committed = true;
         // Ensure durability for non-memory backends by forcing a snapshot.

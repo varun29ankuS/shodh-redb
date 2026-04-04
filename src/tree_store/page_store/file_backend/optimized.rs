@@ -149,6 +149,11 @@ fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result
     use std::os::fd::AsRawFd;
 
     while !buf.is_empty() {
+        // SAFETY: `pread` is a POSIX FFI call. The file descriptor is valid
+        // (obtained from `AsRawFd`), `buf` points to a live mutable slice of
+        // at least `min(buf.len(), ssize_t::MAX)` bytes, and `offset` is
+        // within the file. The returned byte count is validated below before
+        // advancing the buffer pointer.
         let nbytes = unsafe {
             libc::pread(
                 file.as_raw_fd(),
@@ -185,6 +190,11 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
     use std::os::fd::AsRawFd;
 
     while !buf.is_empty() {
+        // SAFETY: `pwrite` is a POSIX FFI call. The file descriptor is valid
+        // (obtained from `AsRawFd`), `buf` points to a live shared slice of at
+        // least `min(buf.len(), ssize_t::MAX)` bytes, and `offset` is a valid
+        // file position. The returned byte count is validated below before
+        // advancing the buffer pointer.
         let nbytes = unsafe {
             libc::pwrite(
                 file.as_raw_fd(),

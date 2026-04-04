@@ -128,7 +128,7 @@ pub use ivfpq::{
 };
 pub use merge::{
     BitwiseOr, BytesAppend, FloatAdd, FnMergeOperator, MergeOperator, NumericAdd, NumericMax,
-    NumericMin, merge_fn,
+    NumericMin, SaturatingAdd, merge_fn,
 };
 pub use probe_select::DiversityConfig;
 pub use temporal::HybridLogicalClock;

@@ -52,18 +52,16 @@ impl<const N: usize> Value for FixedVec<N> {
     where
         Self: 'a,
     {
-        let mut result = [0.0f32; N];
         let expected = N * core::mem::size_of::<f32>();
-        debug_assert!(
+        assert!(
             data.len() >= expected,
-            "FixedVec<{N}>::from_bytes: truncated data ({} < {expected})",
+            "FixedVec<{N}>::from_bytes: truncated data ({} < {expected}); \
+             this indicates on-disk corruption or a dimension mismatch \
+             between the table definition and stored data",
             data.len(),
         );
-        // In release mode, gracefully handle truncated data by zero-padding
-        // the remaining dimensions rather than reading out-of-bounds.
-        let usable = data.len().min(expected);
-        let dims = usable / 4;
-        for (i, val) in result.iter_mut().enumerate().take(dims) {
+        let mut result = [0.0f32; N];
+        for (i, val) in result.iter_mut().enumerate() {
             let start = i * 4;
             *val = f32::from_le_bytes([
                 data[start],

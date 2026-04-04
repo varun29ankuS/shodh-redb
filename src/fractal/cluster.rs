@@ -352,7 +352,33 @@ pub(crate) fn split_cluster<T: StorageWrite>(
         htbl.st_insert(&HierarchyKey::new(cluster_id, child_b), &())?;
     }
 
-    // 10. Convert original cluster to internal
+    // 10. Update parent centroid to weighted mean of children so that
+    // nearest-cluster lookups from ancestor nodes remain accurate.
+    {
+        let total_pop = pop_a.saturating_add(pop_b);
+        if total_pop > 0 {
+            let pop_f64 = f64::from(total_pop);
+            let mut parent_sums = Vec::with_capacity(dim);
+            for d in 0..dim {
+                parent_sums.push(sums_a[d] + sums_b[d]);
+            }
+
+            #[allow(clippy::cast_possible_truncation)] // f64→f32 precision loss acceptable for centroids
+            let centroid_bytes: Vec<u8> = parent_sums
+                .iter()
+                .map(|s| (s / pop_f64) as f32)
+                .flat_map(|f| f.to_le_bytes())
+                .collect();
+            let mut cent_tbl = txn.open_storage_table(centroids_def)?;
+            cent_tbl.st_insert(&cluster_id, &centroid_bytes.as_slice())?;
+
+            let sums_bytes: Vec<u8> = parent_sums.iter().flat_map(|f| f.to_le_bytes()).collect();
+            let mut sum_tbl = txn.open_storage_table(sums_def)?;
+            sum_tbl.st_insert(&cluster_id, &sums_bytes.as_slice())?;
+        }
+    }
+
+    // 11. Convert original cluster to internal
     {
         let mut ctbl = txn.open_storage_table(clusters_def)?;
         let meta_opt = ctbl
@@ -593,7 +619,8 @@ pub(crate) fn merge_cluster<T: StorageWrite>(
         cent_tbl.st_insert(&best_sibling, &centroid_bytes.as_slice())?;
     }
 
-    // Update sibling population
+    // Update sibling population and transfer buffer_count from the merged
+    // cluster so the cascade threshold accounts for all buffered vectors.
     {
         let mut ctbl = txn.open_storage_table(clusters_def)?;
         let sib_opt = ctbl
@@ -601,6 +628,7 @@ pub(crate) fn merge_cluster<T: StorageWrite>(
             .map(|g| ClusterMeta::from_bytes(g.value()));
         if let Some(mut sib) = sib_opt {
             sib.set_population(combined_pop);
+            sib.set_buffer_count(sib.buffer_count().saturating_add(meta.buffer_count()));
             ctbl.st_insert(&best_sibling, &sib.as_bytes().as_slice())?;
         }
     }

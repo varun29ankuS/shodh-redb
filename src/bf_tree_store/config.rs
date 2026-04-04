@@ -6,6 +6,7 @@ use std::sync::Arc;
 use bf_tree::{Config, StorageBackend, WalConfig};
 
 use super::BfTreeError;
+use super::verification::VerifyMode;
 
 /// Configuration for the Bf-Tree storage engine.
 ///
@@ -32,6 +33,12 @@ pub struct BfTreeConfig {
     pub wal_flush_interval_ms: u64,
     /// Storage backend selection.
     pub backend: BfTreeBackend,
+    /// Per-entry checksum verification mode.
+    ///
+    /// When set to `Full` or `Sampled`, values are wrapped with a 4-byte
+    /// FNV-1a checksum on write and verified on read. This adds 4 bytes of
+    /// overhead per value and a small CPU cost per read. Default: `None`.
+    pub verify_mode: VerifyMode,
 }
 
 /// Storage backend for Bf-Tree.
@@ -61,6 +68,7 @@ impl Default for BfTreeConfig {
             enable_wal: true,
             wal_flush_interval_ms: 1,
             backend: BfTreeBackend::Memory,
+            verify_mode: VerifyMode::None,
         }
     }
 }
@@ -114,6 +122,7 @@ impl BfTreeConfig {
             enable_wal: true,
             wal_flush_interval_ms: 10, // less frequent flush for embedded
             backend: BfTreeBackend::Std,
+            verify_mode: VerifyMode::None,
         }
     }
 

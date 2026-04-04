@@ -720,6 +720,10 @@ impl<V: Key> Value for &DynamicCollection<V> {
 
 impl<V: Key> DynamicCollection<V> {
     fn new(data: &[u8]) -> &Self {
+        // SAFETY: DynamicCollection<V> is #[repr(transparent)] over [u8] (with a
+        // zero-sized PhantomData<V>), so it has identical size, alignment, and
+        // memory layout. The pointer cast preserves the slice length metadata and
+        // the shared borrow lifetime is propagated to the returned reference.
         unsafe { &*(core::ptr::from_ref::<[u8]>(data) as *const DynamicCollection<V>) }
     }
 
@@ -864,6 +868,10 @@ impl UntypedDynamicCollection {
     }
 
     fn new(data: &[u8]) -> &Self {
+        // SAFETY: UntypedDynamicCollection is #[repr(transparent)] over [u8],
+        // so it has identical size, alignment, and memory layout. The pointer
+        // cast preserves the slice length metadata and the shared borrow
+        // lifetime is propagated to the returned reference.
         unsafe { &*(core::ptr::from_ref::<[u8]>(data) as *const UntypedDynamicCollection) }
     }
 

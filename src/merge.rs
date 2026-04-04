@@ -85,6 +85,69 @@ impl MergeOperator for NumericAdd {
     }
 }
 
+/// Adds two little-endian encoded **integer** values using saturating arithmetic.
+///
+/// Like [`NumericAdd`], supports 1, 2, 4, and 8-byte widths (u8/i8 through u64/i64).
+/// If the key does not exist, the operand is used as the initial value.
+///
+/// Unlike `NumericAdd`, this operator clamps at the type's maximum value instead
+/// of wrapping. For example, `u64::MAX + 1` yields `u64::MAX` (not 0).
+///
+/// If `existing` and `operand` have different byte widths, the existing value
+/// is preserved unchanged (no panic).
+#[derive(Clone, Copy)]
+pub struct SaturatingAdd;
+
+impl Debug for SaturatingAdd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SaturatingAdd")
+    }
+}
+
+impl MergeOperator for SaturatingAdd {
+    fn merge(&self, _key: &[u8], existing: Option<&[u8]>, operand: &[u8]) -> Option<Vec<u8>> {
+        let Some(existing) = existing else {
+            return Some(operand.to_vec());
+        };
+        if existing.len() != operand.len() {
+            return Some(existing.to_vec());
+        }
+        let result = match operand.len() {
+            1 => {
+                let a = existing[0];
+                let b = operand[0];
+                vec![a.saturating_add(b)]
+            }
+            2 => {
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u16::from_le_bytes(a_bytes);
+                let b = u16::from_le_bytes(b_bytes);
+                a.saturating_add(b).to_le_bytes().to_vec()
+            }
+            4 => {
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u32::from_le_bytes(a_bytes);
+                let b = u32::from_le_bytes(b_bytes);
+                a.saturating_add(b).to_le_bytes().to_vec()
+            }
+            8 => {
+                let (Ok(a_bytes), Ok(b_bytes)) = (existing.try_into(), operand.try_into()) else {
+                    return Some(existing.to_vec());
+                };
+                let a = u64::from_le_bytes(a_bytes);
+                let b = u64::from_le_bytes(b_bytes);
+                a.saturating_add(b).to_le_bytes().to_vec()
+            }
+            _ => return Some(existing.to_vec()),
+        };
+        Some(result)
+    }
+}
+
 /// Adds two little-endian encoded floating-point values.
 ///
 /// Supports 4-byte (f32) and 8-byte (f64) widths.

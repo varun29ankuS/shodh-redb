@@ -89,6 +89,7 @@ impl From<bf_tree::ScanIterError> for BfTreeError {
     }
 }
 
+#[cfg(feature = "std")]
 impl From<BfTreeError> for crate::StorageError {
     fn from(e: BfTreeError) -> Self {
         match e {
@@ -138,6 +139,51 @@ impl From<BfTreeError> for crate::StorageError {
                     std::io::ErrorKind::InvalidInput,
                     alloc::format!("bf-tree invalid config: {msg}"),
                 )))
+            }
+            BfTreeError::PartialFlushRollbackFailed {
+                flush_error,
+                rollback_failures,
+                last_rollback_error,
+            } => crate::StorageError::Corrupted(alloc::format!(
+                "bf-tree: partial flush with failed rollback ({rollback_failures} \
+                 rollback failure(s)): original: {flush_error}; last rollback error: \
+                 {last_rollback_error}"
+            )),
+        }
+    }
+}
+
+#[cfg(not(feature = "std"))]
+impl From<BfTreeError> for crate::StorageError {
+    fn from(e: BfTreeError) -> Self {
+        match e {
+            BfTreeError::NotFound => crate::StorageError::Corrupted(alloc::string::String::from(
+                "bf-tree: unexpected missing entry (internal lookup failed)",
+            )),
+            BfTreeError::Deleted => crate::StorageError::Corrupted(alloc::string::String::from(
+                "bf-tree: unexpected tombstone encountered (internal lookup failed)",
+            )),
+            BfTreeError::InvalidKV(msg) => {
+                crate::StorageError::Corrupted(alloc::format!("bf-tree: invalid key/value: {msg}"))
+            }
+            BfTreeError::InvalidKey => crate::StorageError::Corrupted(alloc::string::String::from(
+                "bf-tree: key exceeds maximum length (data inconsistency)",
+            )),
+            BfTreeError::Config(e) => {
+                crate::StorageError::Corrupted(alloc::format!("bf-tree config error: {e:?}"))
+            }
+            BfTreeError::Scan(e) => {
+                crate::StorageError::Corrupted(alloc::format!("bf-tree scan error: {e:?}"))
+            }
+            BfTreeError::Corruption(msg) => crate::StorageError::Corrupted(msg),
+            BfTreeError::InvalidOperation(msg) => {
+                crate::StorageError::Corrupted(alloc::format!("invalid operation: {msg}"))
+            }
+            BfTreeError::ReservedTableName(name) => crate::StorageError::Corrupted(alloc::format!(
+                "table name \"{name}\" uses the reserved \"__\" prefix"
+            )),
+            BfTreeError::InvalidConfig(msg) => {
+                crate::StorageError::Corrupted(alloc::format!("bf-tree invalid config: {msg}"))
             }
             BfTreeError::PartialFlushRollbackFailed {
                 flush_error,

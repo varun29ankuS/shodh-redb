@@ -22,9 +22,10 @@
 //! assert_eq!(val, Some(42));
 //! ```
 
+use crate::compat::Mutex;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use crate::cdc::types::{CdcConfig, CdcEvent, CdcKey, CdcRecord, ChangeStream};
 use crate::types::{Key, Value};
@@ -190,7 +191,7 @@ impl BfTreeDatabase {
     ///
     /// Serialized with concurrent commit operations via the snapshot lock.
     pub fn snapshot(&self) -> std::path::PathBuf {
-        let _guard = self.snapshot_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.snapshot_lock.lock();
         self.adapter.snapshot()
     }
 
@@ -493,7 +494,6 @@ impl BfTreeDatabaseWriteTxn {
             encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
         self.buffer
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .put(encoded_key, val_bytes.as_ref().to_vec())?;
         self.ops_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -510,10 +510,7 @@ impl BfTreeDatabaseWriteTxn {
         let key_bytes = K::as_bytes(key);
         let encoded_key =
             encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
-        self.buffer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .delete(encoded_key);
+        self.buffer.lock().delete(encoded_key);
         self.ops_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -532,7 +529,7 @@ impl BfTreeDatabaseWriteTxn {
 
         // Check write buffer first.
         {
-            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let buffer = self.buffer.lock();
             match buffer.get(&encoded_key) {
                 super::buffered_txn::BufferLookup::Found(v) => return Ok(Some(v)),
                 super::buffered_txn::BufferLookup::Tombstone => return Ok(None),
@@ -565,7 +562,7 @@ impl BfTreeDatabaseWriteTxn {
 
         // Check write buffer first.
         {
-            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let buffer = self.buffer.lock();
             match buffer.get(&encoded_key) {
                 super::buffered_txn::BufferLookup::Found(_) => return true,
                 super::buffered_txn::BufferLookup::Tombstone => return false,
@@ -592,8 +589,8 @@ impl BfTreeDatabaseWriteTxn {
             // interleaving with concurrent committers (issue #209). Without
             // this, Thread A's flush followed by Thread B's flush before
             // Thread A's snapshot causes Thread A to capture B's partial state.
-            let _snap_guard = self.snapshot_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let _snap_guard = self.snapshot_lock.lock();
+            let mut buffer = self.buffer.lock();
             // Stage CDC log entries into the write buffer before flushing.
             // The commit_id is allocated here (not at begin_write time) to
             // ensure CDC events are ordered by actual commit order.
@@ -624,8 +621,8 @@ impl BfTreeDatabaseWriteTxn {
     /// prevent concurrent callers from interleaving their operations.
     pub fn commit_with_snapshot(self) -> Result<std::path::PathBuf, BfTreeError> {
         let path = {
-            let _snap_guard = self.snapshot_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let _snap_guard = self.snapshot_lock.lock();
+            let mut buffer = self.buffer.lock();
             let commit_id = self.stage_cdc_into_buffer(&mut buffer)?;
             self.stage_txn_id_into_buffer(&mut buffer, commit_id)?;
             buffer.flush(&self.adapter)?;
@@ -659,13 +656,13 @@ impl BfTreeDatabaseWriteTxn {
         other: &BfTreeDatabaseWriteTxn,
     ) -> Result<(), BfTreeError> {
         let other_buffer = {
-            let mut guard = other.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = other.buffer.lock();
             core::mem::replace(&mut *guard, WriteBuffer::new())
         };
         // Mark the source as committed so its Drop impl does not discard
         // (the buffer is now empty anyway, but this is semantically correct).
         other.committed.store(true, Ordering::SeqCst);
-        let mut self_buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut self_buffer = self.buffer.lock();
         self_buffer.merge_from(other_buffer)
     }
 
@@ -677,10 +674,7 @@ impl BfTreeDatabaseWriteTxn {
         let key_bytes = name.as_bytes();
         let encoded = encode_table_key(CDC_CURSOR_TABLE_NAME, TableKind::Regular, key_bytes);
         let val_bytes = up_to_txn.to_le_bytes();
-        self.buffer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .put(encoded, val_bytes.to_vec())?;
+        self.buffer.lock().put(encoded, val_bytes.to_vec())?;
         Ok(())
     }
 
@@ -698,7 +692,7 @@ impl BfTreeDatabaseWriteTxn {
     fn stage_cdc_into_buffer(&self, buffer: &mut WriteBuffer) -> Result<Option<u64>, BfTreeError> {
         let events = match self.cdc_log {
             Some(ref log) => {
-                let mut guard = log.lock().unwrap_or_else(|e| e.into_inner());
+                let mut guard = log.lock();
                 if guard.is_empty() {
                     return Ok(None);
                 }
@@ -826,10 +820,7 @@ impl Drop for BfTreeDatabaseWriteTxn {
         // Use unwrap_or_else to recover from a poisoned mutex instead of
         // aborting the process (double-panic during unwind).
         if !self.committed.load(Ordering::SeqCst) {
-            self.buffer
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .discard();
+            self.buffer.lock().discard();
         }
     }
 }

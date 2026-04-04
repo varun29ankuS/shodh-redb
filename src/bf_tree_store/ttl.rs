@@ -14,13 +14,14 @@
 //! +-- Remaining bytes: the raw V serialized value
 //! ```
 
+use crate::compat::Mutex;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cdc::types::{CdcEvent, ChangeOp};
@@ -150,7 +151,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
     /// Record a CDC event if CDC is enabled.
     fn record_cdc(&self, event: CdcEvent) {
         if let Some(log) = self.cdc_log {
-            log.lock().unwrap().push(event);
+            log.lock().push(event);
         }
     }
 
@@ -210,7 +211,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
         let wrapped = encode_ttl_value(expires_at_ms, val_bytes.as_ref());
 
-        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buffer = self.buffer.lock();
 
         let previous_raw = self.read_raw_locked(&buffer, &encoded_key)?;
         buffer.put(encoded_key, wrapped)?;
@@ -243,7 +244,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
-        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let buffer = self.buffer.lock();
         let raw = self.read_raw_locked(&buffer, &encoded_key)?;
         drop(buffer);
 
@@ -255,7 +256,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
-        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let buffer = self.buffer.lock();
         let raw = self.read_raw_locked(&buffer, &encoded_key)?;
         drop(buffer);
 
@@ -278,7 +279,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Ttl, key_bytes.as_ref());
 
-        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buffer = self.buffer.lock();
         let previous_raw = self.read_raw_locked(&buffer, &encoded_key)?;
 
         let previous_value = Self::unwrap_if_not_expired(previous_raw, now);
@@ -335,7 +336,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
             result
         };
 
-        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buffer = self.buffer.lock();
         let mut purged = 0u64;
         // Collect CDC events for purged entries to emit after releasing the
         // buffer lock. Each entry is (user_key_bytes, old_value_bytes).

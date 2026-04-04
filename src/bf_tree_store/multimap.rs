@@ -14,12 +14,13 @@
 //! for all values of a given user key. Values within a key are inherently
 //! sorted by their byte representation (`BfTree` lexicographic order).
 
+use crate::compat::Mutex;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use crate::cdc::types::{CdcEvent, ChangeOp};
 use crate::types::Key;
@@ -185,7 +186,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
     /// Record a CDC event if CDC is enabled.
     fn record_cdc(&self, event: CdcEvent) {
         if let Some(log) = self.cdc_log {
-            log.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+            log.lock().push(event);
         }
     }
 
@@ -199,7 +200,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
         let val_key = V::as_bytes(value);
         let encoded = encode_multimap_key(&self.name, user_key.as_ref(), val_key.as_ref())?;
 
-        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buffer = self.buffer.lock();
         let already_exists = match buffer.get(&encoded) {
             BufferLookup::Found(_) => true,
             BufferLookup::Tombstone => false,
@@ -245,7 +246,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
         let val_key = V::as_bytes(value);
         let encoded = encode_multimap_key(&self.name, user_key.as_ref(), val_key.as_ref())?;
 
-        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buffer = self.buffer.lock();
         let existed = match buffer.get(&encoded) {
             BufferLookup::Found(_) => true,
             BufferLookup::Tombstone => false,
@@ -313,7 +314,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
             keys
         };
 
-        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buffer = self.buffer.lock();
         let mut count = 0u64;
 
         // Tombstone all BfTree entries.
@@ -405,7 +406,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
             keys
         };
 
-        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let buffer = self.buffer.lock();
         let mut values = Vec::new();
 
         // Process BfTree entries, checking buffer for overrides.
@@ -457,7 +458,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
         let val_key = V::as_bytes(value);
         let encoded = encode_multimap_key(&self.name, user_key.as_ref(), val_key.as_ref())?;
 
-        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let buffer = self.buffer.lock();
         match buffer.get(&encoded) {
             BufferLookup::Found(_) => Ok(true),
             BufferLookup::Tombstone => Ok(false),

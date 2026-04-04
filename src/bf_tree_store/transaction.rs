@@ -25,7 +25,7 @@
 //! requiring rollback, the caller must implement application-level compensation
 //! (e.g., delete the inserted keys).
 
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 use super::adapter::BfTreeAdapter;
 use super::error::BfTreeError;

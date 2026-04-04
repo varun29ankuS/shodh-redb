@@ -9,12 +9,13 @@
 //! - **Concurrent writes**: Multiple `BfTreeTable` handles from different transactions
 //!   can write to the same table simultaneously without blocking.
 
+use crate::compat::Mutex;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use crate::TableHandle;
 use crate::cdc::types::{CdcEvent, ChangeOp};
@@ -90,7 +91,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     /// Record a CDC event if CDC is enabled.
     fn record_cdc(&self, event: CdcEvent) {
         if let Some(log) = self.cdc_log {
-            log.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+            log.lock().push(event);
         }
     }
 
@@ -122,7 +123,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         // TOCTOU races where a concurrent writer could interleave between the
         // old-value read and the new-value write, causing stale CDC events.
         let previous = {
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.buffer.lock();
             let prev_raw = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
@@ -184,7 +185,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         // prevent TOCTOU races where a concurrent writer could insert between
         // the old-value read and the tombstone write.
         let previous = {
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.buffer.lock();
             let prev_raw = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
@@ -238,7 +239,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
         let checksumming = self.verify_mode.is_enabled();
 
-        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let buffer = self.buffer.lock();
         match buffer.get(&encoded_key) {
             BufferLookup::Found(v) => {
                 return if checksumming {
@@ -292,7 +293,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         // TOCTOU races where a concurrent merge could read the same stale
         // value, causing a classic lost-update problem.
         let (old_value, new_value) = {
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.buffer.lock();
             let existing_raw = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
@@ -359,7 +360,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
 
-        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let buffer = self.buffer.lock();
         match buffer.get(&encoded_key) {
             BufferLookup::Found(_) => return true,
             BufferLookup::Tombstone => return false,
@@ -632,7 +633,7 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     let max_record_size = adapter.inner().config().get_cb_max_record_size();
 
     // Collect buffer entries for this range (prefix-stripped keys).
-    let buf = buffer_mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let buf = buffer_mutex.lock();
     let buf_entries =
         collect_buffer_entries_for_table(&buf, name, TableKind::Regular, &scan_start, &scan_end);
     drop(buf);
@@ -731,7 +732,7 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
                 keys
             };
 
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.buffer.lock();
             let pass_count = buffer.drain_table(&bftree_encoded_keys, &prefix, &prefix_end);
             drop(buffer);
 

@@ -18,11 +18,11 @@
 //! | `__bf_blob_ns` | NamespaceKey (80B) | empty |
 //! | `__bf_blob_seq` | "next_seq" | u64 LE |
 
+use crate::compat::Mutex;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicU64;
-use std::collections::VecDeque;
-use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
@@ -138,7 +138,7 @@ fn read_raw_buffered(
     encoded_key: &[u8],
 ) -> Result<Option<Vec<u8>>, BfTreeError> {
     use super::buffered_txn::BufferLookup;
-    let buf_guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
+    let buf_guard = buffer.lock();
     match buf_guard.get(encoded_key) {
         BufferLookup::Found(v) => Ok(Some(v)),
         BufferLookup::Tombstone => Ok(None),
@@ -187,7 +187,7 @@ fn scan_range_buffered(
     }
 
     // Overlay buffer entries (inserts override, tombstones remove).
-    let buf_guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
+    let buf_guard = buffer.lock();
     for (key, value) in buf_guard.range(start, end) {
         match value {
             Some(v) => {
@@ -215,7 +215,7 @@ fn next_sequence(buffer: &Mutex<WriteBuffer>, adapter: &BfTreeAdapter) -> Result
     use super::buffered_txn::BufferLookup;
 
     let seq_key = encode_seq_key();
-    let mut buf_guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
+    let mut buf_guard = buffer.lock();
 
     // Read current value from buffer first, then BfTree.
     let current = match buf_guard.get(&seq_key) {
@@ -310,7 +310,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
     /// Record a CDC event if CDC is enabled.
     fn record_cdc(&self, event: crate::cdc::types::CdcEvent) {
         if let Some(log) = self.cdc_log {
-            log.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+            log.lock().push(event);
         }
     }
 
@@ -495,7 +495,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         };
 
         {
-            let mut buf = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buf = self.buffer.lock();
             for chunk_idx in 0..num_chunks {
                 let chunk_key =
                     encode_chunk_key(blob_id, u32::try_from(chunk_idx).unwrap_or(u32::MAX));
@@ -776,10 +776,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                     if meta.is_none() {
                         // Target blob no longer exists -- remove the stale
                         // dedup entry so future lookups skip it.
-                        self.buffer
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .delete(key);
+                        self.buffer.lock().delete(key);
                         return Ok(None);
                     }
 
@@ -791,10 +788,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                     if meta.blob_ref.checksum != dedup.checksum {
                         // Checksum mismatch -- the dedup entry is inconsistent.
                         // Remove the stale entry and fall through to non-dedup path.
-                        self.buffer
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .delete(key);
+                        self.buffer.lock().delete(key);
                         return Ok(None);
                     }
 
@@ -828,10 +822,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                     Vec::with_capacity(DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE);
                 val.extend_from_slice(&dedup.to_le_bytes());
                 val.extend_from_slice(&blob_id_bytes);
-                self.buffer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .put(key, val)?;
+                self.buffer.lock().put(key, val)?;
                 Ok(())
             }
             _ => Ok(()),
@@ -1167,7 +1158,7 @@ impl BfTreeBlobWriter<'_, '_> {
             );
 
             // Write metadata only (data is shared via dedup).
-            let mut buf = self.store.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buf = self.store.buffer.lock();
             buf.put(encode_meta_key(blob_id), meta.to_le_bytes().to_vec())?;
 
             // Copy chunk references from existing blob.
@@ -1187,7 +1178,7 @@ impl BfTreeBlobWriter<'_, '_> {
 
         // Write all chunks to the buffer.
         {
-            let mut buf = self.store.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buf = self.store.buffer.lock();
             for (idx, chunk) in self.chunks.iter().enumerate() {
                 let chunk_key = encode_chunk_key(blob_id, u32::try_from(idx).unwrap_or(u32::MAX));
                 buf.put(chunk_key, chunk.clone())?;
@@ -1217,7 +1208,7 @@ impl BfTreeBlobWriter<'_, '_> {
         );
 
         {
-            let mut buf = self.store.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buf = self.store.buffer.lock();
             buf.put(encode_meta_key(blob_id), meta.to_le_bytes().to_vec())?;
         }
 
@@ -1235,7 +1226,6 @@ impl BfTreeBlobWriter<'_, '_> {
             self.store
                 .buffer
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
                 .put(encode_dedup_key(&sha256_key), val)?;
         }
 
@@ -1269,7 +1259,7 @@ impl BfTreeBlobWriter<'_, '_> {
             // Hold the buffer lock for the entire read + write cycle to
             // eliminate the TOCTOU gap between reading source chunks and
             // writing destination refs.
-            let mut buf_guard = self.store.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buf_guard = self.store.buffer.lock();
             for idx in 0..num_chunks {
                 let idx_u32 = u32::try_from(idx).unwrap_or(u32::MAX);
                 let src_key = encode_chunk_key(existing_id, idx_u32);
@@ -1308,7 +1298,7 @@ impl BfTreeBlobWriter<'_, '_> {
         meta: &BlobMeta,
         _sha256_key: &Sha256Key,
     ) -> Result<(), BfTreeError> {
-        let mut buf = self.store.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = self.store.buffer.lock();
 
         // Temporal index.
         let tk = TemporalKey {

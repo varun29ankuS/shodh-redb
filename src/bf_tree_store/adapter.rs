@@ -1,6 +1,6 @@
 //! Core adapter bridging bf-tree's concurrent B+tree to shodh-redb's storage layer.
 
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 use bf_tree::{BfTree, LeafInsertResult, LeafReadResult, ScanIter, ScanReturnField};
 

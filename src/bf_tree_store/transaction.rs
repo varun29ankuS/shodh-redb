@@ -82,12 +82,19 @@ impl BfTreeWriteTxn {
 
     /// Commit this transaction for durability.
     ///
-    /// With WAL enabled, this is a no-op (WAL flush thread handles durability).
-    /// Without WAL, this triggers a full snapshot to ensure crash recovery.
+    /// For file-backed databases, a snapshot is taken to ensure all committed
+    /// data is durable (fsync'd to disk) before returning. The bf-tree WAL
+    /// background thread flushes asynchronously on a timer; without an explicit
+    /// snapshot, `commit()` could return before the WAL is persisted, creating a
+    /// window where a crash loses committed data.
+    ///
+    /// For in-memory databases, this is a no-op (no persistence).
     pub fn commit(mut self) -> Result<(), BfTreeError> {
         self.committed = true;
-        // WAL handles durability automatically via background flush.
-        // For explicit durability guarantee, caller can use snapshot().
+        // Ensure durability for non-memory backends by forcing a snapshot.
+        if !self.adapter.inner().config().is_memory_backend() {
+            self.adapter.snapshot();
+        }
         Ok(())
     }
 

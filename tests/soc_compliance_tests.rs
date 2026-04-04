@@ -3668,8 +3668,8 @@ fn blob_id_new_and_fields() {
 #[test]
 fn blob_id_roundtrip() {
     let id = shodh_redb::BlobId::new(u64::MAX, u64::MAX);
-    let bytes = id.to_le_bytes();
-    let recovered = shodh_redb::BlobId::from_le_bytes(bytes);
+    let bytes = id.to_be_bytes();
+    let recovered = shodh_redb::BlobId::from_be_bytes(bytes);
     assert_eq!(recovered.sequence, u64::MAX);
     assert_eq!(recovered.content_prefix_hash, u64::MAX);
 }
@@ -3710,9 +3710,9 @@ fn blob_id_serialized_size() {
 #[test]
 fn blob_id_zero_roundtrip() {
     let id = shodh_redb::BlobId::new(0, 0);
-    let bytes = id.to_le_bytes();
+    let bytes = id.to_be_bytes();
     assert_eq!(bytes, [0u8; 16]);
-    let recovered = shodh_redb::BlobId::from_le_bytes(bytes);
+    let recovered = shodh_redb::BlobId::from_be_bytes(bytes);
     assert_eq!(recovered, id);
 }
 
@@ -3963,8 +3963,8 @@ fn causal_edge_key_roundtrip() {
     let parent = shodh_redb::BlobId::new(1, 2);
     let child = shodh_redb::BlobId::new(3, 4);
     let key = CausalEdgeKey::new(parent, child);
-    let bytes = key.to_le_bytes();
-    let recovered = CausalEdgeKey::from_le_bytes(bytes);
+    let bytes = key.to_be_bytes();
+    let recovered = CausalEdgeKey::from_be_bytes(bytes);
     assert_eq!(recovered.parent.sequence, 1);
     assert_eq!(recovered.child.sequence, 3);
 }
@@ -3983,8 +3983,8 @@ fn tag_key_roundtrip() {
     use shodh_redb::blob_store::TagKey;
     let blob_id = shodh_redb::BlobId::new(42, 99);
     let tk = TagKey::new("sensor-data", blob_id);
-    let bytes = tk.to_le_bytes();
-    let recovered = TagKey::from_le_bytes(bytes);
+    let bytes = tk.to_be_bytes();
+    let recovered = TagKey::from_be_bytes(bytes);
     assert_eq!(recovered.tag_str(), "sensor-data");
     assert_eq!(recovered.blob_id.sequence, 42);
 }
@@ -4021,8 +4021,8 @@ fn namespace_key_roundtrip() {
     use shodh_redb::blob_store::NamespaceKey;
     let blob_id = shodh_redb::BlobId::new(7, 8);
     let nk = NamespaceKey::new("prod-session", blob_id);
-    let bytes = nk.to_le_bytes();
-    let recovered = NamespaceKey::from_le_bytes(bytes);
+    let bytes = nk.to_be_bytes();
+    let recovered = NamespaceKey::from_be_bytes(bytes);
     assert_eq!(recovered.namespace_str(), "prod-session");
     assert_eq!(recovered.blob_id.sequence, 7);
 }
@@ -4074,8 +4074,8 @@ fn temporal_key_roundtrip() {
     let hlc = shodh_redb::HybridLogicalClock::from_parts(500, 3);
     let blob_id = shodh_redb::BlobId::new(10, 20);
     let tk = TemporalKey::new(1_000_000, hlc, blob_id);
-    let bytes = tk.to_le_bytes();
-    let recovered = TemporalKey::from_le_bytes(bytes);
+    let bytes = tk.to_be_bytes();
+    let recovered = TemporalKey::from_be_bytes(bytes);
     assert_eq!(recovered.wall_clock_ns, 1_000_000);
     assert_eq!(recovered.hlc.physical_ms(), 500);
     assert_eq!(recovered.blob_id.sequence, 10);
@@ -6814,8 +6814,8 @@ fn blob_id_copy() {
 #[test]
 fn blob_id_sequence_zero() {
     let id = shodh_redb::BlobId::new(0, 12345);
-    let bytes = id.to_le_bytes();
-    let recovered = shodh_redb::BlobId::from_le_bytes(bytes);
+    let bytes = id.to_be_bytes();
+    let recovered = shodh_redb::BlobId::from_be_bytes(bytes);
     assert_eq!(recovered.sequence, 0);
     assert_eq!(recovered.content_prefix_hash, 12345);
 }
@@ -7205,7 +7205,7 @@ fn temporal_key_zero() {
         shodh_redb::HybridLogicalClock::ZERO,
         shodh_redb::BlobId::MIN,
     );
-    let bytes = tk.to_le_bytes();
+    let bytes = tk.to_be_bytes();
     assert_eq!(bytes, [0u8; 32]);
 }
 

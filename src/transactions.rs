@@ -320,17 +320,18 @@ impl Value for TransactionIdWithPagination {
         Some(2 * size_of::<u64>())
     }
 
+    #[allow(clippy::big_endian_bytes)]
     fn from_bytes<'a>(data: &'a [u8]) -> Self
     where
         Self: 'a,
     {
         let transaction_id = data[..size_of::<u64>()]
             .try_into()
-            .map(u64::from_le_bytes)
+            .map(u64::from_be_bytes)
             .unwrap_or(0);
         let pagination_id = data[size_of::<u64>()..]
             .try_into()
-            .map(u64::from_le_bytes)
+            .map(u64::from_be_bytes)
             .unwrap_or(0);
         Self {
             transaction_id,
@@ -338,13 +339,14 @@ impl Value for TransactionIdWithPagination {
         }
     }
 
+    #[allow(clippy::big_endian_bytes)]
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 2 * size_of::<u64>()]
     where
         Self: 'b,
     {
         let mut result = [0u8; 2 * size_of::<u64>()];
-        result[..size_of::<u64>()].copy_from_slice(&value.transaction_id.to_le_bytes());
-        result[size_of::<u64>()..].copy_from_slice(&value.pagination_id.to_le_bytes());
+        result[..size_of::<u64>()].copy_from_slice(&value.transaction_id.to_be_bytes());
+        result[size_of::<u64>()..].copy_from_slice(&value.pagination_id.to_be_bytes());
         result
     }
 
@@ -355,14 +357,11 @@ impl Value for TransactionIdWithPagination {
 
 impl Key for TransactionIdWithPagination {
     fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
-        let value1 = Self::from_bytes(data1);
-        let value2 = Self::from_bytes(data2);
-
-        match value1.transaction_id.cmp(&value2.transaction_id) {
-            core::cmp::Ordering::Greater => core::cmp::Ordering::Greater,
-            core::cmp::Ordering::Equal => value1.pagination_id.cmp(&value2.pagination_id),
-            core::cmp::Ordering::Less => core::cmp::Ordering::Less,
-        }
+        // Big-endian serialization means raw byte comparison is correct.
+        let len = (2 * size_of::<u64>()).min(data1.len()).min(data2.len());
+        data1[..len]
+            .cmp(&data2[..len])
+            .then_with(|| data1.len().cmp(&data2.len()))
     }
 }
 

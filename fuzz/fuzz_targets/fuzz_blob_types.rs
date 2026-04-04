@@ -9,7 +9,7 @@ use redb::{Key, Value};
 enum FuzzOp {
     /// BlobId Value::from_bytes with arbitrary (possibly truncated) data.
     BlobIdFromBytes { data: Vec<u8> },
-    /// BlobId roundtrip: construct -> to_le_bytes -> from_le_bytes.
+    /// BlobId roundtrip: construct -> to_be_bytes -> from_be_bytes.
     BlobIdRoundtrip { sequence: u64, hash: u64 },
     /// BlobId Key::compare ordering consistency.
     BlobIdCompare {
@@ -44,8 +44,8 @@ fuzz_target!(|op: FuzzOp| {
 
         FuzzOp::BlobIdRoundtrip { sequence, hash } => {
             let id = BlobId::new(sequence, hash);
-            let bytes = id.to_le_bytes();
-            let restored = BlobId::from_le_bytes(bytes);
+            let bytes = id.to_be_bytes();
+            let restored = BlobId::from_be_bytes(bytes);
             assert_eq!(restored.sequence, id.sequence);
             assert_eq!(restored.content_prefix_hash, id.content_prefix_hash);
 

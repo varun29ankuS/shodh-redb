@@ -57,19 +57,37 @@ impl From<bf_tree::ScanIterError> for BfTreeError {
 impl From<BfTreeError> for crate::StorageError {
     fn from(e: BfTreeError) -> Self {
         match e {
-            BfTreeError::NotFound | BfTreeError::Deleted => {
-                crate::StorageError::Corrupted(alloc::format!("bf-tree: {e}"))
+            // NotFound/Deleted should only escape the bf_tree_store layer when
+            // internal lookups fail unexpectedly (e.g., missing blob metadata or
+            // snapshot entries that should exist). This indicates data inconsistency.
+            BfTreeError::NotFound => crate::StorageError::Corrupted(alloc::string::String::from(
+                "bf-tree: unexpected missing entry (internal lookup failed)",
+            )),
+            BfTreeError::Deleted => crate::StorageError::Corrupted(alloc::string::String::from(
+                "bf-tree: unexpected tombstone encountered (internal lookup failed)",
+            )),
+            // InvalidKV covers both value-too-large and other validation errors
+            // (empty key, CDC serialization). Map to Corrupted with the original
+            // message to preserve diagnostic context.
+            BfTreeError::InvalidKV(msg) => {
+                crate::StorageError::Corrupted(alloc::format!("bf-tree: invalid key/value: {msg}"))
             }
-            BfTreeError::InvalidKV(msg) => crate::StorageError::ValueTooLarge(msg.len()),
-            BfTreeError::InvalidKey => {
-                crate::StorageError::Corrupted(alloc::string::String::from("bf-tree: invalid key"))
-            }
+            // InvalidKey from LeafReadResult means the B-tree node contains a key
+            // that violates size constraints -- this is data-level inconsistency.
+            BfTreeError::InvalidKey => crate::StorageError::Corrupted(alloc::string::String::from(
+                "bf-tree: key exceeds maximum length (data inconsistency)",
+            )),
+            // Config errors are startup/initialization failures, not data corruption.
             BfTreeError::Config(e) => {
-                crate::StorageError::Corrupted(alloc::format!("bf-tree config error: {e:?}"))
+                crate::StorageError::Io(crate::BackendError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    alloc::format!("bf-tree config error: {e:?}"),
+                )))
             }
-            BfTreeError::Scan(e) => {
-                crate::StorageError::Corrupted(alloc::format!("bf-tree scan error: {e:?}"))
-            }
+            // Scan errors originate from the storage/IO layer during iteration.
+            BfTreeError::Scan(e) => crate::StorageError::Io(crate::BackendError::Io(
+                std::io::Error::other(alloc::format!("bf-tree scan error: {e:?}")),
+            )),
             BfTreeError::Corruption(msg) => crate::StorageError::Corrupted(msg),
             BfTreeError::InvalidOperation(msg) => {
                 crate::StorageError::Corrupted(alloc::format!("invalid operation: {msg}"))

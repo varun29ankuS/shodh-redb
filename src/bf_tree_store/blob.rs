@@ -34,7 +34,7 @@ use crate::temporal::HybridLogicalClock;
 
 use super::adapter::BfTreeAdapter;
 use super::buffered_txn::WriteBuffer;
-use super::database::{encode_table_key, table_prefix, table_prefix_end};
+use super::database::{TableKind, encode_table_key, table_prefix, table_prefix_end};
 use super::error::BfTreeError;
 
 // ---------------------------------------------------------------------------
@@ -75,44 +75,45 @@ const MAX_TAGS: usize = 8;
 /// Encode a blob data chunk key: `[table_prefix][blob_id (16B)][chunk_idx (4B LE)]`.
 fn encode_chunk_key(blob_id: BlobId, chunk_idx: u32) -> Vec<u8> {
     let mut key_bytes = Vec::with_capacity(BlobId::SERIALIZED_SIZE + 4);
-    key_bytes.extend_from_slice(&blob_id.to_le_bytes());
-    key_bytes.extend_from_slice(&chunk_idx.to_le_bytes());
-    encode_table_key(BLOB_DATA_TABLE, &key_bytes)
+    key_bytes.extend_from_slice(&blob_id.to_be_bytes());
+    #[allow(clippy::big_endian_bytes)]
+    key_bytes.extend_from_slice(&chunk_idx.to_be_bytes());
+    encode_table_key(BLOB_DATA_TABLE, TableKind::Regular, &key_bytes)
 }
 
 /// Encode a blob metadata key.
 fn encode_meta_key(blob_id: BlobId) -> Vec<u8> {
-    encode_table_key(BLOB_META_TABLE, &blob_id.to_le_bytes())
+    encode_table_key(BLOB_META_TABLE, TableKind::Regular, &blob_id.to_be_bytes())
 }
 
 /// Encode a dedup index key.
 fn encode_dedup_key(sha256: &Sha256Key) -> Vec<u8> {
-    encode_table_key(BLOB_DEDUP_TABLE, &sha256.0)
+    encode_table_key(BLOB_DEDUP_TABLE, TableKind::Regular, &sha256.0)
 }
 
 /// Encode a temporal index key.
 fn encode_temporal_key(tk: &TemporalKey) -> Vec<u8> {
-    encode_table_key(BLOB_TEMPORAL_TABLE, &tk.to_le_bytes())
+    encode_table_key(BLOB_TEMPORAL_TABLE, TableKind::Regular, &tk.to_be_bytes())
 }
 
 /// Encode a causal edge key.
 fn encode_causal_key(cek: &CausalEdgeKey) -> Vec<u8> {
-    encode_table_key(BLOB_CAUSAL_TABLE, &cek.to_le_bytes())
+    encode_table_key(BLOB_CAUSAL_TABLE, TableKind::Regular, &cek.to_be_bytes())
 }
 
 /// Encode a tag index key.
 fn encode_tag_key(tk: &TagKey) -> Vec<u8> {
-    encode_table_key(BLOB_TAG_TABLE, &tk.to_le_bytes())
+    encode_table_key(BLOB_TAG_TABLE, TableKind::Regular, &tk.to_be_bytes())
 }
 
 /// Encode a namespace index key.
 fn encode_ns_key(nk: &NamespaceKey) -> Vec<u8> {
-    encode_table_key(BLOB_NS_TABLE, &nk.to_le_bytes())
+    encode_table_key(BLOB_NS_TABLE, TableKind::Regular, &nk.to_be_bytes())
 }
 
 /// Encode the sequence counter key.
 fn encode_seq_key() -> Vec<u8> {
-    encode_table_key(BLOB_SEQ_TABLE, SEQ_KEY)
+    encode_table_key(BLOB_SEQ_TABLE, TableKind::Regular, SEQ_KEY)
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +138,7 @@ fn read_raw_buffered(
     encoded_key: &[u8],
 ) -> Result<Option<Vec<u8>>, BfTreeError> {
     use super::buffered_txn::BufferLookup;
-    let buf_guard = buffer.lock().unwrap();
+    let buf_guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
     match buf_guard.get(encoded_key) {
         BufferLookup::Found(v) => Ok(Some(v)),
         BufferLookup::Tombstone => Ok(None),
@@ -186,7 +187,7 @@ fn scan_range_buffered(
     }
 
     // Overlay buffer entries (inserts override, tombstones remove).
-    let buf_guard = buffer.lock().unwrap();
+    let buf_guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
     for (key, value) in buf_guard.range(start, end) {
         match value {
             Some(v) => {
@@ -214,7 +215,7 @@ fn next_sequence(buffer: &Mutex<WriteBuffer>, adapter: &BfTreeAdapter) -> Result
     use super::buffered_txn::BufferLookup;
 
     let seq_key = encode_seq_key();
-    let mut buf_guard = buffer.lock().unwrap();
+    let mut buf_guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
 
     // Read current value from buffer first, then BfTree.
     let current = match buf_guard.get(&seq_key) {
@@ -232,7 +233,7 @@ fn next_sequence(buffer: &Mutex<WriteBuffer>, adapter: &BfTreeAdapter) -> Result
         _ => 1,
     };
     let next = seq.saturating_add(1);
-    buf_guard.put(seq_key, next.to_le_bytes().to_vec());
+    buf_guard.put(seq_key, next.to_le_bytes().to_vec())?;
     drop(buf_guard);
     Ok(seq)
 }
@@ -452,7 +453,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         };
 
         {
-            let mut buf = self.buffer.lock().unwrap();
+            let mut buf = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             for chunk_idx in 0..num_chunks {
                 let chunk_key =
                     encode_chunk_key(blob_id, u32::try_from(chunk_idx).unwrap_or(u32::MAX));
@@ -474,11 +475,11 @@ impl<'txn> BfTreeBlobStore<'txn> {
             if let Some(ref sha256) = dedup_sha256 {
                 let dedup_key = encode_dedup_key(sha256);
                 if let super::buffered_txn::BufferLookup::Found(bytes) = buf.get(&dedup_key) {
-                    Self::apply_dedup_decrement(&mut buf, &dedup_key, &bytes);
+                    Self::apply_dedup_decrement(&mut buf, &dedup_key, &bytes)?;
                 } else {
                     // Check BfTree directly (already inside buf lock, safe to read BfTree).
                     if let Ok(Some(bytes)) = read_raw(self.adapter, &dedup_key) {
-                        Self::apply_dedup_decrement(&mut buf, &dedup_key, &bytes);
+                        Self::apply_dedup_decrement(&mut buf, &dedup_key, &bytes)?;
                     }
                 }
             }
@@ -499,7 +500,11 @@ impl<'txn> BfTreeBlobStore<'txn> {
     }
 
     /// Decrement a dedup entry's ref-count, removing it entirely if it reaches zero.
-    fn apply_dedup_decrement(buf: &mut WriteBuffer, dedup_key: &[u8], bytes: &[u8]) {
+    fn apply_dedup_decrement(
+        buf: &mut WriteBuffer,
+        dedup_key: &[u8],
+        bytes: &[u8],
+    ) -> Result<(), BfTreeError> {
         if bytes.len() >= DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE {
             let mut arr = [0u8; DedupVal::SERIALIZED_SIZE];
             arr.copy_from_slice(&bytes[..DedupVal::SERIALIZED_SIZE]);
@@ -516,17 +521,18 @@ impl<'txn> BfTreeBlobStore<'txn> {
                     Vec::with_capacity(DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE);
                 val.extend_from_slice(&dedup.to_le_bytes());
                 val.extend_from_slice(blob_id_bytes);
-                buf.put(dedup_key.to_vec(), val);
+                buf.put(dedup_key.to_vec(), val)?;
             }
         }
+        Ok(())
     }
 
     /// List all blobs in temporal order (newest first).
     ///
     /// Buffer-aware: sees blobs stored in the current transaction before commit.
     pub fn list_temporal(&self, limit: usize) -> Result<Vec<(BlobId, BlobMeta)>, BfTreeError> {
-        let prefix = table_prefix(BLOB_META_TABLE);
-        let prefix_end = table_prefix_end(BLOB_META_TABLE);
+        let prefix = table_prefix(BLOB_META_TABLE, TableKind::Regular);
+        let prefix_end = table_prefix_end(BLOB_META_TABLE, TableKind::Regular);
         let prefix_len = prefix.len();
 
         let entries =
@@ -541,7 +547,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 && val_bytes.len() >= BlobMeta::SERIALIZED_SIZE
             {
                 let blob_id =
-                    BlobId::from_le_bytes(key_bytes[..BlobId::SERIALIZED_SIZE].try_into().unwrap());
+                    BlobId::from_be_bytes(key_bytes[..BlobId::SERIALIZED_SIZE].try_into().unwrap());
                 let mut meta_arr = [0u8; BlobMeta::SERIALIZED_SIZE];
                 meta_arr.copy_from_slice(&val_bytes[..BlobMeta::SERIALIZED_SIZE]);
                 let meta = BlobMeta::from_le_bytes(meta_arr);
@@ -564,7 +570,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let end = TagKey::range_end(tag);
         let start_encoded = encode_tag_key(&start);
         let end_encoded = encode_tag_key(&end);
-        let prefix_len = table_prefix(BLOB_TAG_TABLE).len();
+        let prefix_len = table_prefix(BLOB_TAG_TABLE, TableKind::Regular).len();
 
         let entries = scan_range_buffered(
             self.buffer,
@@ -578,7 +584,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         for (key_bytes, _) in &entries {
             if key_bytes.len() >= TagKey::SERIALIZED_SIZE {
                 let tk =
-                    TagKey::from_le_bytes(key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap());
+                    TagKey::from_be_bytes(key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap());
                 results.push(tk.blob_id);
             }
         }
@@ -593,7 +599,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let end = NamespaceKey::range_end(namespace);
         let start_encoded = encode_ns_key(&start);
         let end_encoded = encode_ns_key(&end);
-        let prefix_len = table_prefix(BLOB_NS_TABLE).len();
+        let prefix_len = table_prefix(BLOB_NS_TABLE, TableKind::Regular).len();
 
         let entries = scan_range_buffered(
             self.buffer,
@@ -606,7 +612,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let mut results = Vec::new();
         for (key_bytes, _) in &entries {
             if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
-                let nk = NamespaceKey::from_le_bytes(
+                let nk = NamespaceKey::from_be_bytes(
                     key_bytes[..NamespaceKey::SERIALIZED_SIZE]
                         .try_into()
                         .unwrap(),
@@ -625,7 +631,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let end = CausalEdgeKey::new(parent, BlobId::MAX);
         let start_encoded = encode_causal_key(&start);
         let end_encoded = encode_causal_key(&end);
-        let prefix_len = table_prefix(BLOB_CAUSAL_TABLE).len();
+        let prefix_len = table_prefix(BLOB_CAUSAL_TABLE, TableKind::Regular).len();
 
         let entries = scan_range_buffered(
             self.buffer,
@@ -695,7 +701,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 if bytes.len() >= DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE {
                     let blob_id_bytes = &bytes[DedupVal::SERIALIZED_SIZE
                         ..DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE];
-                    let blob_id = BlobId::from_le_bytes(blob_id_bytes.try_into().unwrap());
+                    let blob_id = BlobId::from_be_bytes(blob_id_bytes.try_into().unwrap());
                     Ok(Some(blob_id))
                 } else {
                     Ok(None)
@@ -726,7 +732,10 @@ impl<'txn> BfTreeBlobStore<'txn> {
                     Vec::with_capacity(DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE);
                 val.extend_from_slice(&dedup.to_le_bytes());
                 val.extend_from_slice(&blob_id_bytes);
-                self.buffer.lock().unwrap().put(key, val);
+                self.buffer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .put(key, val)?;
                 Ok(())
             }
             _ => Ok(()),
@@ -738,8 +747,8 @@ impl<'txn> BfTreeBlobStore<'txn> {
     // -----------------------------------------------------------------------
 
     fn delete_tags_for_blob(&self, buf: &mut WriteBuffer, blob_id: BlobId) {
-        let prefix = table_prefix(BLOB_TAG_TABLE);
-        let prefix_end = table_prefix_end(BLOB_TAG_TABLE);
+        let prefix = table_prefix(BLOB_TAG_TABLE, TableKind::Regular);
+        let prefix_end = table_prefix_end(BLOB_TAG_TABLE, TableKind::Regular);
         let prefix_len = prefix.len();
 
         // Scan committed BfTree entries.
@@ -757,7 +766,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 }
                 let key_bytes = &scan_buf[prefix_len..key_len];
                 if key_bytes.len() >= TagKey::SERIALIZED_SIZE {
-                    let tk = TagKey::from_le_bytes(
+                    let tk = TagKey::from_be_bytes(
                         key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap(),
                     );
                     if tk.blob_id == blob_id {
@@ -775,7 +784,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
             if key.len() > prefix_len {
                 let key_bytes = &key[prefix_len..];
                 if key_bytes.len() >= TagKey::SERIALIZED_SIZE {
-                    let tk = TagKey::from_le_bytes(
+                    let tk = TagKey::from_be_bytes(
                         key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap(),
                     );
                     if tk.blob_id == blob_id && !keys_to_delete.contains(key) {
@@ -791,8 +800,8 @@ impl<'txn> BfTreeBlobStore<'txn> {
     }
 
     fn delete_ns_for_blob(&self, buf: &mut WriteBuffer, blob_id: BlobId) {
-        let prefix = table_prefix(BLOB_NS_TABLE);
-        let prefix_end = table_prefix_end(BLOB_NS_TABLE);
+        let prefix = table_prefix(BLOB_NS_TABLE, TableKind::Regular);
+        let prefix_end = table_prefix_end(BLOB_NS_TABLE, TableKind::Regular);
         let prefix_len = prefix.len();
 
         // Scan committed BfTree entries.
@@ -810,7 +819,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 }
                 let key_bytes = &scan_buf[prefix_len..key_len];
                 if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
-                    let nk = NamespaceKey::from_le_bytes(
+                    let nk = NamespaceKey::from_be_bytes(
                         key_bytes[..NamespaceKey::SERIALIZED_SIZE]
                             .try_into()
                             .unwrap(),
@@ -830,7 +839,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
             if key.len() > prefix_len {
                 let key_bytes = &key[prefix_len..];
                 if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
-                    let nk = NamespaceKey::from_le_bytes(
+                    let nk = NamespaceKey::from_be_bytes(
                         key_bytes[..NamespaceKey::SERIALIZED_SIZE]
                             .try_into()
                             .unwrap(),
@@ -1001,8 +1010,8 @@ impl BfTreeBlobWriter<'_, '_> {
             );
 
             // Write metadata only (data is shared via dedup).
-            let mut buf = self.store.buffer.lock().unwrap();
-            buf.put(encode_meta_key(blob_id), meta.to_le_bytes().to_vec());
+            let mut buf = self.store.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            buf.put(encode_meta_key(blob_id), meta.to_le_bytes().to_vec())?;
 
             // Copy chunk references from existing blob.
             drop(buf);
@@ -1021,10 +1030,10 @@ impl BfTreeBlobWriter<'_, '_> {
 
         // Write all chunks to the buffer.
         {
-            let mut buf = self.store.buffer.lock().unwrap();
+            let mut buf = self.store.buffer.lock().unwrap_or_else(|e| e.into_inner());
             for (idx, chunk) in self.chunks.iter().enumerate() {
                 let chunk_key = encode_chunk_key(blob_id, u32::try_from(idx).unwrap_or(u32::MAX));
-                buf.put(chunk_key, chunk.clone());
+                buf.put(chunk_key, chunk.clone())?;
             }
         }
 
@@ -1051,8 +1060,8 @@ impl BfTreeBlobWriter<'_, '_> {
         );
 
         {
-            let mut buf = self.store.buffer.lock().unwrap();
-            buf.put(encode_meta_key(blob_id), meta.to_le_bytes().to_vec());
+            let mut buf = self.store.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            buf.put(encode_meta_key(blob_id), meta.to_le_bytes().to_vec())?;
         }
 
         // Write dedup entry.
@@ -1065,12 +1074,12 @@ impl BfTreeBlobWriter<'_, '_> {
             };
             let mut val = Vec::with_capacity(DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE);
             val.extend_from_slice(&dedup_val.to_le_bytes());
-            val.extend_from_slice(&blob_id.to_le_bytes());
+            val.extend_from_slice(&blob_id.to_be_bytes());
             self.store
                 .buffer
                 .lock()
-                .unwrap()
-                .put(encode_dedup_key(&sha256_key), val);
+                .unwrap_or_else(|e| e.into_inner())
+                .put(encode_dedup_key(&sha256_key), val)?;
         }
 
         // Write index entries.
@@ -1103,7 +1112,7 @@ impl BfTreeBlobWriter<'_, '_> {
             // Hold the buffer lock for the entire read + write cycle to
             // eliminate the TOCTOU gap between reading source chunks and
             // writing destination refs.
-            let mut buf_guard = self.store.buffer.lock().unwrap();
+            let mut buf_guard = self.store.buffer.lock().unwrap_or_else(|e| e.into_inner());
             for idx in 0..num_chunks {
                 let idx_u32 = u32::try_from(idx).unwrap_or(u32::MAX);
                 let src_key = encode_chunk_key(existing_id, idx_u32);
@@ -1118,7 +1127,7 @@ impl BfTreeBlobWriter<'_, '_> {
                 };
                 if let Some(bytes) = chunk_bytes {
                     let dst_key = encode_chunk_key(new_id, idx_u32);
-                    buf_guard.put(dst_key, bytes);
+                    buf_guard.put(dst_key, bytes)?;
                 }
             }
         }
@@ -1132,7 +1141,7 @@ impl BfTreeBlobWriter<'_, '_> {
         meta: &BlobMeta,
         _sha256_key: &Sha256Key,
     ) -> Result<(), BfTreeError> {
-        let mut buf = self.store.buffer.lock().unwrap();
+        let mut buf = self.store.buffer.lock().unwrap_or_else(|e| e.into_inner());
 
         // Temporal index.
         let tk = TemporalKey {
@@ -1140,26 +1149,26 @@ impl BfTreeBlobWriter<'_, '_> {
             hlc: HybridLogicalClock::from_raw(meta.hlc),
             blob_id,
         };
-        buf.put(encode_temporal_key(&tk), alloc::vec![0u8]);
+        buf.put(encode_temporal_key(&tk), alloc::vec![0u8])?;
 
         // Causal edge.
         if let Some(ref link) = self.opts.causal_link {
             let edge = CausalEdge::new(blob_id, link.relation, &link.context);
             let edge_key = CausalEdgeKey::new(link.parent, blob_id);
-            buf.put(encode_causal_key(&edge_key), edge.to_le_bytes().to_vec());
+            buf.put(encode_causal_key(&edge_key), edge.to_le_bytes().to_vec())?;
         }
 
         // Tags.
         let tag_count = self.opts.tags.len().min(MAX_TAGS);
         for tag in self.opts.tags.iter().take(tag_count) {
             let tk = TagKey::new(tag, blob_id);
-            buf.put(encode_tag_key(&tk), alloc::vec![0u8]);
+            buf.put(encode_tag_key(&tk), alloc::vec![0u8])?;
         }
 
         // Namespace.
         if let Some(ref ns) = self.opts.namespace {
             let nk = NamespaceKey::new(ns, blob_id);
-            buf.put(encode_ns_key(&nk), alloc::vec![0u8]);
+            buf.put(encode_ns_key(&nk), alloc::vec![0u8])?;
         }
 
         Ok(())
@@ -1271,7 +1280,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let end = TagKey::range_end(tag);
         let start_encoded = encode_tag_key(&start);
         let end_encoded = encode_tag_key(&end);
-        let prefix_len = table_prefix(BLOB_TAG_TABLE).len();
+        let prefix_len = table_prefix(BLOB_TAG_TABLE, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
@@ -1284,7 +1293,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
             let key_bytes = &scan_buf[prefix_len..key_len];
             if key_bytes.len() >= TagKey::SERIALIZED_SIZE {
                 let tk =
-                    TagKey::from_le_bytes(key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap());
+                    TagKey::from_be_bytes(key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap());
                 results.push(tk.blob_id);
             }
         }
@@ -1297,7 +1306,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let end = CausalEdgeKey::new(parent, BlobId::MAX);
         let start_encoded = encode_causal_key(&start);
         let end_encoded = encode_causal_key(&end);
-        let prefix_len = table_prefix(BLOB_CAUSAL_TABLE).len();
+        let prefix_len = table_prefix(BLOB_CAUSAL_TABLE, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
@@ -1327,7 +1336,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let end_id = BlobId::new(seq, u64::MAX);
         let start_key = encode_meta_key(start_id);
         let end_key = encode_meta_key(end_id);
-        let prefix_len = table_prefix(BLOB_META_TABLE).len();
+        let prefix_len = table_prefix(BLOB_META_TABLE, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_key, &end_key)?;
@@ -1343,7 +1352,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
             {
                 let mut id_arr = [0u8; BlobId::SERIALIZED_SIZE];
                 id_arr.copy_from_slice(&key_bytes[..BlobId::SERIALIZED_SIZE]);
-                let blob_id = BlobId::from_le_bytes(id_arr);
+                let blob_id = BlobId::from_be_bytes(id_arr);
                 let mut meta_arr = [0u8; BlobMeta::SERIALIZED_SIZE];
                 meta_arr.copy_from_slice(&val_bytes[..BlobMeta::SERIALIZED_SIZE]);
                 return Ok(Some((blob_id, BlobMeta::from_le_bytes(meta_arr))));
@@ -1365,7 +1374,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let end_tk = TemporalKey::range_end(end_ns);
         let start_encoded = encode_temporal_key(&start_tk);
         let end_encoded = encode_temporal_key(&end_tk);
-        let prefix_len = table_prefix(BLOB_TEMPORAL_TABLE).len();
+        let prefix_len = table_prefix(BLOB_TEMPORAL_TABLE, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
@@ -1377,7 +1386,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
             }
             let key_bytes = &scan_buf[prefix_len..key_len];
             if key_bytes.len() >= TemporalKey::SERIALIZED_SIZE {
-                let tk = TemporalKey::from_le_bytes(
+                let tk = TemporalKey::from_be_bytes(
                     key_bytes[..TemporalKey::SERIALIZED_SIZE]
                         .try_into()
                         .unwrap(),
@@ -1399,7 +1408,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let end = NamespaceKey::range_end(namespace);
         let start_encoded = encode_ns_key(&start);
         let end_encoded = encode_ns_key(&end);
-        let prefix_len = table_prefix(BLOB_NS_TABLE).len();
+        let prefix_len = table_prefix(BLOB_NS_TABLE, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
@@ -1411,7 +1420,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
             }
             let key_bytes = &scan_buf[prefix_len..key_len];
             if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
-                let nk = NamespaceKey::from_le_bytes(
+                let nk = NamespaceKey::from_be_bytes(
                     key_bytes[..NamespaceKey::SERIALIZED_SIZE]
                         .try_into()
                         .unwrap(),

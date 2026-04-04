@@ -45,6 +45,14 @@ use super::error::BfTreeError;
 const CDC_LOG_TABLE_NAME: &str = "__cdc_log";
 /// Reserved table name for CDC cursors in `BfTree`.
 const CDC_CURSOR_TABLE_NAME: &str = "__cdc_cursors";
+/// Reserved system key for the persisted transaction ID counter.
+///
+/// Stored as a bare encoded key (using the standard table-prefix encoding with
+/// table name `__bf_meta`) holding a `u64` LE value representing the next
+/// transaction ID to allocate. Updated atomically inside every commit's write
+/// buffer so that recovery does not depend on CDC being enabled.
+const BF_META_TABLE_NAME: &str = "__bf_meta";
+const BF_META_TXN_ID_KEY: &[u8] = b"next_txn_id";
 
 /// A database backed by Bf-Tree's concurrent B+tree engine.
 ///
@@ -151,21 +159,43 @@ impl BfTreeDatabase {
     }
 }
 
-/// Recover the next transaction ID from the latest CDC log and cursor entries.
+/// Recover the next transaction ID from persistent state.
 ///
-/// Scans both the CDC log table and the CDC cursor table to find the highest
-/// known transaction ID. This prevents the counter from resetting after
-/// retention pruning removes old CDC log entries whose IDs might still be
-/// referenced by cursors.
+/// Uses three sources and takes the maximum to guarantee monotonicity:
+///
+/// 1. **Persisted counter** (`__bf_meta:next_txn_id`) -- the authoritative
+///    source, written atomically on every commit regardless of CDC state.
+/// 2. **CDC log entries** -- highest `transaction_id` found in the CDC log
+///    table (only populated when CDC is enabled).
+/// 3. **CDC cursor entries** -- highest cursor position, which may exceed the
+///    CDC log maximum after retention pruning.
+///
+/// Taking the max of all three ensures correct recovery in every scenario:
+/// CDC enabled, CDC disabled, CDC enabled then disabled, and post-pruning.
 fn recover_next_txn_id(adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
     let max_record = adapter.inner().config().get_cb_max_record_size();
     let mut buf = vec![0u8; max_record * 2];
-    let mut max_txn_id: u64 = 0;
+    let mut max_next_id: u64 = 0;
 
-    // Scan CDC log entries for the highest transaction ID.
+    // 1. Read the persisted transaction ID counter (primary source).
     {
-        let prefix = table_prefix(CDC_LOG_TABLE_NAME);
-        let prefix_end = table_prefix_end(CDC_LOG_TABLE_NAME);
+        let meta_key = encode_table_key(BF_META_TABLE_NAME, TableKind::Regular, BF_META_TXN_ID_KEY);
+        match adapter.read(&meta_key, &mut buf) {
+            Ok(len) if len as usize >= 8 => {
+                let persisted = u64::from_le_bytes(buf[..8].try_into().unwrap());
+                if persisted > max_next_id {
+                    max_next_id = persisted;
+                }
+            }
+            // Key absent (fresh DB or pre-migration snapshot) -- fall through.
+            _ => {}
+        }
+    }
+
+    // 2. Scan CDC log entries for the highest transaction ID.
+    {
+        let prefix = table_prefix(CDC_LOG_TABLE_NAME, TableKind::Regular);
+        let prefix_end = table_prefix_end(CDC_LOG_TABLE_NAME, TableKind::Regular);
         let prefix_len = prefix.len();
         let mut iter = adapter.scan_range(&prefix, &prefix_end)?;
         while let Some((key_len, _val_len)) = iter.next(&mut buf) {
@@ -174,20 +204,21 @@ fn recover_next_txn_id(adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
             }
             let key_bytes = &buf[prefix_len..key_len];
             if key_bytes.len() >= CdcKey::SERIALIZED_SIZE {
-                let cdc_key = CdcKey::from_le_bytes(key_bytes);
-                if cdc_key.transaction_id > max_txn_id {
-                    max_txn_id = cdc_key.transaction_id;
+                let cdc_key = CdcKey::from_be_bytes(key_bytes);
+                let candidate = cdc_key.transaction_id.saturating_add(1);
+                if candidate > max_next_id {
+                    max_next_id = candidate;
                 }
             }
         }
     }
 
-    // Scan CDC cursor entries for the highest stored transaction ID.
+    // 3. Scan CDC cursor entries for the highest stored transaction ID.
     // Cursors store `u64` LE values representing the last consumed txn_id,
     // which may exceed the CDC log's max after retention pruning.
     {
-        let prefix = table_prefix(CDC_CURSOR_TABLE_NAME);
-        let prefix_end = table_prefix_end(CDC_CURSOR_TABLE_NAME);
+        let prefix = table_prefix(CDC_CURSOR_TABLE_NAME, TableKind::Regular);
+        let prefix_end = table_prefix_end(CDC_CURSOR_TABLE_NAME, TableKind::Regular);
         let prefix_len = prefix.len();
         let mut iter = adapter.scan_range(&prefix, &prefix_end)?;
         while let Some((key_len, val_len)) = iter.next(&mut buf) {
@@ -197,55 +228,90 @@ fn recover_next_txn_id(adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
             let val_bytes = &buf[key_len..key_len + val_len];
             if val_bytes.len() >= 8 {
                 let cursor_txn = u64::from_le_bytes(val_bytes[..8].try_into().unwrap());
-                if cursor_txn > max_txn_id {
-                    max_txn_id = cursor_txn;
+                let candidate = cursor_txn.saturating_add(1);
+                if candidate > max_next_id {
+                    max_next_id = candidate;
                 }
             }
         }
     }
 
-    Ok(max_txn_id.saturating_add(1))
+    // Ensure we never return 0 (minimum valid txn_id is 1).
+    Ok(max_next_id.max(1))
 }
 
 // ---------------------------------------------------------------------------
 // Internal key encoding: prefix table name to key bytes for namespace isolation.
 //
-// Format: [table_name_len: u16 LE] [table_name: bytes] [key: bytes]
+// Format: [table_name_len: u16 LE] [table_name: bytes] [kind: u8] [key: bytes]
 //
-// This ensures keys from different tables never collide in the single
-// underlying Bf-Tree index.
+// The 1-byte `kind` discriminator prevents namespace collisions between
+// regular tables, multimap tables, and TTL tables that share the same name.
+// Without the discriminator, opening the same name as both a regular table
+// and a multimap table would silently collide in the underlying BfTree.
+//
+// This ensures keys from different tables and table types never collide in
+// the single underlying Bf-Tree index.
 // ---------------------------------------------------------------------------
 
-pub(crate) fn encode_table_key(table_name: &str, key_bytes: &[u8]) -> Vec<u8> {
+/// Discriminator byte identifying the table type in the encoded key prefix.
+///
+/// Inserted immediately after the table name bytes, this guarantees that
+/// regular, multimap, and TTL tables with the same user-visible name occupy
+/// non-overlapping regions of the `BfTree` keyspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum TableKind {
+    /// Standard key-value table.
+    Regular = 0x00,
+    /// Multimap table (one key to many values).
+    Multimap = 0x01,
+    /// TTL table (key-value with per-entry expiry).
+    Ttl = 0x02,
+}
+
+pub(crate) fn encode_table_key(table_name: &str, kind: TableKind, key_bytes: &[u8]) -> Vec<u8> {
     let name_bytes = table_name.as_bytes();
     let name_len = u16::try_from(name_bytes.len()).expect("table name exceeds u16::MAX bytes");
-    let mut buf = Vec::with_capacity(2 + name_bytes.len() + key_bytes.len());
+    let mut buf = Vec::with_capacity(2 + name_bytes.len() + 1 + key_bytes.len());
     buf.extend_from_slice(&name_len.to_le_bytes());
     buf.extend_from_slice(name_bytes);
+    buf.push(kind as u8);
     buf.extend_from_slice(key_bytes);
     buf
 }
 
-pub(crate) fn table_prefix(table_name: &str) -> Vec<u8> {
+pub(crate) fn table_prefix(table_name: &str, kind: TableKind) -> Vec<u8> {
     let name_bytes = table_name.as_bytes();
     let name_len = u16::try_from(name_bytes.len()).expect("table name exceeds u16::MAX bytes");
-    let mut buf = Vec::with_capacity(2 + name_bytes.len());
+    let mut buf = Vec::with_capacity(2 + name_bytes.len() + 1);
     buf.extend_from_slice(&name_len.to_le_bytes());
     buf.extend_from_slice(name_bytes);
+    buf.push(kind as u8);
     buf
 }
 
-pub(crate) fn table_prefix_end(table_name: &str) -> Vec<u8> {
-    let mut prefix = table_prefix(table_name);
-    // Increment last byte to get exclusive upper bound.
-    // If the last byte is 0xFF, extend with 0xFF (lexicographic upper bound).
-    if let Some(last) = prefix.last_mut() {
-        if *last < 0xFF {
-            *last += 1;
-        } else {
-            prefix.push(0xFF);
+pub(crate) fn table_prefix_end(table_name: &str, kind: TableKind) -> Vec<u8> {
+    let mut prefix = table_prefix(table_name, kind);
+    // Increment the prefix as a big-endian integer with carry propagation to
+    // produce a correct exclusive upper bound.  Walk from the least-significant
+    // byte toward the most-significant, propagating the carry until a byte can
+    // absorb it.
+    for i in (0..prefix.len()).rev() {
+        if prefix[i] < 0xFF {
+            prefix[i] += 1;
+            return prefix;
         }
+        // This byte overflows; zero it and carry to the next position.
+        prefix[i] = 0x00;
     }
+    // Every byte in the prefix was 0xFF.  The only way to produce a value
+    // strictly greater than 0xFF..FF of the same length is to use a longer
+    // byte string.  Restore the prefix and append 0xFF so the result is
+    // lexicographically larger than any key that starts with the original
+    // prefix.
+    prefix.fill(0xFF);
+    prefix.push(0xFF);
     prefix
 }
 
@@ -295,6 +361,7 @@ impl BfTreeDatabaseWriteTxn {
             definition.name(),
             &self.adapter,
             &self.ops_count,
+            self.cdc_log.as_ref(),
             &self.buffer,
         )
     }
@@ -323,11 +390,12 @@ impl BfTreeDatabaseWriteTxn {
     ) -> Result<(), BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let val_bytes = V::as_bytes(value);
-        let encoded_key = encode_table_key(definition.name(), key_bytes.as_ref());
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
         self.buffer
             .lock()
-            .unwrap()
-            .put(encoded_key, val_bytes.as_ref().to_vec());
+            .unwrap_or_else(|e| e.into_inner())
+            .put(encoded_key, val_bytes.as_ref().to_vec())?;
         self.ops_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -341,8 +409,12 @@ impl BfTreeDatabaseWriteTxn {
         key: &K::SelfType<'_>,
     ) {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(definition.name(), key_bytes.as_ref());
-        self.buffer.lock().unwrap().delete(encoded_key);
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        self.buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .delete(encoded_key);
         self.ops_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -356,11 +428,12 @@ impl BfTreeDatabaseWriteTxn {
         key: &K::SelfType<'_>,
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(definition.name(), key_bytes.as_ref());
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
 
         // Check write buffer first.
         {
-            let buffer = self.buffer.lock().unwrap();
+            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             match buffer.get(&encoded_key) {
                 super::buffered_txn::BufferLookup::Found(v) => return Ok(Some(v)),
                 super::buffered_txn::BufferLookup::Tombstone => return Ok(None),
@@ -388,11 +461,12 @@ impl BfTreeDatabaseWriteTxn {
         key: &K::SelfType<'_>,
     ) -> bool {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(definition.name(), key_bytes.as_ref());
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
 
         // Check write buffer first.
         {
-            let buffer = self.buffer.lock().unwrap();
+            let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             match buffer.get(&encoded_key) {
                 super::buffered_txn::BufferLookup::Found(_) => return true,
                 super::buffered_txn::BufferLookup::Tombstone => return false,
@@ -408,13 +482,28 @@ impl BfTreeDatabaseWriteTxn {
     ///
     /// If CDC is enabled, accumulated events are staged into the write buffer
     /// before flushing, so CDC log entries are atomically committed with data.
+    ///
+    /// For file-backed databases, a snapshot is taken after the buffer flush to
+    /// ensure all committed data is durable (fsync'd to disk) before returning.
+    /// Without this, the WAL background flush thread introduces a window where
+    /// a crash after `commit()` returns could lose committed data.
     pub fn commit(self) -> Result<(), BfTreeError> {
         {
-            let mut buffer = self.buffer.lock().unwrap();
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             // Stage CDC log entries into the write buffer before flushing.
             self.stage_cdc_into_buffer(&mut buffer)?;
+            // Persist the transaction ID counter so recovery works without CDC.
+            self.stage_txn_id_into_buffer(&mut buffer)?;
             // Flush write buffer to BfTree (the atomic commit point).
             buffer.flush(&self.adapter)?;
+        }
+        // Ensure durability: for non-memory backends, take a snapshot so that
+        // all data written in this transaction is recoverable after a crash.
+        // The bf-tree WAL background thread flushes asynchronously on a timer;
+        // without an explicit snapshot here, commit() could return before the
+        // WAL is persisted, violating the durability contract.
+        if !self.adapter.inner().config().is_memory_backend() {
+            self.adapter.snapshot();
         }
         self.committed.store(true, Ordering::SeqCst);
         // Retention pruning is post-commit and non-critical.
@@ -425,8 +514,9 @@ impl BfTreeDatabaseWriteTxn {
     /// Commit with explicit snapshot for guaranteed crash recovery.
     pub fn commit_with_snapshot(self) -> Result<std::path::PathBuf, BfTreeError> {
         {
-            let mut buffer = self.buffer.lock().unwrap();
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             self.stage_cdc_into_buffer(&mut buffer)?;
+            self.stage_txn_id_into_buffer(&mut buffer)?;
             buffer.flush(&self.adapter)?;
         }
         self.committed.store(true, Ordering::SeqCst);
@@ -450,9 +540,12 @@ impl BfTreeDatabaseWriteTxn {
     /// on abort and committed atomically with the rest of the transaction.
     pub fn advance_cdc_cursor(&self, name: &str, up_to_txn: u64) -> Result<(), BfTreeError> {
         let key_bytes = name.as_bytes();
-        let encoded = encode_table_key(CDC_CURSOR_TABLE_NAME, key_bytes);
+        let encoded = encode_table_key(CDC_CURSOR_TABLE_NAME, TableKind::Regular, key_bytes);
         let val_bytes = up_to_txn.to_le_bytes();
-        self.buffer.lock().unwrap().put(encoded, val_bytes.to_vec());
+        self.buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .put(encoded, val_bytes.to_vec())?;
         Ok(())
     }
 
@@ -463,7 +556,7 @@ impl BfTreeDatabaseWriteTxn {
     fn stage_cdc_into_buffer(&self, buffer: &mut WriteBuffer) -> Result<(), BfTreeError> {
         let events = match self.cdc_log {
             Some(ref log) => {
-                let mut guard = log.lock().unwrap();
+                let mut guard = log.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.is_empty() {
                     return Ok(());
                 }
@@ -482,13 +575,25 @@ impl BfTreeDatabaseWriteTxn {
             let record = CdcRecord::from_event(event).map_err(|e| {
                 BfTreeError::InvalidKV(alloc::format!("CDC record serialization error: {e}"))
             })?;
-            let key_bytes = key.to_le_bytes();
+            let key_bytes = key.to_be_bytes();
             let val_bytes = record.serialize();
-            let encoded_key = encode_table_key(CDC_LOG_TABLE_NAME, &key_bytes);
-            buffer.put(encoded_key, val_bytes);
+            let encoded_key = encode_table_key(CDC_LOG_TABLE_NAME, TableKind::Regular, &key_bytes);
+            buffer.put(encoded_key, val_bytes)?;
         }
 
         Ok(())
+    }
+
+    /// Persist `txn_id + 1` as the next transaction ID counter.
+    ///
+    /// Written into the same write buffer so it is atomically committed with
+    /// data and CDC entries. On recovery the persisted value guarantees that
+    /// transaction IDs are never reused, even when CDC is disabled.
+    fn stage_txn_id_into_buffer(&self, buffer: &mut WriteBuffer) -> Result<(), BfTreeError> {
+        let next_id = self.txn_id.saturating_add(1);
+        let encoded_key =
+            encode_table_key(BF_META_TABLE_NAME, TableKind::Regular, BF_META_TXN_ID_KEY);
+        buffer.put(encoded_key, next_id.to_le_bytes().to_vec())
     }
 
     /// Post-commit retention pruning of old CDC log entries.
@@ -504,8 +609,12 @@ impl BfTreeDatabaseWriteTxn {
 
         let cutoff_txn = self.txn_id - self.cdc_config.retention_max_txns;
         let cutoff_key = CdcKey::new(cutoff_txn, u32::MAX);
-        let cutoff_encoded = encode_table_key(CDC_LOG_TABLE_NAME, &cutoff_key.to_le_bytes());
-        let prefix = table_prefix(CDC_LOG_TABLE_NAME);
+        let cutoff_encoded = encode_table_key(
+            CDC_LOG_TABLE_NAME,
+            TableKind::Regular,
+            &cutoff_key.to_be_bytes(),
+        );
+        let prefix = table_prefix(CDC_LOG_TABLE_NAME, TableKind::Regular);
         let prefix_len = prefix.len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
 
@@ -591,7 +700,8 @@ impl BfTreeDatabaseReadTxn {
         key: &K::SelfType<'_>,
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(definition.name(), key_bytes.as_ref());
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.adapter.read(&encoded_key, &mut buf) {
@@ -608,7 +718,8 @@ impl BfTreeDatabaseReadTxn {
         key: &K::SelfType<'_>,
     ) -> bool {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(definition.name(), key_bytes.as_ref());
+        let encoded_key =
+            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
         self.adapter.contains_key(&encoded_key)
     }
 
@@ -621,8 +732,8 @@ impl BfTreeDatabaseReadTxn {
         &self,
         definition: &TableDefinition<K, V>,
     ) -> Result<BfTreeTableScan<'_>, BfTreeError> {
-        let prefix = table_prefix(definition.name());
-        let prefix_end = table_prefix_end(definition.name());
+        let prefix = table_prefix(definition.name(), TableKind::Regular);
+        let prefix_end = table_prefix_end(definition.name(), TableKind::Regular);
         let prefix_len = prefix.len();
         let iter = self.adapter.scan_range(&prefix, &prefix_end)?;
         Ok(BfTreeTableScan { iter, prefix_len })
@@ -655,7 +766,7 @@ impl BfTreeDatabaseReadTxn {
     /// Read the position of a named CDC cursor.
     pub fn cdc_cursor(&self, name: &str) -> Result<Option<u64>, BfTreeError> {
         let key_bytes = name.as_bytes();
-        let encoded = encode_table_key(CDC_CURSOR_TABLE_NAME, key_bytes);
+        let encoded = encode_table_key(CDC_CURSOR_TABLE_NAME, TableKind::Regular, key_bytes);
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.adapter.read(&encoded, &mut buf) {
@@ -674,8 +785,8 @@ impl BfTreeDatabaseReadTxn {
 
     /// Returns the transaction ID of the latest CDC log entry, or `None` if empty.
     pub fn latest_cdc_transaction_id(&self) -> Result<Option<u64>, BfTreeError> {
-        let prefix = table_prefix(CDC_LOG_TABLE_NAME);
-        let prefix_end = table_prefix_end(CDC_LOG_TABLE_NAME);
+        let prefix = table_prefix(CDC_LOG_TABLE_NAME, TableKind::Regular);
+        let prefix_end = table_prefix_end(CDC_LOG_TABLE_NAME, TableKind::Regular);
         let prefix_len = prefix.len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_record * 2];
@@ -685,7 +796,7 @@ impl BfTreeDatabaseReadTxn {
             if key_len > prefix_len {
                 let key_bytes = &buf[prefix_len..key_len];
                 if key_bytes.len() >= CdcKey::SERIALIZED_SIZE {
-                    let cdc_key = CdcKey::from_le_bytes(key_bytes);
+                    let cdc_key = CdcKey::from_be_bytes(key_bytes);
                     match max_txn_id {
                         Some(current) if cdc_key.transaction_id > current => {
                             max_txn_id = Some(cdc_key.transaction_id);
@@ -706,9 +817,17 @@ impl BfTreeDatabaseReadTxn {
         start_key: CdcKey,
         end_key: CdcKey,
     ) -> Result<Vec<ChangeStream>, BfTreeError> {
-        let start_encoded = encode_table_key(CDC_LOG_TABLE_NAME, &start_key.to_le_bytes());
-        let end_encoded = encode_table_key(CDC_LOG_TABLE_NAME, &end_key.to_le_bytes());
-        let prefix_len = table_prefix(CDC_LOG_TABLE_NAME).len();
+        let start_encoded = encode_table_key(
+            CDC_LOG_TABLE_NAME,
+            TableKind::Regular,
+            &start_key.to_be_bytes(),
+        );
+        let end_encoded = encode_table_key(
+            CDC_LOG_TABLE_NAME,
+            TableKind::Regular,
+            &end_key.to_be_bytes(),
+        );
+        let prefix_len = table_prefix(CDC_LOG_TABLE_NAME, TableKind::Regular).len();
         let max_record = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
@@ -724,7 +843,7 @@ impl BfTreeDatabaseReadTxn {
             if key_bytes.len() < CdcKey::SERIALIZED_SIZE {
                 continue;
             }
-            let cdc_key = CdcKey::from_le_bytes(key_bytes);
+            let cdc_key = CdcKey::from_be_bytes(key_bytes);
             if let Ok(record) = CdcRecord::deserialize(val_bytes) {
                 results.push(ChangeStream::from_key_record(cdc_key, record));
             }
@@ -901,7 +1020,8 @@ mod tests {
                         // Insert using raw bytes since we can't easily use &str generics across threads
                         let key_bytes = key_str.as_bytes();
                         let val_bytes = (t * 1000 + i).to_le_bytes();
-                        let encoded = encode_table_key(SCORES.name(), key_bytes);
+                        let encoded =
+                            encode_table_key(SCORES.name(), TableKind::Regular, key_bytes);
                         wtxn.adapter.insert(&encoded, &val_bytes).unwrap();
                     }
                     wtxn.commit().unwrap();
@@ -918,7 +1038,7 @@ mod tests {
             for i in 0u64..50 {
                 let key_str = alloc::format!("t{t}_k{i}");
                 let key_bytes = key_str.as_bytes();
-                let encoded = encode_table_key(SCORES.name(), key_bytes);
+                let encoded = encode_table_key(SCORES.name(), TableKind::Regular, key_bytes);
                 let max_val = db.adapter().inner().config().get_cb_max_record_size();
                 let mut buf = vec![0u8; max_val];
                 let len = rtxn.adapter.read(&encoded, &mut buf).unwrap();
@@ -1202,5 +1322,152 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].table_name, "users");
         assert_eq!(changes[1].table_name, "scores");
+    }
+
+    // -----------------------------------------------------------------------
+    // Transaction ID recovery tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn txn_id_persisted_on_commit() {
+        // Verify the persisted meta key is written on every commit.
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let w1 = db.begin_write();
+        let id1 = w1.txn_id();
+        w1.insert(&USERS, &"a", &1u64).unwrap();
+        w1.commit().unwrap();
+
+        // Read the persisted counter directly.
+        let meta_key = encode_table_key(BF_META_TABLE_NAME, TableKind::Regular, BF_META_TXN_ID_KEY);
+        let max_val = db.adapter().inner().config().get_cb_max_record_size();
+        let mut buf = vec![0u8; max_val];
+        let len = db.adapter().read(&meta_key, &mut buf).unwrap();
+        assert!(len as usize >= 8);
+        let persisted = u64::from_le_bytes(buf[..8].try_into().unwrap());
+        assert_eq!(persisted, id1 + 1, "persisted counter should be txn_id + 1");
+    }
+
+    #[test]
+    fn recover_txn_id_without_cdc() {
+        // Simulate the bug scenario: CDC disabled, multiple commits, then recovery.
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        // Perform several transactions with CDC disabled.
+        for i in 0u64..5 {
+            let w = db.begin_write();
+            let key = alloc::format!("k{i}");
+            w.insert(&USERS, &key.as_str(), &i).unwrap();
+            w.commit().unwrap();
+        }
+
+        // The next txn_id should be 6 (txns used 1..5).
+        let next_w = db.begin_write();
+        assert_eq!(next_w.txn_id(), 6);
+        drop(next_w);
+
+        // Recover from the adapter (simulating reopen).
+        let recovered = recover_next_txn_id(db.adapter()).unwrap();
+        assert_eq!(
+            recovered, 6,
+            "recovery must return 6 even without CDC entries"
+        );
+    }
+
+    #[test]
+    fn table_kind_discriminator_encoding() {
+        // Verify the encoding includes the discriminator byte at the correct position.
+        let regular = encode_table_key("t", TableKind::Regular, b"k");
+        let multimap_prefix = table_prefix("t", TableKind::Multimap);
+        let ttl = encode_table_key("t", TableKind::Ttl, b"k");
+
+        // Format: [len_lo, len_hi, 't', kind, 'k']
+        // "t" has length 1, so len = [0x01, 0x00] in LE.
+        assert_eq!(regular, &[0x01, 0x00, b't', 0x00, b'k']);
+        assert_eq!(multimap_prefix, &[0x01, 0x00, b't', 0x01]);
+        assert_eq!(ttl, &[0x01, 0x00, b't', 0x02, b'k']);
+
+        // Prefixes must not overlap: regular prefix < multimap prefix < ttl prefix.
+        let reg_prefix = table_prefix("t", TableKind::Regular);
+        let mm_prefix = table_prefix("t", TableKind::Multimap);
+        let ttl_prefix = table_prefix("t", TableKind::Ttl);
+        assert!(reg_prefix < mm_prefix);
+        assert!(mm_prefix < ttl_prefix);
+    }
+
+    #[test]
+    fn table_kind_discriminator_prevents_collision() {
+        // Verify that regular, multimap, and TTL tables with the same name
+        // do not collide in the underlying BfTree keyspace.
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let wtxn = db.begin_write();
+
+        // Insert into a regular table named "shared".
+        let regular_def: TableDefinition<&str, u64> = TableDefinition::new("shared");
+        let mut reg = wtxn.open_table(regular_def);
+        reg.insert(&"key1", &100u64).unwrap();
+        drop(reg);
+
+        // Insert into a multimap table named "shared".
+        let mut mm = wtxn.open_multimap_table::<&str, &str>("shared");
+        mm.insert(&"key1", &"val_a").unwrap();
+        mm.insert(&"key1", &"val_b").unwrap();
+        drop(mm);
+
+        // Insert into a TTL table named "shared".
+        let ttl_def: TableDefinition<&str, u64> = TableDefinition::new("shared");
+        let mut ttl = wtxn.open_ttl_table(ttl_def);
+        ttl.insert(&"key1", &999u64).unwrap();
+        drop(ttl);
+
+        // Now read back from each table type and verify isolation.
+        let reg2 = wtxn.open_table(regular_def);
+        let reg_val = reg2.get(&"key1").unwrap().unwrap();
+        assert_eq!(
+            u64::from_le_bytes(reg_val.as_slice().try_into().unwrap()),
+            100,
+            "regular table must see its own value, not multimap or TTL"
+        );
+        drop(reg2);
+
+        let mm2 = wtxn.open_multimap_table::<&str, &str>("shared");
+        let mm_vals = mm2.get_values(&"key1").unwrap();
+        assert_eq!(mm_vals.len(), 2, "multimap must see its own two values");
+        assert_eq!(mm_vals[0], b"val_a");
+        assert_eq!(mm_vals[1], b"val_b");
+        drop(mm2);
+
+        let ttl2 = wtxn.open_ttl_table(ttl_def);
+        let ttl_val = ttl2.get(&"key1").unwrap().unwrap();
+        assert_eq!(
+            u64::from_le_bytes(ttl_val.as_slice().try_into().unwrap()),
+            999,
+            "TTL table must see its own value, not regular or multimap"
+        );
+        drop(ttl2);
+
+        wtxn.commit().unwrap();
+    }
+
+    #[test]
+    fn recover_txn_id_with_cdc_agrees() {
+        // With CDC enabled, the persisted counter and CDC scan should agree.
+        let db = cdc_db();
+
+        for i in 0u64..3 {
+            let w = db.begin_write();
+            let mut t = w.open_table(USERS);
+            let key = alloc::format!("k{i}");
+            t.insert(&key.as_str(), &i).unwrap();
+            drop(t);
+            w.commit().unwrap();
+        }
+
+        let recovered = recover_next_txn_id(db.adapter()).unwrap();
+        assert_eq!(
+            recovered, 4,
+            "recovery with CDC should return next available id"
+        );
     }
 }

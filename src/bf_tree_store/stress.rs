@@ -320,7 +320,7 @@ mod tests {
     /// final persisted state.
     #[test]
     fn toctou_shared_txn_with_cdc() {
-        const NUM_THREADS: u64 = 4;
+        const NUM_THREADS: usize = 4;
         const KEYS_PER_THREAD: u64 = 200;
         const OVERLAP: u64 = 50; // first 50 keys written by every thread
 
@@ -333,13 +333,14 @@ mod tests {
 
         // Phase 1: Concurrent inserts within a single write txn.
         let wtxn = db.begin_write();
-        let barrier = Barrier::new(NUM_THREADS as usize);
+        let barrier = Barrier::new(NUM_THREADS);
         thread::scope(|s| {
             for t in 0..NUM_THREADS {
                 let barrier = &barrier;
                 let wtxn = &wtxn;
                 s.spawn(move || {
                     barrier.wait();
+                    let tid = t as u64;
                     let mut table = wtxn.open_table(TABLE_A).unwrap();
                     for i in 0..KEYS_PER_THREAD {
                         // First OVERLAP keys are written by all threads (contention).
@@ -349,7 +350,7 @@ mod tests {
                         } else {
                             alloc::format!("t{t}_{i}")
                         };
-                        let val = t * 10000 + i;
+                        let val = tid * 10000 + i;
                         table.insert(&key.as_str(), &val).unwrap();
                     }
                 });
@@ -371,7 +372,7 @@ mod tests {
             let thread_id = val / 10000;
             let key_id = val % 10000;
             assert!(
-                thread_id < NUM_THREADS,
+                (thread_id as usize) < NUM_THREADS,
                 "shared_{i} has invalid thread_id {thread_id}"
             );
             assert_eq!(key_id, i, "shared_{i} value index mismatch");
@@ -404,7 +405,7 @@ mod tests {
             if c.table_name == "table_a" {
                 final_ops.insert(
                     alloc::string::String::from_utf8_lossy(&c.key).into_owned(),
-                    c.op.clone(),
+                    c.op,
                 );
             }
         }

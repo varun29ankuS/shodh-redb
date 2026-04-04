@@ -364,7 +364,7 @@ pub(crate) fn split_cluster<T: StorageWrite>(
             }
 
             #[allow(clippy::cast_possible_truncation)]
-            // f64→f32 precision loss acceptable for centroids
+            // f64->f32 precision loss acceptable for centroids
             let centroid_bytes: Vec<u8> = parent_sums
                 .iter()
                 .map(|s| (s / pop_f64) as f32)

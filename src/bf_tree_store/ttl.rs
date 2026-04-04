@@ -2,7 +2,7 @@
 //!
 //! Wraps standard `BfTree` table operations with a 9-byte header (1-byte magic tag +
 //! 8-byte expiry timestamp) prepended to each value. Expired entries are transparent
-//! to callers — `get()` and range scans return `None` for expired keys. Use
+//! to callers -- `get()` and range scans return `None` for expired keys. Use
 //! `purge_expired()` to reclaim storage.
 //!
 //! # Value Encoding

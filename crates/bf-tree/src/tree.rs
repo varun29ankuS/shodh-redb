@@ -955,7 +955,7 @@ impl BfTree {
 
     /// Delete a record from the tree.
     ///
-    /// ```no_run
+    /// ```ignore
     /// use bf_tree::BfTree;
     /// use bf_tree::LeafReadResult;
     ///

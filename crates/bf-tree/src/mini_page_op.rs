@@ -228,6 +228,9 @@ pub(crate) trait LeafOperations {
     }
 }
 
+/// CRC-32 checksum size in bytes, stored at the end of each disk page.
+const CRC32_SIZE: usize = 4;
+
 /// Page table read locked entry.
 pub(crate) struct LeafEntrySLocked<'a> {
     raw_guard: RwLockReadGuard<'a, PageLocation>,
@@ -236,6 +239,7 @@ pub(crate) struct LeafEntrySLocked<'a> {
     file_handle: &'a dyn VfsImpl,
     tmp_buffer_size: usize,
     tmp_buffer: Option<TmpBuffer>,
+    verify_checksums: bool,
 }
 
 impl LeafOperations for LeafEntrySLocked<'_> {
@@ -257,6 +261,23 @@ impl LeafOperations for LeafEntrySLocked<'_> {
                 let slice = buffer.as_u8_slice_mut();
                 self.file_handle.read(offset, slice);
 
+                if self.verify_checksums && slice.len() >= CRC32_SIZE {
+                    let data_end = slice.len() - CRC32_SIZE;
+                    let stored = u32::from_le_bytes(
+                        slice[data_end..data_end + CRC32_SIZE].try_into().unwrap(),
+                    );
+                    // stored == 0 means the page was written before checksums
+                    // were enabled (alloc_zeroed produces trailing zeros).
+                    if stored != 0 {
+                        let computed = crate::utils::crc32::crc32(&slice[..data_end]);
+                        assert_eq!(
+                            stored, computed,
+                            "CRC-32 mismatch on disk page at offset {offset}: \
+                             stored=0x{stored:08X}, computed=0x{computed:08X}"
+                        );
+                    }
+                }
+
                 self.tmp_buffer = Some(buffer);
                 self.load_base_page(offset)
             }
@@ -270,6 +291,7 @@ impl<'a> LeafEntrySLocked<'a> {
         #[cfg(feature = "tracing")] pid: PageID,
         file_handle: &'a dyn VfsImpl,
         leaf_page_size: usize,
+        verify_checksums: bool,
     ) -> Self {
         Self {
             raw_guard: guard,
@@ -278,6 +300,7 @@ impl<'a> LeafEntrySLocked<'a> {
             file_handle,
             tmp_buffer_size: leaf_page_size,
             tmp_buffer: None,
+            verify_checksums,
         }
     }
 
@@ -292,6 +315,7 @@ impl<'a> LeafEntrySLocked<'a> {
                     file_handle: self.file_handle,
                     tmp_buffer_size: self.tmp_buffer_size,
                     tmp_buffer: self.tmp_buffer.take(),
+                    verify_checksums: self.verify_checksums,
                 };
                 // here we don't need to explicitly forget self.
                 return Ok(x);
@@ -319,23 +343,43 @@ pub(crate) struct LeafEntryXLocked<'a> {
     file_handle: &'a dyn VfsImpl,
     tmp_buffer_size: usize,
     tmp_buffer: Option<TmpBuffer>,
+    verify_checksums: bool,
 }
 
 impl Drop for LeafEntryXLocked<'_> {
     fn drop(&mut self) {
-        if let Some(ref b) = self.tmp_buffer {
-            if b.is_dirty {
-                let offset = match self.raw_guard.deref() {
-                    PageLocation::Base(offset) => *offset,
-                    PageLocation::Mini(ptr) | PageLocation::Full(ptr) => {
-                        let mini_page = self.load_cache_page_mut(*ptr);
-                        mini_page.next_level.as_offset()
-                    }
-                    PageLocation::Null => panic!("Dropping a tmp buffer of a Null page"),
-                };
-                let slice = b.as_u8_slice();
-                self.file_handle.write(offset, slice);
+        // Determine the disk offset first (requires borrowing self.raw_guard and
+        // potentially self for load_cache_page_mut), then mutate the buffer for
+        // the checksum, then write. This two-phase approach avoids a simultaneous
+        // mutable borrow of self.tmp_buffer and immutable borrow of self.
+        let dirty = self.tmp_buffer.as_ref().is_some_and(|b| b.is_dirty);
+
+        if !dirty {
+            return;
+        }
+
+        let offset = match self.raw_guard.deref() {
+            PageLocation::Base(offset) => *offset,
+            PageLocation::Mini(ptr) | PageLocation::Full(ptr) => {
+                let mini_page = self.load_cache_page_mut(*ptr);
+                mini_page.next_level.as_offset()
             }
+            PageLocation::Null => panic!("Dropping a tmp buffer of a Null page"),
+        };
+
+        if let Some(ref mut b) = self.tmp_buffer {
+            // Compute and store CRC-32 checksum in the last 4 bytes of the page.
+            if self.verify_checksums {
+                let slice = b.as_u8_slice_mut();
+                if slice.len() >= CRC32_SIZE {
+                    let data_end = slice.len() - CRC32_SIZE;
+                    let checksum = crate::utils::crc32::crc32(&slice[..data_end]);
+                    slice[data_end..data_end + CRC32_SIZE].copy_from_slice(&checksum.to_le_bytes());
+                }
+            }
+
+            let slice = b.as_u8_slice();
+            self.file_handle.write(offset, slice);
         }
     }
 }
@@ -359,6 +403,21 @@ impl LeafOperations for LeafEntryXLocked<'_> {
                 let slice = buffer.as_u8_slice_mut();
                 self.file_handle.read(offset, slice);
 
+                if self.verify_checksums && slice.len() >= CRC32_SIZE {
+                    let data_end = slice.len() - CRC32_SIZE;
+                    let stored = u32::from_le_bytes(
+                        slice[data_end..data_end + CRC32_SIZE].try_into().unwrap(),
+                    );
+                    if stored != 0 {
+                        let computed = crate::utils::crc32::crc32(&slice[..data_end]);
+                        assert_eq!(
+                            stored, computed,
+                            "CRC-32 mismatch on disk page at offset {offset}: \
+                             stored=0x{stored:08X}, computed=0x{computed:08X}"
+                        );
+                    }
+                }
+
                 self.tmp_buffer = Some(buffer);
 
                 if let Some(ref b) = self.tmp_buffer {
@@ -377,6 +436,7 @@ impl<'a> LeafEntryXLocked<'a> {
         #[cfg(feature = "tracing")] page_id: PageID,
         file_handle: &'a dyn VfsImpl,
         tmp_buffer_size: usize,
+        verify_checksums: bool,
     ) -> Self {
         Self {
             raw_guard,
@@ -385,6 +445,7 @@ impl<'a> LeafEntryXLocked<'a> {
             pid: page_id,
             tmp_buffer_size,
             tmp_buffer: None,
+            verify_checksums,
         }
     }
 
@@ -394,6 +455,7 @@ impl<'a> LeafEntryXLocked<'a> {
         #[cfg(feature = "tracing")] page_id: PageID,
         tmp_buffer_size: usize,
         leaf_buffer: *mut LeafNode,
+        verify_checksums: bool,
     ) -> Self {
         Self {
             raw_guard,
@@ -402,6 +464,7 @@ impl<'a> LeafEntryXLocked<'a> {
             pid: page_id,
             tmp_buffer_size,
             tmp_buffer: Some(TmpBuffer::from_leaf_node(leaf_buffer, tmp_buffer_size)),
+            verify_checksums,
         }
     }
 

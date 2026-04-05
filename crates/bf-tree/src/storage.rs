@@ -116,6 +116,7 @@ impl PageTable {
             *pid,
             self.vfs.as_ref(),
             self.config.leaf_page_size,
+            self.config.verify_checksums,
         )
     }
 
@@ -129,6 +130,7 @@ impl PageTable {
             *pid,
             self.vfs.as_ref(),
             self.config.leaf_page_size,
+            self.config.verify_checksums,
         )
     }
 
@@ -149,6 +151,7 @@ impl PageTable {
             pid,
             self.config.leaf_page_size,
             base_ptr,
+            self.config.verify_checksums,
         );
         LeafNode::free_base_page(base_ptr);
 
@@ -181,6 +184,7 @@ impl PageTable {
             pid,
             self.vfs.as_ref(),
             self.config.leaf_page_size,
+            self.config.verify_checksums,
         );
 
         (pid, x_locked)

@@ -116,6 +116,9 @@ impl<'b> ScanIterMut<'_, 'b> {
                     aggressive_split = true;
                     continue;
                 }
+                Err(TreeError::IoError(e)) => {
+                    panic!("I/O error during scan cursor positioning: {e}");
+                }
             };
 
             return Self {
@@ -209,6 +212,9 @@ impl<'b> ScanIterMut<'_, 'b> {
                             backoff.spin();
                             continue;
                         }
+                        Err(TreeError::IoError(e)) => {
+                            panic!("I/O error during scan next-leaf positioning: {e}");
+                        }
                     };
                     self.scan_position = pos;
                     self.leaf_lock = lock;
@@ -264,6 +270,9 @@ impl<'b> ScanIter<'_, 'b> {
                     _ = tree.evict_from_circular_buffer();
                     aggressive_split = true;
                     continue;
+                }
+                Err(TreeError::IoError(e)) => {
+                    panic!("I/O error during scan cursor positioning: {e}");
                 }
             };
 
@@ -347,6 +356,9 @@ impl<'b> ScanIter<'_, 'b> {
                                 aggressive_split = true;
                                 backoff.spin();
                                 continue;
+                            }
+                            Err(TreeError::IoError(e)) => {
+                                panic!("I/O error during scan next-leaf positioning: {e}");
                             }
                         };
                     self.scan_position = pos;

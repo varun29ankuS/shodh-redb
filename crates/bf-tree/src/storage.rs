@@ -41,6 +41,9 @@ impl From<CircularBufferError> for TreeError {
             CircularBufferError::WouldBlock => TreeError::Locked,
             CircularBufferError::Full => TreeError::CircularBufferFull,
             CircularBufferError::EmptyAlloc => unreachable!(),
+            CircularBufferError::InvalidStateTransition { .. } => {
+                panic!("circular buffer state machine invariant violated")
+            }
         }
     }
 }

@@ -17,9 +17,12 @@ use core::marker::PhantomData;
 use crate::storage_traits::OwnedKv;
 use crate::types::{Key, Value};
 
+use alloc::sync::Arc;
+
 use super::adapter::BfTreeAdapter;
 use super::database::{BfTreeTableScan, TableKind, table_prefix, table_prefix_end};
 use super::error::BfTreeError;
+use super::verification::{VerifyMode, should_verify, unwrap_value};
 
 // ---------------------------------------------------------------------------
 // BufferLookup -- result of checking the write buffer
@@ -403,6 +406,9 @@ pub struct BufferedScanIter<'a, K: Key + 'static, V: Value + 'static> {
     /// If set, stop when user key matches this (exclusive end bound).
     exclude_end: Option<Vec<u8>>,
 
+    /// Verification mode for checksum unwrapping of values.
+    verify_mode: Arc<VerifyMode>,
+
     _key: PhantomData<K>,
     _val: PhantomData<V>,
 }
@@ -418,6 +424,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> BufferedScanIter<'a, K, V> {
         max_record_size: usize,
         exclude_start: Option<Vec<u8>>,
         exclude_end: Option<Vec<u8>>,
+        verify_mode: Arc<VerifyMode>,
     ) -> Self {
         Self {
             buf_entries,
@@ -428,6 +435,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> BufferedScanIter<'a, K, V> {
             scan_exhausted: false,
             exclude_start,
             exclude_end,
+            verify_mode,
             _key: PhantomData,
             _val: PhantomData,
         }
@@ -550,7 +558,17 @@ impl<K: Key + 'static, V: Value + 'static> Iterator for BufferedScanIter<'_, K, 
                 return None;
             }
 
-            return Some(Ok((OwnedKv::new(key), OwnedKv::new(val))));
+            let k = OwnedKv::new(key);
+            let v = if self.verify_mode.is_enabled() {
+                let verify = should_verify(self.verify_mode.as_ref());
+                match unwrap_value(&val, verify) {
+                    Ok(data) => OwnedKv::new(data.to_vec()),
+                    Err(e) => return Some(Err(e.into())),
+                }
+            } else {
+                OwnedKv::new(val)
+            };
+            return Some(Ok((k, v)));
         }
     }
 }

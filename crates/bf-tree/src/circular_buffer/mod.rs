@@ -63,23 +63,19 @@ impl MetaRawState {
         }
     }
 
-    /// Will panic if the old state is not `META_STATE_NOT_READY`
-    fn to_ready(&self) {
-        match self.state.compare_exchange(
-            MetaState::NotReady.into(),
-            MetaState::Ready.into(),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => {}
-            Err(v) => {
-                panic!(
-                    "Meta state incorrect, expected {:?}, actual {}",
-                    MetaState::NotReady,
-                    v
-                );
-            }
-        }
+    fn to_ready(&self) -> Result<(), CircularBufferError> {
+        self.state
+            .compare_exchange(
+                MetaState::NotReady.into(),
+                MetaState::Ready.into(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|actual| CircularBufferError::InvalidStateTransition {
+                expected: MetaState::NotReady.into(),
+                actual,
+            })
     }
 
     fn try_begin_tombstone(&self) -> bool {
@@ -88,7 +84,7 @@ impl MetaRawState {
                 MetaState::Ready.into(),
                 MetaState::BeginTombStone.into(),
                 Ordering::AcqRel,
-                Ordering::Relaxed,
+                Ordering::Acquire,
             )
             .is_ok()
     }
@@ -111,98 +107,91 @@ impl MetaRawState {
 
     fn state(&self) -> MetaState {
         let v = self.load();
-        unsafe { core::mem::transmute(v) }
-    }
-
-    fn revert_to_ready(&self) {
-        match self.state.compare_exchange(
-            MetaState::BeginTombStone.into(),
-            MetaState::Ready.into(),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => {}
-            Err(v) => {
-                panic!(
-                    "Meta state incorrect, expected {:?}, actual {}",
-                    MetaState::BeginTombStone,
-                    v
-                );
-            }
+        match v {
+            0 => MetaState::NotReady,
+            1 => MetaState::Ready,
+            2 => MetaState::Tombstone,
+            3 => MetaState::BeginTombStone,
+            4 => MetaState::FreeListed,
+            5 => MetaState::Evicted,
+            v => panic!("invalid MetaState discriminant: {v}"),
         }
     }
 
-    fn free_list_to_tombstone(&self) {
-        match self.state.compare_exchange(
-            MetaState::FreeListed.into(),
-            MetaState::Tombstone.into(),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => {}
-            Err(v) => {
-                panic!(
-                    "Meta state incorrect, expected {:?}, actual {}",
-                    MetaState::FreeListed,
-                    v
-                );
-            }
-        }
+    fn revert_to_ready(&self) -> Result<(), CircularBufferError> {
+        self.state
+            .compare_exchange(
+                MetaState::BeginTombStone.into(),
+                MetaState::Ready.into(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|actual| CircularBufferError::InvalidStateTransition {
+                expected: MetaState::BeginTombStone.into(),
+                actual,
+            })
     }
 
-    fn to_freelist(&self) {
-        match self.state.compare_exchange(
-            MetaState::BeginTombStone.into(),
-            MetaState::FreeListed.into(),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => {}
-            Err(v) => {
-                panic!(
-                    "Meta state incorrect, expected {:?}, actual {}",
-                    MetaState::Ready,
-                    v
-                );
-            }
-        }
+    fn free_list_to_tombstone(&self) -> Result<(), CircularBufferError> {
+        self.state
+            .compare_exchange(
+                MetaState::FreeListed.into(),
+                MetaState::Tombstone.into(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|actual| CircularBufferError::InvalidStateTransition {
+                expected: MetaState::FreeListed.into(),
+                actual,
+            })
+    }
+
+    fn to_freelist(&self) -> Result<(), CircularBufferError> {
+        self.state
+            .compare_exchange(
+                MetaState::BeginTombStone.into(),
+                MetaState::FreeListed.into(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|actual| CircularBufferError::InvalidStateTransition {
+                expected: MetaState::BeginTombStone.into(),
+                actual,
+            })
     }
 
     /// Previous state must be `META_STATE_BEGIN_TOMBSTONE`
-    fn to_tombstone(&self) {
-        match self.state.compare_exchange(
-            MetaState::BeginTombStone.into(),
-            MetaState::Tombstone.into(),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => {}
-            Err(v) => {
-                panic!(
-                    "Meta state incorrect, expected {:?}, actual {}",
-                    MetaState::BeginTombStone,
-                    v
-                );
-            }
-        }
+    fn to_tombstone(&self) -> Result<(), CircularBufferError> {
+        self.state
+            .compare_exchange(
+                MetaState::BeginTombStone.into(),
+                MetaState::Tombstone.into(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|actual| CircularBufferError::InvalidStateTransition {
+                expected: MetaState::BeginTombStone.into(),
+                actual,
+            })
     }
 
-    fn tombstone_to_evicted(&self) {
-        match self.state.compare_exchange(
-            MetaState::Tombstone.into(),
-            MetaState::Evicted.into(),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => {}
-            Err(v) => {
-                panic!(
-                    "Meta state incorrect, expected {:?}, actual {}",
-                    MetaState::Tombstone,
-                    v
-                );
-            }
-        }
+    fn tombstone_to_evicted(&self) -> Result<(), CircularBufferError> {
+        self.state
+            .compare_exchange(
+                MetaState::Tombstone.into(),
+                MetaState::Evicted.into(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|actual| CircularBufferError::InvalidStateTransition {
+                expected: MetaState::Tombstone.into(),
+                actual,
+            })
     }
 }
 
@@ -279,7 +268,9 @@ impl Drop for CircularBufferPtr<'_> {
     fn drop(&mut self) {
         // set can be evicted to true
         let meta = CircularBuffer::get_meta_from_data_ptr(self.ptr);
-        meta.states.to_ready();
+        meta.states
+            .to_ready()
+            .expect("CircularBufferPtr invariant: state must be NotReady on drop");
     }
 }
 
@@ -306,7 +297,9 @@ impl TombstoneHandle {
 impl Drop for TombstoneHandle {
     fn drop(&mut self) {
         let meta = CircularBuffer::get_meta_from_data_ptr(self.ptr);
-        meta.states.revert_to_ready();
+        meta.states
+            .revert_to_ready()
+            .expect("TombstoneHandle invariant: state must be BeginTombStone on drop");
     }
 }
 
@@ -315,6 +308,11 @@ pub enum CircularBufferError {
     Full,
     EmptyAlloc,
     WouldBlock,
+    /// A state machine transition failed: expected one state but found another.
+    InvalidStateTransition {
+        expected: u8,
+        actual: u8,
+    },
 }
 
 impl core::fmt::Display for CircularBufferError {
@@ -323,6 +321,12 @@ impl core::fmt::Display for CircularBufferError {
             CircularBufferError::Full => write!(f, "CircularBuffer is full"),
             CircularBufferError::EmptyAlloc => write!(f, "Empty allocation"),
             CircularBufferError::WouldBlock => write!(f, "Would block"),
+            CircularBufferError::InvalidStateTransition { expected, actual } => {
+                write!(
+                    f,
+                    "Invalid state transition: expected {expected}, actual {actual}"
+                )
+            }
         }
     }
 }
@@ -347,7 +351,7 @@ impl States {
     }
 
     fn head_addr(&self) -> usize {
-        self.head_addr.load(Ordering::Relaxed)
+        self.head_addr.load(Ordering::Acquire)
     }
 
     fn tail_addr(&self) -> usize {
@@ -547,7 +551,7 @@ impl CircularBuffer {
             if self.ptr_is_copy_on_access(raw_ptr) {
                 // here we might fail because ptr might be also evicted by evict_n,
                 // nevertheless, someone will tombstone it, so we are fine.
-                old_meta.states.free_list_to_tombstone();
+                let _ = old_meta.states.free_list_to_tombstone();
                 // retry
                 continue;
             }
@@ -559,7 +563,7 @@ impl CircularBuffer {
                 MetaState::FreeListed.into(),
                 MetaState::NotReady.into(),
                 Ordering::AcqRel,
-                Ordering::Relaxed,
+                Ordering::Acquire,
             ) {
                 Ok(_) => {
                     return Ok(CircularBufferPtr::new(raw_ptr));
@@ -681,18 +685,34 @@ impl CircularBuffer {
         let meta = CircularBuffer::get_meta_from_data_ptr(ptr);
 
         if !add_to_freelist || self.ptr_is_copy_on_access(ptr) {
-            meta.states.to_tombstone();
+            meta.states
+                .to_tombstone()
+                .expect("dealloc: state must be BeginTombStone");
             return;
         }
 
-        // we don't want to pollute dealloc with a Result<>, so if there's contention, we don't add it to free list.
-        match self.free_list.try_add(ptr, meta.size as usize) {
-            Ok(_lock) => {
-                meta.states.to_freelist();
+        // Retry adding to free list with bounded attempts before falling back to tombstone.
+        // Dropping to tombstone wastes reusable memory, so a few retries are worthwhile.
+        const MAX_FREELIST_RETRIES: u32 = 4;
+        let mut added = false;
+        for _ in 0..MAX_FREELIST_RETRIES {
+            match self.free_list.try_add(ptr, meta.size as usize) {
+                Ok(_lock) => {
+                    meta.states
+                        .to_freelist()
+                        .expect("dealloc: state must be BeginTombStone for freelist transition");
+                    added = true;
+                    break;
+                }
+                Err(_) => {
+                    core::hint::spin_loop();
+                }
             }
-            Err(_) => {
-                meta.states.to_tombstone();
-            }
+        }
+        if !added {
+            meta.states
+                .to_tombstone()
+                .expect("dealloc: state must be BeginTombStone for tombstone fallback");
         }
     }
 
@@ -852,7 +872,7 @@ impl CircularBuffer {
             }
 
             let to_add = meta.size as usize + CB_ALLOC_META_SIZE;
-            states.head_addr.fetch_add(to_add, Ordering::Relaxed);
+            states.head_addr.fetch_add(to_add, Ordering::Release);
             head_addr += to_add;
         }
         Ok((head_addr - old_addr) as u32)
@@ -932,7 +952,9 @@ impl CircularBuffer {
                     match callback(v) {
                         Ok(h) => {
                             self.dealloc_inner(h, false);
-                            meta.states.tombstone_to_evicted();
+                            meta.states
+                                .tombstone_to_evicted()
+                                .expect("evict: state must be Tombstone after dealloc");
                             break;
                         }
                         Err(h) => {
@@ -948,15 +970,21 @@ impl CircularBuffer {
                         // do nothing and wait for the ptr to be ready.
                     } else {
                         if state == MetaState::Tombstone {
-                            meta.states.tombstone_to_evicted();
+                            meta.states
+                                .tombstone_to_evicted()
+                                .expect("evict: state was just confirmed as Tombstone");
                             break;
                         }
                         if state == MetaState::FreeListed {
                             let found =
                                 self.free_list.find_and_remove(data_ptr, meta.size as usize);
                             if found {
-                                meta.states.free_list_to_tombstone();
-                                meta.states.tombstone_to_evicted();
+                                meta.states
+                                    .free_list_to_tombstone()
+                                    .expect("evict: state was just confirmed as FreeListed");
+                                meta.states.tombstone_to_evicted().expect(
+                                    "evict: state must be Tombstone after freelist transition",
+                                );
                                 break;
                             }
                         }

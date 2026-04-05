@@ -57,6 +57,9 @@ impl InnerPtrGuard {
     fn make() -> Self {
         let layout =
             alloc::alloc::Layout::from_size_align(INNER_NODE_SIZE, INNER_NODE_SIZE).unwrap();
+        // SAFETY: Layout is valid because INNER_NODE_SIZE is a power-of-2 constant (checked
+        // at compile time), guaranteeing non-zero size and power-of-2 alignment. The returned
+        // pointer is used exclusively through InnerPtrGuard which ensures single ownership.
         let ptr = unsafe { alloc::alloc::alloc(layout) } as *mut InnerNode;
         Self { ptr }
     }
@@ -120,12 +123,18 @@ impl<'a> InnerNodeBuilder<'a> {
     }
 
     pub(crate) fn build(self) -> *mut InnerNode {
+        // SAFETY: self.raw_ptr.ptr was allocated in InnerPtrGuard::make() with
+        // INNER_NODE_SIZE bytes and alignment, which is sufficient for InnerNode. The pointer
+        // is non-null (alloc panics on failure) and exclusively owned by this builder.
         let node = unsafe { &mut *self.raw_ptr.ptr };
         let offset = match self.disk_offset {
             Some(x) => x.take(),
             None => INVALID_DISK_OFFSET,
         };
 
+        // SAFETY: version_lock is at a known offset within the InnerNode allocation. We use
+        // ptr::write to initialize it without dropping the previous (uninitialized) value,
+        // since the memory was freshly allocated and not yet initialized as an AtomicU16.
         unsafe {
             core::ptr::write(&mut node.version_lock, AtomicU16::new(0));
         }
@@ -144,6 +153,9 @@ impl<'a> InnerNodeBuilder<'a> {
 
     pub(crate) fn build_from_slice(self, slice: &[u8]) -> *mut InnerNode {
         let ptr = self.raw_ptr.take();
+        // SAFETY: ptr was allocated with INNER_NODE_SIZE bytes in InnerPtrGuard::make() and is
+        // exclusively owned after take(). The caller must ensure slice.len() >= INNER_NODE_SIZE.
+        // Source (slice) and destination (ptr) do not overlap since ptr is a fresh heap allocation.
         unsafe {
             core::ptr::copy_nonoverlapping(slice.as_ptr(), ptr as *mut u8, INNER_NODE_SIZE);
         }
@@ -155,6 +167,9 @@ impl InnerNode {
     pub(crate) fn free_node(ptr: *mut InnerNode) {
         let layout =
             alloc::alloc::Layout::from_size_align(INNER_NODE_SIZE, INNER_NODE_SIZE).unwrap();
+        // SAFETY: ptr was allocated by alloc::alloc::alloc with the same Layout (INNER_NODE_SIZE
+        // size and alignment). Callers are responsible for ensuring this is only called once per
+        // allocation, which is enforced by InnerPtrGuard's Drop impl and take() consuming self.
         unsafe { alloc::alloc::dealloc(ptr as *mut u8, layout) }
     }
 
@@ -168,6 +183,10 @@ impl InnerNode {
         children_is_leaf: bool,
         disk_offset: u64,
     ) {
+        // SAFETY: self.meta is within the InnerNode allocation and properly aligned (InnerNode
+        // is #[repr(C)] and meta is the first field). We use ptr::write instead of assignment
+        // because the memory may be uninitialized (first call) or stale (consolidate path),
+        // and we must avoid dropping the old potentially-invalid NodeMeta value.
         unsafe {
             core::ptr::write(
                 &mut self.meta,
@@ -190,6 +209,11 @@ impl InnerNode {
         };
 
         let pos = 0;
+        // SAFETY: data is the trailing flexible array at the end of the InnerNode allocation.
+        // The allocation is INNER_NODE_SIZE bytes total, so data spans max_data_size() bytes.
+        // pos=0 so the InnerKVMeta write is at the start of data (within bounds). offset was
+        // computed to place the PageID at the end of the data region. write_unaligned is used
+        // for the PageID because the offset may not be 8-byte aligned.
         unsafe {
             let ptr = self.data.as_mut_ptr();
             *(ptr.add(pos * core::mem::size_of::<InnerKVMeta>()) as *mut InnerKVMeta) = new_meta;
@@ -209,6 +233,12 @@ impl InnerNode {
 
     pub(crate) fn get_kv_meta(&self, index: u16) -> &InnerKVMeta {
         let ptr = self.data.as_ptr();
+        // SAFETY: The data region starts immediately after the InnerNode header fields and
+        // stores InnerKVMeta entries contiguously from its beginning. index is bounded by
+        // meta_count_with_fence() which tracks the number of valid entries. InnerKVMeta is
+        // #[repr(C)] with size 8 and alignment 2, and data is aligned to InnerNode's alignment
+        // (INNER_NODE_SIZE), so the pointer arithmetic and cast produce a valid aligned reference.
+        // The lifetime of the returned reference is tied to &self.
         unsafe {
             &*(ptr.add((index as usize) * core::mem::size_of::<InnerKVMeta>())
                 as *const InnerKVMeta)
@@ -235,6 +265,11 @@ impl InnerNode {
 
     pub(crate) fn get_full_key(&self, meta: &InnerKVMeta) -> Vec<u8> {
         let post_key_len = (meta.key_len as usize).saturating_sub(InnerKVMeta::KEY_LOOK_AHEAD_SIZE);
+        // SAFETY: meta.offset points within the data region to where the post-prefix key bytes
+        // were written during insert. post_key_len is derived from meta.key_len minus the prefix
+        // size (or zero if the key fits entirely in the prefix). The offset and length are
+        // guaranteed to be within the INNER_NODE_SIZE allocation by the insert logic. The
+        // returned slice borrows from &self, so it cannot outlive the node.
         let post_key_span = unsafe {
             core::slice::from_raw_parts(self.data.as_ptr().add(meta.offset as usize), post_key_len)
         };
@@ -249,6 +284,10 @@ impl InnerNode {
 
     pub(crate) fn get_post_key_ref(&self, meta: &InnerKVMeta) -> &[u8] {
         let len = (meta.key_len as usize).saturating_sub(InnerKVMeta::KEY_LOOK_AHEAD_SIZE);
+        // SAFETY: meta.offset indexes into the data region where the post-prefix key bytes are
+        // stored. len is the portion of the key beyond the 4-byte prefix (or 0 if the key is
+        // short). Both offset and len were validated during insert to fit within the node's
+        // data region. The returned slice borrows from &self ensuring valid lifetime.
         unsafe {
             let start_ptr = self.data.as_ptr().add(meta.offset as usize);
             core::slice::from_raw_parts(start_ptr, len)
@@ -259,6 +298,10 @@ impl InnerNode {
     /// because the &PageID is unaligned and it is ub to read from it.
     /// It creates quite a lot of issues, so we have to return a copy of the PageID.
     pub(crate) fn get_value(&self, meta: &InnerKVMeta) -> PageID {
+        // SAFETY: The PageID (u64) is stored immediately after the post-prefix key bytes at
+        // meta.offset + post_key_len within the data region. The insert logic ensures these
+        // 8 bytes are within bounds. read_unaligned is used because the value may not be
+        // naturally aligned to 8 bytes due to variable-length key storage.
         unsafe {
             let start_ptr = self.data.as_ptr().add(
                 meta.offset as usize
@@ -349,6 +392,10 @@ impl InnerNode {
             let kv_meta = self.get_kv_meta(pos as u16);
             let cmp = self.key_compare(key, kv_meta);
             if cmp == Ordering::Equal {
+                // SAFETY: The key already exists at this position, so kv_meta.offset and
+                // post_key_len correctly identify the PageID location within the data region.
+                // write_unaligned is required because the PageID may not be 8-byte aligned.
+                // We have &mut self so exclusive access to the data region is guaranteed.
                 unsafe {
                     let start_ptr = self
                         .data
@@ -365,6 +412,16 @@ impl InnerNode {
 
         let metas_size = core::mem::size_of::<InnerKVMeta>() * (value_count as usize - pos);
 
+        // SAFETY: All pointer arithmetic stays within the data region of this INNER_NODE_SIZE
+        // allocation. The remaining_size check above ensures enough space for the new entry.
+        // - ptr::copy shifts existing InnerKVMeta entries right by one slot to open a gap at
+        //   pos; source and destination may overlap, which ptr::copy handles correctly.
+        // - The InnerKVMeta write at pos is within the meta array portion of data.
+        // - copy_nonoverlapping copies the post-prefix key bytes from the caller's key slice
+        //   (which does not overlap the node's heap allocation) to new_meta.offset in data.
+        // - write_unaligned writes the PageID immediately after the key bytes; unaligned
+        //   because variable-length keys mean the offset may not be 8-byte aligned.
+        // We hold &mut self so no aliasing references exist.
         unsafe {
             core::ptr::copy(
                 self.data
@@ -466,6 +523,11 @@ impl InnerNode {
             core::cmp::max(kv_meta.key_len as usize, InnerKVMeta::KEY_LOOK_AHEAD_SIZE)
                 - InnerKVMeta::KEY_LOOK_AHEAD_SIZE;
 
+        // SAFETY: kv_meta was obtained from get_kv_meta(pos) which is within the valid entry
+        // count. kv_meta.offset + post_key_len points to the PageID slot for this entry within
+        // the data region, which was written during the original insert. write_unaligned is
+        // needed because the PageID may not be naturally aligned. We hold &mut self for
+        // exclusive access.
         unsafe {
             let start_ptr =
                 self.data
@@ -508,6 +570,10 @@ impl InnerNode {
     /// Returns the entire code as a u8 slice,
     /// Used when we serialize the node to disk.
     pub(crate) fn as_slice(&self) -> &[u8] {
+        // SAFETY: The InnerNode was allocated as a contiguous INNER_NODE_SIZE-byte block with
+        // INNER_NODE_SIZE alignment. The pointer is valid and the entire allocation is readable
+        // as raw bytes. The returned slice borrows from &self, so it cannot outlive the node.
+        // InnerNode is #[repr(C)] so its address is the start of the allocation.
         unsafe {
             core::slice::from_raw_parts(self as *const InnerNode as *const u8, INNER_NODE_SIZE)
         }

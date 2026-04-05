@@ -319,7 +319,10 @@ pub(crate) enum TableKind {
 
 pub(crate) fn encode_table_key(table_name: &str, kind: TableKind, key_bytes: &[u8]) -> Vec<u8> {
     let name_bytes = table_name.as_bytes();
-    let name_len = u16::try_from(name_bytes.len()).expect("table name exceeds u16::MAX bytes");
+    // Caller (validate_table_name) ensures name_bytes.len() <= u16::MAX.
+    debug_assert!(u16::try_from(name_bytes.len()).is_ok());
+    #[allow(clippy::cast_possible_truncation)]
+    let name_len = name_bytes.len() as u16;
     let mut buf = Vec::with_capacity(2 + name_bytes.len() + 1 + key_bytes.len());
     buf.extend_from_slice(&name_len.to_le_bytes());
     buf.extend_from_slice(name_bytes);
@@ -330,7 +333,9 @@ pub(crate) fn encode_table_key(table_name: &str, kind: TableKind, key_bytes: &[u
 
 pub(crate) fn table_prefix(table_name: &str, kind: TableKind) -> Vec<u8> {
     let name_bytes = table_name.as_bytes();
-    let name_len = u16::try_from(name_bytes.len()).expect("table name exceeds u16::MAX bytes");
+    debug_assert!(u16::try_from(name_bytes.len()).is_ok());
+    #[allow(clippy::cast_possible_truncation)]
+    let name_len = name_bytes.len() as u16;
     let mut buf = Vec::with_capacity(2 + name_bytes.len() + 1);
     buf.extend_from_slice(&name_len.to_le_bytes());
     buf.extend_from_slice(name_bytes);
@@ -373,6 +378,13 @@ const RESERVED_TABLE_PREFIX: &str = "__";
 /// internal table names. Returns `Err(BfTreeError::ReservedTableName)` if
 /// the name starts with the reserved `"__"` prefix.
 fn validate_table_name(name: &str) -> Result<(), BfTreeError> {
+    if name.len() > u16::MAX as usize {
+        return Err(BfTreeError::InvalidKV(alloc::format!(
+            "table name length {} exceeds maximum {} bytes",
+            name.len(),
+            u16::MAX
+        )));
+    }
     if name.starts_with(RESERVED_TABLE_PREFIX) {
         return Err(BfTreeError::ReservedTableName(alloc::string::String::from(
             name,

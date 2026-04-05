@@ -79,6 +79,8 @@ impl WriteAheadLogInner {
         self.clear_next_header();
         self.file_handle
             .write(self.file_offset, self.buffer.as_slice());
+        // NOTE: fsync is required after write to guarantee WAL durability on crash.
+        self.file_handle.flush();
 
         if !self.should_inplace_flush() {
             self.file_offset += self.buffer.buffer_size;

@@ -151,8 +151,14 @@ impl LeafKVMeta {
 
     pub fn op_type(&self) -> OpType {
         let l = self.op_type_key_len_in_byte;
-        let b = l >> OP_TYPE_SHIFT;
-        unsafe { core::mem::transmute(b as u8) }
+        let b = (l >> OP_TYPE_SHIFT) as u8;
+        match b {
+            0 => OpType::Insert,
+            1 => OpType::Delete,
+            2 => OpType::Cache,
+            3 => OpType::Phantom,
+            v => panic!("invalid OpType discriminant: {v}"),
+        }
     }
 
     pub fn mark_as_ref(&self) {
@@ -233,6 +239,8 @@ impl LeafNode {
         next_level: MiniPageNextLevel,
         cache_only: bool,
     ) {
+        // SAFETY: `ptr` is obtained from a CircularBufferPtr which guarantees a valid,
+        // properly aligned, and sufficiently sized allocation for a LeafNode of `node_size`.
         unsafe {
             Self::init_node_with_fence(
                 ptr.as_ptr(),
@@ -248,7 +256,13 @@ impl LeafNode {
 
     pub(crate) fn make_base_page(node_size: usize) -> *mut Self {
         let layout = Layout::from_size_align(node_size, core::mem::align_of::<LeafNode>()).unwrap();
+        // SAFETY: Layout is valid (non-zero size, power-of-two alignment) as enforced by
+        // the Layout::from_size_align call above. The returned pointer is checked implicitly
+        // by the subsequent write through init_node_with_fence.
         let ptr = unsafe { alloc::alloc::alloc(layout) };
+        // SAFETY: `ptr` was just allocated with the correct size and alignment for a LeafNode
+        // of `node_size` bytes. init_node_with_fence will write the node header and fence keys
+        // within the allocated region.
         unsafe {
             Self::init_node_with_fence(
                 ptr,
@@ -311,6 +325,11 @@ impl LeafNode {
         }
     }
 
+    /// # Safety
+    ///
+    /// `ptr` must point to a valid, writable allocation of at least `node_size` bytes,
+    /// aligned to `align_of::<LeafNode>()`. The caller must ensure no other references
+    /// to the same memory exist for the duration of this call.
     unsafe fn init_node_with_fence(
         ptr: *mut u8,
         low_fence: &[u8],
@@ -330,6 +349,9 @@ impl LeafNode {
     pub(crate) fn get_kv_meta(&self, index: usize) -> &LeafKVMeta {
         debug_assert!(index < self.meta.meta_count_with_fence() as usize);
         let meta_ptr = self.data.as_ptr() as *const LeafKVMeta;
+        // SAFETY: `index < meta_count_with_fence` (checked by debug_assert). The data buffer
+        // starts with a contiguous array of LeafKVMeta entries, so `meta_ptr.add(index)` is
+        // within bounds and properly aligned due to #[repr(C)] layout.
         unsafe { &*meta_ptr.add(index) }
     }
 
@@ -343,10 +365,17 @@ impl LeafNode {
     pub(crate) fn get_low_fence_full_key(&self) -> Vec<u8> {
         debug_assert!(LOW_FENCE_IDX < self.meta.meta_count_with_fence() as usize);
         let meta_ptr = self.data.as_ptr() as *const LeafKVMeta;
+        // SAFETY: LOW_FENCE_IDX (0) < meta_count_with_fence (checked by debug_assert above).
+        // The meta array is contiguous at the start of the data buffer.
         let meta = unsafe { &*meta_ptr.add(LOW_FENCE_IDX) };
 
         let key_offset = meta.get_offset();
+        // SAFETY: key_offset is set during fence key installation and points within the
+        // node's data buffer. The offset plus key length does not exceed the data region.
         let key_ptr = unsafe { self.data.as_ptr().add(key_offset as usize) };
+        // SAFETY: key_ptr and key_len were set consistently during install_fence_key.
+        // The low fence key is stored uncompressed, so the full key resides at
+        // [key_offset..key_offset + key_len] within the data buffer.
         unsafe {
             let key = core::slice::from_raw_parts(key_ptr, (meta.get_key_len()) as usize);
             [key].concat()
@@ -356,17 +385,28 @@ impl LeafNode {
     pub(crate) fn get_kv_meta_mut(&mut self, index: usize) -> &mut LeafKVMeta {
         debug_assert!(index < self.meta.meta_count_with_fence() as usize);
         let meta_ptr = self.data.as_mut_ptr() as *mut LeafKVMeta;
+        // SAFETY: `index < meta_count_with_fence` (checked by debug_assert). The meta array
+        // is contiguous at the start of the data buffer and we hold `&mut self`, so the
+        // mutable reference is exclusive. The pointer is non-null and properly aligned.
         unsafe { meta_ptr.add(index).as_mut().unwrap() }
     }
 
     pub(crate) fn write_initial_kv_meta(&mut self, index: usize, meta: LeafKVMeta) {
         let meta_ptr = self.data.as_mut_ptr() as *mut LeafKVMeta;
+        // SAFETY: The caller ensures `index` is within the allocated meta region of the data
+        // buffer. We hold `&mut self` so no aliasing references exist. The write initializes
+        // the meta slot without reading the previous value, avoiding UB from uninitialized data.
         unsafe { meta_ptr.add(index).write(meta) };
     }
 
     pub(crate) fn get_remaining_key(&self, meta: &LeafKVMeta) -> &[u8] {
         let key_offset = meta.get_offset();
+        // SAFETY: key_offset was set during insert/fence installation and points within the
+        // node's data buffer. The remaining key bytes start at this offset.
         let key_ptr = unsafe { self.data.as_ptr().add(key_offset as usize) };
+        // SAFETY: The remaining key (key_len - prefix_len bytes) is stored contiguously
+        // starting at key_offset within the data buffer, written during insert. The slice
+        // length does not exceed the data region.
         unsafe {
             core::slice::from_raw_parts(key_ptr, (meta.get_key_len() - self.prefix_len) as usize)
         }
@@ -375,6 +415,9 @@ impl LeafNode {
     pub(crate) fn get_prefix(&self) -> &[u8] {
         let m = self.get_kv_meta(LOW_FENCE_IDX);
         let key_offset = m.get_offset();
+        // SAFETY: The low fence key is stored at key_offset within the data buffer. The
+        // prefix is the first `prefix_len` bytes of the low fence key, which is always
+        // stored uncompressed. Both offset and length are within the data region.
         unsafe {
             core::slice::from_raw_parts(
                 self.data.as_ptr().add(key_offset as usize),
@@ -421,6 +464,10 @@ impl LeafNode {
 
             self.write_initial_kv_meta(loc as usize, new_meta);
 
+            // SAFETY: `offset` is computed from `cur_low_offset - kv_len` which places the
+            // key data within the free region of the data buffer. `prefix_len <= key.len()`
+            // so the slice from key is valid. copy_nonoverlapping is safe because source
+            // (key slice) and dest (node data buffer) do not overlap.
             unsafe {
                 let start_ptr = self.data.as_mut_ptr().add(offset as usize);
 
@@ -462,7 +509,12 @@ impl LeafNode {
 
     pub(crate) fn get_value(&self, meta: &LeafKVMeta) -> &[u8] {
         let val_offset = meta.get_offset() + meta.get_key_len() - self.prefix_len;
+        // SAFETY: The value is stored immediately after the remaining key bytes in the data
+        // buffer. val_offset = key_offset + (key_len - prefix_len) points to the start of
+        // the value region. Both pointer and length are within the node's data allocation.
         let val_ptr = unsafe { self.data.as_ptr().add(val_offset as usize) };
+        // SAFETY: val_ptr points within the data buffer, and value_len was recorded when the
+        // KV pair was inserted. The slice [val_ptr..val_ptr + value_len] is within bounds.
         unsafe { core::slice::from_raw_parts(val_ptr, meta.value_len() as usize) }
     }
 
@@ -931,6 +983,8 @@ impl LeafNode {
         }
 
         let meta_ptr = self.data.as_ptr() as *const LeafKVMeta;
+        // SAFETY: `index` (0) was checked to be < meta_count_with_fence above.
+        // The meta array is at the start of the data buffer and index 0 is always valid.
         let meta = unsafe { &*meta_ptr.add(index) };
 
         let key_offset = meta.get_offset();
@@ -940,7 +994,11 @@ impl LeafNode {
             return Err(TreeError::NeedRestart);
         }
 
+        // SAFETY: key_offset + key_len was just verified to be within max_data_size,
+        // so this pointer is within the node's data buffer.
         let key_ptr = unsafe { self.data.as_ptr().add(key_offset as usize) };
+        // SAFETY: The bounds check above ensures key_offset + key_len <= max_data_size,
+        // so (key_len - prefix_len) bytes starting at key_offset are within the data buffer.
         let key_slice =
             unsafe { core::slice::from_raw_parts(key_ptr, (key_len - self.prefix_len) as usize) };
         Ok(key_slice.to_vec())
@@ -952,6 +1010,9 @@ impl LeafNode {
         if fence_meta.is_infinite_low_fence_key() {
             vec![]
         } else {
+            // SAFETY: fence_meta.offset and key_len were set during install_fence_key.
+            // The low fence key is stored uncompressed in the data buffer at that offset,
+            // and key_len bytes are within the allocated data region.
             unsafe {
                 let start_ptr = self.data.as_ptr().add(fence_meta.offset as usize);
                 let key_slice =
@@ -1002,6 +1063,9 @@ impl LeafNode {
             let key_meta = self.get_kv_meta(index as usize);
 
             #[cfg(target_arch = "x86_64")]
+            // SAFETY: key_meta points to a valid LeafKVMeta within the node's data buffer.
+            // _mm_clflush only requires a valid readable address; it flushes the cache line
+            // containing that address and has no memory safety side effects.
             unsafe {
                 // For bw-tree-like linear search, we use clflush to simulate pointer chasing.
                 core::arch::x86_64::_mm_clflush(key_meta as *const LeafKVMeta as *const u8);
@@ -1108,6 +1172,10 @@ impl LeafNode {
 
                 if pos_value_len >= val_len {
                     // we are lucky, old value is larger than new value. We just overwrite the old value.
+                    // SAFETY: pos_meta.offset points to the existing KV pair in the data buffer.
+                    // The value region starts at offset + post_fix_len. Since pos_value_len >= val_len,
+                    // the destination has enough space for the new value. Source (value) and dest
+                    // (node data buffer) do not overlap.
                     unsafe {
                         let pair_ptr = self.data.as_ptr().add(pos_meta.offset as usize) as *mut u8;
                         core::ptr::copy_nonoverlapping(
@@ -1127,6 +1195,10 @@ impl LeafNode {
                 }
                 assert!(op_type != OpType::Cache);
                 let offset = self.current_lowest_offset() - kv_len;
+                // SAFETY: remaining_size >= kv_len was checked above, so `offset` points into
+                // the free region of the data buffer. The key suffix and value are copied into
+                // non-overlapping contiguous space at [offset..offset + kv_len]. Source slices
+                // (key, value) are from caller-provided buffers and do not alias the node data.
                 unsafe {
                     let pair_ptr = self.data.as_ptr().add(offset as usize) as *mut u8;
 
@@ -1172,6 +1244,11 @@ impl LeafNode {
         let new_meta =
             LeafKVMeta::make_prefixed_meta(offset, val_len, key, self.prefix_len, op_type);
 
+        // SAFETY: The full_with_fences check above ensured the node has capacity for the new
+        // meta entry plus KV data. core::ptr::copy shifts existing metas one slot right to
+        // make room at `pos`; source and dest may overlap so `copy` (not copy_nonoverlapping)
+        // is used. The KV data is written at `offset` in the free region of the data buffer.
+        // Source slices (key, value) are caller-provided and do not alias the node data buffer.
         unsafe {
             let metas_size = core::mem::size_of::<LeafKVMeta>()
                 * (self.meta.meta_count_with_fence() - pos as u16) as usize;
@@ -1511,6 +1588,9 @@ impl LeafNode {
     ) {
         assert!(!self.is_base_page());
         assert!(self.meta.node_size as usize <= dst_size);
+        // SAFETY: The caller guarantees `dst_node` points to a valid, writable allocation of
+        // at least `dst_size` bytes with proper alignment for LeafNode. No other references
+        // to the destination memory exist.
         let dst_ref = unsafe { &mut *dst_node };
         let empty = vec![];
 
@@ -1696,9 +1776,15 @@ impl LeafNode {
 
     /// Currently free node can only be called with base node. Mini page should be freed differently.
     pub(crate) fn free_base_page(node: *mut LeafNode) {
+        // SAFETY: The caller guarantees `node` is a valid pointer to a LeafNode that was
+        // allocated via make_base_page. The node is no longer referenced after this call.
         assert!(unsafe { &*node }.is_base_page());
+        // SAFETY: Same pointer validity as above; reading node_size from the header.
         let node_size = unsafe { &*node }.meta.node_size as usize;
         let layout = Layout::from_size_align(node_size, core::mem::align_of::<LeafNode>()).unwrap();
+        // SAFETY: `node` was allocated by alloc::alloc::alloc with the same layout
+        // (size = node_size, align = align_of::<LeafNode>()) in make_base_page.
+        // The pointer is not used after deallocation.
         unsafe {
             alloc::alloc::dealloc(node as *mut u8, layout);
         }

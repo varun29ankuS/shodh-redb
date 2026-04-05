@@ -463,6 +463,8 @@ pub struct BfTreeRangeIter<'a, K: Key + 'static, V: Value + 'static> {
     exclude_start: Option<Vec<u8>>,
     /// If set, skip entries whose raw (pre-strip) key matches this exactly (exclusive end).
     exclude_end: Option<Vec<u8>>,
+    /// Verification mode for checksum unwrapping of values.
+    verify_mode: Arc<VerifyMode>,
     _key: PhantomData<K>,
     _val: PhantomData<V>,
 }
@@ -473,12 +475,14 @@ impl<'a, K: Key + 'static, V: Value + 'static> BfTreeRangeIter<'a, K, V> {
         max_record_size: usize,
         exclude_start: Option<Vec<u8>>,
         exclude_end: Option<Vec<u8>>,
+        verify_mode: Arc<VerifyMode>,
     ) -> Self {
         Self {
             scan,
             buf: vec![0u8; max_record_size * 2],
             exclude_start,
             exclude_end,
+            verify_mode,
             _key: PhantomData,
             _val: PhantomData,
         }
@@ -521,7 +525,15 @@ impl<K: Key + 'static, V: Value + 'static> Iterator for BfTreeRangeIter<'_, K, V
             }
 
             let k = OwnedKv::new(key_owned);
-            let v = OwnedKv::new(val_owned);
+            let v = if self.verify_mode.is_enabled() {
+                let verify = should_verify(self.verify_mode.as_ref());
+                match unwrap_value(&val_owned, verify) {
+                    Ok(data) => OwnedKv::new(data.to_vec()),
+                    Err(e) => return Some(Err(e.into())),
+                }
+            } else {
+                OwnedKv::new(val_owned)
+            };
             return Some(Ok((k, v)));
         }
     }
@@ -538,6 +550,7 @@ fn build_bf_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     end: Option<&K::SelfType<'_>>,
     start_inclusive: bool,
     end_inclusive: bool,
+    verify_mode: Arc<VerifyMode>,
 ) -> crate::Result<BfTreeRangeIter<'a, K, V>> {
     // bf_tree::scan_with_end_key uses inclusive bounds [start, end].
     // We handle exclusivity via iterator-level filtering on the user key.
@@ -581,6 +594,7 @@ fn build_bf_range_scan<'a, K: Key + 'static, V: Value + 'static>(
         max_record_size,
         exclude_start,
         exclude_end,
+        verify_mode,
     ))
 }
 
@@ -588,6 +602,7 @@ fn build_bf_range_scan<'a, K: Key + 'static, V: Value + 'static>(
 // Helper: build a buffered range scan (merge buffer + BfTree)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     name: &str,
     adapter: &'a Arc<BfTreeAdapter>,
@@ -596,6 +611,7 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     end: Option<&K::SelfType<'_>>,
     start_inclusive: bool,
     end_inclusive: bool,
+    verify_mode: Arc<VerifyMode>,
 ) -> crate::Result<BufferedScanIter<'a, K, V>> {
     // BfTree scan uses inclusive bounds [start, end].
     // Exclusivity is handled at the iterator level via exclude_start/exclude_end.
@@ -644,6 +660,7 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
         max_record_size,
         exclude_start,
         exclude_end,
+        verify_mode,
     ))
 }
 
@@ -702,6 +719,7 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
             end,
             start_inclusive,
             end_inclusive,
+            Arc::clone(self.verify_mode),
         )
     }
 
@@ -827,6 +845,7 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V
             end,
             start_inclusive,
             end_inclusive,
+            Arc::clone(self.verify_mode),
         )
     }
 }

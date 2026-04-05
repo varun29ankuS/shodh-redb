@@ -248,6 +248,7 @@ mod tests {
     use std::{alloc::Layout, str::FromStr};
 
     #[test]
+    #[ignore] // requires aligned I/O environment; may fail on CI runners
     fn test_read_write_operations() {
         let file_path = PathBuf::from_str("target")
             .unwrap()

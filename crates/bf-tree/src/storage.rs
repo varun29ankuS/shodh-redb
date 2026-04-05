@@ -409,7 +409,7 @@ pub(crate) fn make_vfs(
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", not(feature = "shuttle")))]
 mod tests {
     use crate::sync::Arc;
 

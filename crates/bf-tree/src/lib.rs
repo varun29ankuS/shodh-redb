@@ -9,7 +9,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(not(feature = "std"), allow(unused_imports))]
-// Pre-existing MSR bf-tree lint issues — allow in forked code to avoid churn.
+// Pre-existing MSR bf-tree lint issues -- allow in forked code to avoid churn.
 #![allow(
     clippy::bool_assert_comparison,
     clippy::field_reassign_with_default,
@@ -47,7 +47,7 @@ mod mini_page_op;
 mod range_scan;
 mod storage;
 pub(crate) mod sync;
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", not(feature = "shuttle")))]
 mod tests;
 
 #[cfg(feature = "std")]

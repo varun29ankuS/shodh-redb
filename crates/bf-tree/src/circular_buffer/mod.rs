@@ -1031,7 +1031,7 @@ impl<'a> Iterator for AllocatedIter<'a> {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", not(feature = "shuttle")))]
 mod tests {
     use super::*;
     use crate::{BfTree, Config};

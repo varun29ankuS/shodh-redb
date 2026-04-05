@@ -398,7 +398,7 @@ impl LogHeader {
 
 const _: () = assert!(LogHeader::size() == 24);
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use std::time::Duration;
 

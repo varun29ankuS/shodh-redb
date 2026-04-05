@@ -558,7 +558,7 @@ impl WalConfig {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", not(feature = "shuttle")))]
 mod tests {
     use super::*;
 

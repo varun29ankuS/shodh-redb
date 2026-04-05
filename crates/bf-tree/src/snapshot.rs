@@ -365,8 +365,8 @@ impl BfTree {
     /// `storage_backend` and `cache_only` are overridden automatically.
     ///
     /// # Arguments
-    /// * `snapshot_path` – path to an existing snapshot file on disk.
-    /// * `memory_config` – configuration for the resulting in-memory tree.
+    /// * `snapshot_path` --path to an existing snapshot file on disk.
+    /// * `memory_config` --configuration for the resulting in-memory tree.
     ///
     /// # Panics
     /// Panics if the snapshot file does not exist.
@@ -495,7 +495,7 @@ fn serialize_u8_slice_to_disk(slice: &[u8], vfs: &Arc<dyn VfsImpl>) -> usize {
     start_offset.unwrap()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use crate::{
         nodes::leaf_node::LeafReadResult, utils::test_util::install_value_to_buffer, BfTree, Config,

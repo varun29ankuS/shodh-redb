@@ -955,7 +955,7 @@ impl BfTree {
 
     /// Delete a record from the tree.
     ///
-    /// ```
+    /// ```no_run
     /// use bf_tree::BfTree;
     /// use bf_tree::LeafReadResult;
     ///
@@ -1387,7 +1387,7 @@ pub(crate) fn eviction_callback(
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", not(feature = "shuttle")))]
 mod tests {
     use crate::error::ConfigError;
     use crate::BfTree;

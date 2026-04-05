@@ -79,7 +79,7 @@ const DEFAULT_RECORD_PER_BATCH: usize = 1024 * 1024;
 
 impl<T> MappingTable<T> {
     pub fn new(record_per_batch: usize) -> Self {
-        let mut batches = Vec::new();
+        let mut batches = Vec::with_capacity(MAX_BATCHES);
         for i in 0..MAX_BATCHES {
             if i == 0 {
                 batches.push(MaybeUninit::new(RecordBatch::new(record_per_batch)));
@@ -112,9 +112,14 @@ impl<T> MappingTable<T> {
 
     /// # Safety
     /// (1) The batch must be initialized.
-    /// (2) The batch must be smaller than `MAX_BATCHES`.
+    /// (2) `batch_id` must be less than `MAX_BATCHES`.
     unsafe fn get_batch(&self, batch_id: usize) -> &RecordBatch<T> {
+        debug_assert!(
+            batch_id < MAX_BATCHES,
+            "batch_id {batch_id} >= MAX_BATCHES {MAX_BATCHES}"
+        );
         let record_batch_vec = unsafe { &mut *self.batches.get() };
+        // SAFETY: batch_id < MAX_BATCHES and Vec was pre-allocated to exactly MAX_BATCHES.
         let batch = unsafe { record_batch_vec.get_unchecked_mut(batch_id) };
         let batch = unsafe { batch.assume_init_ref() };
         batch

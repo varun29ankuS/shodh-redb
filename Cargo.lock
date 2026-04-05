@@ -140,6 +140,7 @@ dependencies = [
  "hdrhistogram",
  "io-uring 0.6.4",
  "libc",
+ "portable-atomic",
  "proptest",
  "proptest-derive",
  "rand 0.8.5",

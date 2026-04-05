@@ -4,6 +4,8 @@
 
 pub(crate) mod atomic {
     pub use core::sync::atomic::*;
+    // Re-export AtomicU64 from portable-atomic for targets that lack native 64-bit atomics.
+    pub use portable_atomic::AtomicU64;
 }
 
 pub(crate) use alloc::sync::Arc;

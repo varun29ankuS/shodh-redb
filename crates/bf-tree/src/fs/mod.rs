@@ -50,7 +50,7 @@ pub(crate) trait VfsImpl: Send + Sync {
 /// We need these pair of function because spdk don't work with arbitrary memory, it needs memory that is pinned.
 /// Which essentially requires allocating memory from spdk, not from us.
 pub(crate) fn buffer_alloc(layout: alloc::alloc::Layout) -> *mut u8 {
-    #[cfg(feature = "spdk")]
+    #[cfg(all(feature = "spdk", target_os = "linux"))]
     {
         use crate::fs::spdk_vfs::spdk_alloc_queue;
         _ = layout;
@@ -64,7 +64,7 @@ pub(crate) fn buffer_alloc(layout: alloc::alloc::Layout) -> *mut u8 {
         ptr
     }
 
-    #[cfg(not(feature = "spdk"))]
+    #[cfg(not(all(feature = "spdk", target_os = "linux")))]
     unsafe {
         // SAFETY: layout is non-zero-sized and properly aligned by the caller.
         alloc::alloc::alloc(layout)
@@ -74,7 +74,7 @@ pub(crate) fn buffer_alloc(layout: alloc::alloc::Layout) -> *mut u8 {
 /// We need these pair of function because spdk don't work with any memory, it needs memory that is pinned.
 /// Which essentially requires allocating memory from spdk, not from us.
 pub(crate) fn buffer_dealloc(ptr: *mut u8, layout: alloc::alloc::Layout) {
-    #[cfg(feature = "spdk")]
+    #[cfg(all(feature = "spdk", target_os = "linux"))]
     {
         use crate::fs::spdk_vfs::{spdk_alloc_queue, SpdkAllocGuard};
         _ = layout;
@@ -82,7 +82,7 @@ pub(crate) fn buffer_dealloc(ptr: *mut u8, layout: alloc::alloc::Layout) {
         spdk_alloc_queue().push(guard).unwrap();
     }
 
-    #[cfg(not(feature = "spdk"))]
+    #[cfg(not(all(feature = "spdk", target_os = "linux")))]
     unsafe {
         // SAFETY: ptr was allocated with the same layout via buffer_alloc.
         alloc::alloc::dealloc(ptr, layout)

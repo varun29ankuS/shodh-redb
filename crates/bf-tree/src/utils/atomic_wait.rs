@@ -4,7 +4,11 @@
 /// Adapted from https://github.com/m-ou-se/atomic-wait
 use crate::sync::atomic::AtomicU32;
 
-#[cfg(all(target_os = "linux", not(feature = "shuttle")))]
+#[cfg(all(
+    feature = "std",
+    target_os = "linux",
+    not(all(feature = "shuttle", test))
+))]
 mod platform {
     use core::sync::atomic::AtomicU32;
     #[inline]
@@ -65,7 +69,11 @@ mod platform {
     }
 }
 
-#[cfg(all(target_os = "macos", not(feature = "shuttle")))]
+#[cfg(all(
+    feature = "std",
+    target_os = "macos",
+    not(all(feature = "shuttle", test))
+))]
 /// We don't do anything for macOS, just to make sure it compiles and correct.
 mod platform {
     use core::sync::atomic::AtomicU32;
@@ -80,7 +88,11 @@ mod platform {
     pub fn wake_all(_ptr: *const AtomicU32) {}
 }
 
-#[cfg(all(target_os = "windows", not(feature = "shuttle")))]
+#[cfg(all(
+    feature = "std",
+    target_os = "windows",
+    not(all(feature = "shuttle", test))
+))]
 mod platform {
     use core::sync::atomic::AtomicU32;
     use windows_sys::Win32::System::Threading::{
@@ -103,6 +115,43 @@ mod platform {
     pub fn wake_all(ptr: *const AtomicU32) {
         unsafe { WakeByAddressAll(ptr.cast()) };
     }
+}
+
+/// Fallback: spin-loop wait (no OS primitives available or no_std mode).
+///
+/// # Single-core targets
+/// On single-core MCUs without preemption (e.g. Cortex-M), spin-waiting can
+/// deadlock if the lock holder shares the same core. Users on single-core
+/// bare-metal MUST run under an RTOS with preemptive scheduling, or replace
+/// this module with an interrupt-based yield (e.g. `cortex_m::asm::wfe()`).
+#[cfg(not(any(
+    all(
+        feature = "std",
+        target_os = "linux",
+        not(all(feature = "shuttle", test))
+    ),
+    all(
+        feature = "std",
+        target_os = "macos",
+        not(all(feature = "shuttle", test))
+    ),
+    all(
+        feature = "std",
+        target_os = "windows",
+        not(all(feature = "shuttle", test))
+    ),
+    all(feature = "shuttle", test)
+)))]
+mod platform {
+    use core::sync::atomic::AtomicU32;
+    #[inline]
+    pub fn wait(_a: &AtomicU32, _expected: u32) {
+        core::hint::spin_loop();
+    }
+    #[inline]
+    pub fn wake_one(_ptr: *const AtomicU32) {}
+    #[inline]
+    pub fn wake_all(_ptr: *const AtomicU32) {}
 }
 
 /// If the value is `value`, wait until woken up.

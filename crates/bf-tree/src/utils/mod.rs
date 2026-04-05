@@ -182,9 +182,9 @@ pub(crate) fn get_rng() -> SmallThreadRng {
 #[cfg(not(all(feature = "shuttle", test)))]
 #[cfg(not(feature = "std"))]
 pub(crate) fn get_rng() -> rand::rngs::SmallRng {
-    use core::sync::atomic::{AtomicU64, Ordering};
-    static SEED_CTR: AtomicU64 = AtomicU64::new(1);
-    rand::rngs::SmallRng::seed_from_u64(SEED_CTR.fetch_add(1, Ordering::Relaxed))
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static SEED_CTR: AtomicU32 = AtomicU32::new(1);
+    rand::rngs::SmallRng::seed_from_u64(SEED_CTR.fetch_add(1, Ordering::Relaxed) as u64)
 }
 
 #[cfg(all(feature = "shuttle", test))]

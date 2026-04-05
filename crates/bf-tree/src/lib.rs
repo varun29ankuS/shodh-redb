@@ -1,8 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 // Forked with no_std support by Roshera.
+//
+// # no_std requirements
+// - Global allocator (`#[global_allocator]`) that supports 4096-byte alignment.
+// - Multi-core target or RTOS with preemptive scheduling (spin-wait deadlocks
+//   on single-core without preemption).
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(feature = "std"), allow(dead_code, unused_imports))]
 
 extern crate alloc;
 

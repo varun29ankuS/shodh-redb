@@ -14,7 +14,7 @@ keywords = ["database", "embedded", "vector", "blob", "no_std"]
 categories = ["database-implementations", "data-structures", "no-std"]
 
 [workspace]
-members = [".", "crates/redb-bench", "crates/redb-cli", "crates/redb-derive", "crates/redb-python"]
+members = [".", "crates/bf-tree", "crates/redb-bench", "crates/redb-cli", "crates/redb-derive", "crates/redb-python"]
 default-members = [".", "crates/redb-cli", "crates/redb-derive", "crates/redb-python"]
 
 [workspace.package]
@@ -34,7 +34,7 @@ sha2 = { version = "0.10", default-features = false }
 zstd = { version = "0.13.3", optional = true, default-features = false }
 hashbrown = "0.15"
 spin = { version = "0.9", default-features = false, features = ["spin_mutex", "rwlock"] }
-bf-tree = { version = "0.4.9", optional = true }
+bf-tree = { path = "crates/bf-tree", default-features = false, optional = true }
 
 [target.'cfg(target_os = "wasi")'.dependencies]
 libc = "0.2.174"
@@ -63,8 +63,8 @@ compression_lz4 = ["dep:lz4_flex"]
 compression_zstd = ["dep:zstd"]
 # Enable all compression algorithms
 compression = ["compression_lz4", "compression_zstd"]
-# Enable Bf-Tree concurrent storage engine (replaces single-writer B-tree core)
-bf_tree = ["dep:bf-tree", "std"]
+# Enable Bf-Tree concurrent storage engine (requires std for now via shodh-redb wrapper)
+bf_tree = ["dep:bf-tree", "bf-tree/std", "std"]
 
 [profile.bench]
 debug = true

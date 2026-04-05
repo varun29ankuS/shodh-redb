@@ -20,7 +20,9 @@ cfg_if! {
 use alloc::{format, string::String, vec::Vec};
 
 #[cfg(feature = "std")]
-use crate::wal::{WriteAheadLog, WriteOp as WalWriteOp};
+use crate::wal::{
+    LogEntry as WalLogEntry, SplitOp as WalSplitOp, WriteAheadLog, WriteOp as WalWriteOp,
+};
 use crate::{
     check_parent,
     circular_buffer::{CircularBufferMetrics, TombstoneHandle},
@@ -561,6 +563,17 @@ impl BfTree {
                 let leaf_node = x_page.load_base_page_mut();
                 let split_key = leaf_node.split(sibling, false);
 
+                #[cfg(feature = "std")]
+                if let Some(wal) = &self.wal {
+                    let split_op = WalSplitOp {
+                        source_page_id: cur_page_id.raw(),
+                        new_page_id: sibling_id.raw(),
+                        split_key: &split_key,
+                    };
+                    let log_entry = WalLogEntry::Split(split_op);
+                    let _ = wal.append_and_wait(&log_entry, 0)?;
+                }
+
                 let mut new_root_builder = InnerNodeBuilder::new();
                 new_root_builder
                     .set_disk_offset(self.storage.alloc_disk_offset(INNER_NODE_SIZE))
@@ -772,7 +785,7 @@ impl BfTree {
                         OpType::Delete => WalWriteOp::make_delete(write_op.key),
                         _ => WalWriteOp::make_insert(write_op.key, write_op.value),
                     };
-                    let lsn = wal.append_and_wait(&wal_op, leaf_entry.get_disk_offset());
+                    let lsn = wal.append_and_wait(&wal_op, leaf_entry.get_disk_offset())?;
                     leaf_entry.update_lsn(lsn);
                 }
             }
@@ -882,6 +895,9 @@ impl BfTree {
                     counter!(InsertLocked);
                     backoff.snooze();
                 }
+                Err(TreeError::IoError(e)) => {
+                    panic!("I/O error during insert: {e}");
+                }
             }
         }
     }
@@ -945,6 +961,9 @@ impl BfTree {
                         Err(_) => continue,
                     };
                 }
+                Err(TreeError::IoError(e)) => {
+                    panic!("I/O error during read: {e}");
+                }
                 Err(_) => {
                     backoff.spin();
                     aggressive_split = true;
@@ -994,6 +1013,9 @@ impl BfTree {
                         Ok(_) => continue,
                         Err(_) => continue,
                     };
+                }
+                Err(TreeError::IoError(e)) => {
+                    panic!("I/O error during delete: {e}");
                 }
                 Err(_) => {
                     aggressive_split = true;
@@ -1229,6 +1251,7 @@ impl BfTree {
                             counter!(ReadPromotionFailed);
                             Err(TreeError::NeedRestart)
                         }
+                        Err(e @ TreeError::IoError(_)) => Err(e),
                     }
                 } else {
                     match self.upgrade_to_full_page(x_leaf, parent.unwrap()) {

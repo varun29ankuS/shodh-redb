@@ -12,12 +12,13 @@ use std::os::windows::fs::FileExt;
 mod operations;
 
 use crate::config::WalConfig;
+use crate::error::{IoErrorKind, TreeError};
 use crate::fs::VfsImpl;
 use crate::storage::make_vfs;
 use crate::sync::atomic::AtomicBool;
 use std::sync::{Condvar, Mutex};
 
-pub(crate) use operations::{LogEntry, WriteOp};
+pub(crate) use operations::{LogEntry, SplitOp, WriteOp};
 
 const BLOCK_SIZE: usize = 512;
 
@@ -166,16 +167,18 @@ impl WriteAheadLog {
     }
 
     pub(crate) fn background_flush_job(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_poisoned) => return, // prior panic poisoned the mutex; exit cleanly
+        };
 
         let flush_interval = self.config.flush_interval;
         let mut last_flush = std::time::Instant::now();
         loop {
-            let v = self
-                .need_flush_cond
-                .wait_timeout(inner, flush_interval)
-                // wait for a notification or a interval, whichever happens first.
-                .unwrap();
+            let v = match self.need_flush_cond.wait_timeout(inner, flush_interval) {
+                Ok(v) => v,
+                Err(_poisoned) => return, // mutex poisoned; exit cleanly
+            };
 
             inner = v.0;
 
@@ -200,8 +203,11 @@ impl WriteAheadLog {
         &self,
         log_entry: &impl LogEntryImpl<'a>,
         page_offset: u64,
-    ) -> u64 {
-        let mut inner = self.inner.lock().unwrap();
+    ) -> Result<u64, TreeError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| TreeError::IoError(IoErrorKind::WalAppend))?;
 
         // log header + wal size
         let required_bytes = std::mem::size_of::<LogHeader>() + log_entry.log_size();
@@ -213,7 +219,7 @@ impl WriteAheadLog {
             inner = self
                 .flushed_cond
                 .wait_while(inner, |inner| !inner.need_flush)
-                .unwrap();
+                .map_err(|_| TreeError::IoError(IoErrorKind::WalAppend))?;
             // we need to retry here because by the time we wake up, the buffer maybe already full again.
             drop(inner);
             return self.append_and_wait(log_entry, page_offset);
@@ -221,14 +227,19 @@ impl WriteAheadLog {
 
         let lsn = inner.alloc_lsn();
         let header = LogHeader::new(lsn, page_offset, required_bytes);
+        // SAFETY: `alloc_buffer` returns a mutable slice within the pre-allocated WAL buffer.
+        // The debug_assert inside guarantees `buffer_cursor + required_bytes <= buffer_size`.
         let buffer = unsafe { inner.alloc_buffer(required_bytes) };
         buffer[0..LogHeader::size()].copy_from_slice(header.as_slice());
         log_entry.write_to_buffer(&mut buffer[LogHeader::size()..]);
 
         while inner.flushed_lsn < lsn {
-            inner = self.flushed_cond.wait(inner).unwrap();
+            inner = self
+                .flushed_cond
+                .wait(inner)
+                .map_err(|_| TreeError::IoError(IoErrorKind::WalFlush))?;
         }
-        lsn
+        Ok(lsn)
     }
 }
 
@@ -256,17 +267,26 @@ pub struct WalReader {
 impl WalReader {
     /// Create a new WalReader instance.
     ///
-    /// The `segment_size`` should be the same as the one used to create the WriteAheadLog instance.
+    /// The `segment_size` should be the same as the one used to create the WriteAheadLog instance.
     ///
-    /// Todo: we should include segment_size as a field in the wal file, so that we don't need to pass it in.
-    pub fn new(path: impl AsRef<Path>, segment_size: usize) -> Self {
-        let log_file = std::fs::OpenOptions::new().read(true).open(path).unwrap();
-        let file_size = log_file.metadata().unwrap().len() as usize;
-        WalReader {
+    /// Returns an error if the WAL file cannot be opened or its metadata cannot be read.
+    pub fn new(
+        path: impl AsRef<Path>,
+        segment_size: usize,
+    ) -> Result<Self, crate::error::BfTreeError> {
+        let log_file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| crate::error::IoErrorKind::SnapshotRead)?;
+        let file_size = log_file
+            .metadata()
+            .map_err(|_| crate::error::IoErrorKind::SnapshotRead)?
+            .len() as usize;
+        Ok(WalReader {
             log_file,
             segment_size,
             file_size,
-        }
+        })
     }
 
     /// Iterate through all the segments in the wal file.
@@ -287,7 +307,7 @@ pub struct WalSegmentIter<'a> {
 }
 
 impl Iterator for WalSegmentIter<'_> {
-    type Item = WalSegment;
+    type Item = Result<WalSegment, crate::error::IoErrorKind>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.cursor as usize >= self.reader.file_size {
             return None;
@@ -298,25 +318,27 @@ impl Iterator for WalSegmentIter<'_> {
 
         #[cfg(unix)]
         {
-            self.reader
+            if self
+                .reader
                 .log_file
                 .read_exact_at(&mut buffer, page_offset)
-                .unwrap();
+                .is_err()
+            {
+                return Some(Err(crate::error::IoErrorKind::SnapshotRead));
+            }
         }
         #[cfg(windows)]
         {
             let bytes_to_read = buffer.len();
-            let bytes_read = self
-                .reader
-                .log_file
-                .seek_read(&mut buffer, page_offset)
-                .unwrap();
-            assert_eq!(bytes_to_read, bytes_read);
+            match self.reader.log_file.seek_read(&mut buffer, page_offset) {
+                Ok(bytes_read) if bytes_read == bytes_to_read => {}
+                _ => return Some(Err(crate::error::IoErrorKind::SnapshotRead)),
+            }
         }
 
         self.cursor += self.reader.segment_size as u64;
 
-        Some(WalSegment { data: buffer })
+        Some(Ok(WalSegment { data: buffer }))
     }
 }
 
@@ -452,16 +474,17 @@ mod tests {
 
         for i in 0..log_entry_cnt {
             let log = TestLogEntry::new(i);
-            let lsn = wal.append_and_wait(&log, log.val as u64);
+            let lsn = wal.append_and_wait(&log, log.val as u64).unwrap();
             assert_eq!(lsn, i as u64);
         }
 
         wal.stop_background_job();
         drop(wal);
 
-        let reader = WalReader::new(&tmp_file, TEST_SEGMENT_SIZE);
+        let reader = WalReader::new(&tmp_file, TEST_SEGMENT_SIZE).unwrap();
         let mut cnt = 0;
         for segment in reader.segment_iter() {
+            let segment = segment.unwrap();
             let seg_iter = segment.entry_iter();
             for (header, data) in seg_iter {
                 let val = TestLogEntry::read_from_buffer(data);
@@ -499,7 +522,7 @@ mod tests {
                 crate::sync::thread::spawn(move || {
                     for i in 0..log_entry_cnt {
                         let log = TestLogEntry::new(i);
-                        let _lsn = wal_t.append_and_wait(&log, log.val as u64);
+                        let _lsn = wal_t.append_and_wait(&log, log.val as u64).unwrap();
                     }
                 })
             })
@@ -512,9 +535,10 @@ mod tests {
         wal.stop_background_job();
         drop(wal);
 
-        let reader = WalReader::new(&tmp_file, TEST_SEGMENT_SIZE);
+        let reader = WalReader::new(&tmp_file, TEST_SEGMENT_SIZE).unwrap();
         let mut cnt = 0;
         for segment in reader.segment_iter() {
+            let segment = segment.unwrap();
             let seg_iter = segment.entry_iter();
             for (header, data) in seg_iter {
                 let val = TestLogEntry::read_from_buffer(data);
@@ -528,6 +552,33 @@ mod tests {
         }
         assert_eq!(cnt, log_entry_cnt * thread_cnt);
         std::fs::remove_file(tmp_file).unwrap();
+    }
+
+    #[test]
+    fn split_op_serialization_roundtrip() {
+        use crate::wal::operations::{LogEntry, SplitOp};
+
+        let split_key = b"split_separator_key";
+        let original = SplitOp {
+            source_page_id: 42,
+            new_page_id: 99,
+            split_key: split_key.as_ref(),
+        };
+
+        let entry = LogEntry::Split(original);
+        let size = entry.log_size();
+        let mut buffer = vec![0u8; size];
+        entry.write_to_buffer(&mut buffer);
+
+        let recovered = LogEntry::read_from_buffer(&buffer);
+        match recovered {
+            LogEntry::Split(op) => {
+                assert_eq!(op.source_page_id, 42);
+                assert_eq!(op.new_page_id, 99);
+                assert_eq!(op.split_key, split_key.as_ref());
+            }
+            _ => panic!("Expected Split entry"),
+        }
     }
 
     /// As of https://github.com/awslabs/shuttle/issues/74

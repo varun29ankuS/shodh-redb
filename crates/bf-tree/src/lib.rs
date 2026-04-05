@@ -58,7 +58,7 @@ mod utils;
 #[cfg(feature = "std")]
 pub use config::WalConfig;
 pub use config::{Config, StorageBackend};
-pub use error::ConfigError;
+pub use error::{BfTreeError, ConfigError, IoErrorKind};
 pub use nodes::leaf_node::LeafReadResult;
 pub use range_scan::{ScanIter, ScanReturnField};
 pub use tree::{BfTree, LeafInsertResult, ScanIterError};

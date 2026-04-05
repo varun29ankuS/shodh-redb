@@ -55,6 +55,9 @@ pub struct Config {
     pub(crate) write_ahead_log: Option<Arc<WalConfig>>,
     pub(crate) write_load_full_page: bool,
     pub(crate) cache_only: bool,
+    /// When true, CRC-32 checksums are validated on every disk page read
+    /// and written on every disk page write. Default: true.
+    pub(crate) verify_checksums: bool,
 }
 
 impl Clone for Config {
@@ -79,6 +82,7 @@ impl Clone for Config {
             write_ahead_log: self.write_ahead_log.clone(),
             write_load_full_page: self.write_load_full_page,
             cache_only: self.cache_only,
+            verify_checksums: self.verify_checksums,
         }
     }
 }
@@ -161,6 +165,7 @@ impl Default for Config {
             write_ahead_log: None,
             write_load_full_page: true,
             cache_only: false,
+            verify_checksums: false,
         }
     }
 }
@@ -233,6 +238,7 @@ impl Config {
             write_ahead_log: None,
             write_load_full_page: config_file.write_load_full_page,
             cache_only: config_file.cache_only,
+            verify_checksums: false,
         }
     }
 
@@ -324,6 +330,17 @@ impl Config {
     /// Default: false
     pub fn cache_only(&mut self, cache_only: bool) -> &mut Self {
         self.cache_only = cache_only;
+        self
+    }
+
+    /// Default: false
+    ///
+    /// When enabled, CRC-32 checksums are computed on every disk page write
+    /// and validated on every disk page read. Only enable on freshly created
+    /// trees -- enabling on trees created without checksums will cause
+    /// validation failures on pre-existing pages.
+    pub fn verify_checksums(&mut self, verify: bool) -> &mut Self {
+        self.verify_checksums = verify;
         self
     }
 

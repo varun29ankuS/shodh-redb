@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 pub(crate) mod atomic_wait;
+pub(crate) mod crc32;
 pub(crate) mod inner_lock;
 mod mapping_table;
 pub(crate) mod rw_lock;

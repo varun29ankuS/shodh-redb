@@ -83,6 +83,17 @@ impl From<bf_tree::ConfigError> for BfTreeError {
     }
 }
 
+impl From<bf_tree::BfTreeError> for BfTreeError {
+    fn from(e: bf_tree::BfTreeError) -> Self {
+        match e {
+            bf_tree::BfTreeError::Config(ce) => Self::Config(ce),
+            bf_tree::BfTreeError::Io(io) => {
+                Self::Corruption(alloc::format!("bf-tree I/O error: {io}"))
+            }
+        }
+    }
+}
+
 impl From<bf_tree::ScanIterError> for BfTreeError {
     fn from(e: bf_tree::ScanIterError) -> Self {
         Self::Scan(e)

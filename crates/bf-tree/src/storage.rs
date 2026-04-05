@@ -4,9 +4,6 @@
 #[cfg(all(feature = "std", target_os = "linux"))]
 use crate::fs::IoUringVfs;
 
-#[cfg(all(feature = "std", target_os = "linux", feature = "spdk"))]
-use crate::fs::SpdkVfs;
-
 #[cfg(feature = "std")]
 use crate::fs::StdVfs;
 
@@ -410,8 +407,6 @@ pub(crate) fn make_vfs(
         #[cfg(target_os = "linux")]
         StorageBackend::StdDirect => Arc::new(crate::fs::StdDirectVfs::open(path.as_ref())),
 
-        #[cfg(all(target_os = "linux", feature = "spdk"))]
-        StorageBackend::Spdk => Arc::new(SpdkVfs::open(path.as_ref())),
     }
 }
 

@@ -51,7 +51,6 @@ metrics-rt-debug-timer = [
     "dep:variant_count",
 ]
 shuttle = ["std"]
-spdk = ["std"]
 tracing = ["std", "dep:tracing"]
 
 [dependencies]

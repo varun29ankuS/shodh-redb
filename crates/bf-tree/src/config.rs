@@ -95,8 +95,6 @@ pub enum StorageBackend {
     IoUringPolling,
     #[cfg(all(feature = "std", target_os = "linux"))]
     IoUringBlocking,
-    #[cfg(all(feature = "std", target_os = "linux", feature = "spdk"))]
-    Spdk,
 }
 
 #[allow(clippy::derivable_impls)] // conditional default based on feature flags

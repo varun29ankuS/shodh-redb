@@ -406,7 +406,6 @@ pub(crate) fn make_vfs(
 
         #[cfg(target_os = "linux")]
         StorageBackend::StdDirect => Arc::new(crate::fs::StdDirectVfs::open(path.as_ref())),
-
     }
 }
 

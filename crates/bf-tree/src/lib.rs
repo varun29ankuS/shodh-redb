@@ -8,7 +8,21 @@
 //   on single-core without preemption).
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#![cfg_attr(not(feature = "std"), allow(dead_code, unused_imports))]
+#![cfg_attr(not(feature = "std"), allow(unused_imports))]
+// Pre-existing MSR bf-tree lint issues — allow in forked code to avoid churn.
+#![allow(
+    clippy::bool_assert_comparison,
+    clippy::field_reassign_with_default,
+    clippy::let_unit_value,
+    clippy::needless_borrow,
+    clippy::needless_range_loop,
+    clippy::op_ref,
+    clippy::redundant_closure,
+    clippy::single_match,
+    clippy::useless_asref,
+    clippy::useless_vec,
+    dead_code
+)]
 
 extern crate alloc;
 
@@ -33,7 +47,7 @@ mod mini_page_op;
 mod range_scan;
 mod storage;
 pub(crate) mod sync;
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests;
 
 #[cfg(feature = "std")]

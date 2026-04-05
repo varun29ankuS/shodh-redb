@@ -197,7 +197,7 @@ impl FreeList {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std", not(feature = "shuttle")))]
 mod test {
     use super::*;
     use rstest::rstest;

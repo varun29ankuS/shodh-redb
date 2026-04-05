@@ -1387,7 +1387,7 @@ pub(crate) fn eviction_callback(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use crate::error::ConfigError;
     use crate::BfTree;

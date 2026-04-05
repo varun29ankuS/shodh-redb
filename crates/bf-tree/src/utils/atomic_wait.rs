@@ -51,7 +51,7 @@ mod platform {
 
 #[cfg(all(feature = "shuttle", test))]
 mod platform {
-    use shuttle::sync::atomic::AtomicU32;
+    use core::sync::atomic::AtomicU32;
 
     #[inline]
     pub fn wait(_a: &AtomicU32, _expected: u32) {

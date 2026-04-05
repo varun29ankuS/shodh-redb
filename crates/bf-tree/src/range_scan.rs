@@ -511,7 +511,7 @@ fn move_cursor_to_leaf<'a>(
     Ok((v, ScanLock::X(x_leaf)))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use crate::utils::test_util::install_value_to_buffer;
     use crate::BfTree;

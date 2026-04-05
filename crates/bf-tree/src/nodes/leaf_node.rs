@@ -2119,8 +2119,8 @@ mod tests {
         let mini = unsafe { &mut *LeafNode::make_base_page(4096) }; // Using base page as substitute
 
         // Insert values to base page and mini page accordingly
-        for i in 0..base_page_values.len() {
-            let n = &base_page_values[i];
+        for n in &base_page_values {
+            // SAFETY: n is a valid reference to a usize; we read exactly 1 element.
             let n_slice = unsafe { core::slice::from_raw_parts(n as *const usize, 1) };
             let key = cast_slice::<usize, u8>(n_slice);
             let value = cast_slice::<usize, u8>(n_slice);
@@ -2129,8 +2129,8 @@ mod tests {
             assert!(rt);
         }
 
-        for i in 0..mini_page_values.len() {
-            let n = &mini_page_values[i];
+        for n in &mini_page_values {
+            // SAFETY: n is a valid reference to a usize; we read exactly 1 element.
             let n_slice = unsafe { core::slice::from_raw_parts(n as *const usize, 1) };
             let key = cast_slice::<usize, u8>(n_slice);
             let value = cast_slice::<usize, u8>(n_slice);
@@ -2162,8 +2162,8 @@ mod tests {
         let sibling = unsafe { &mut *LeafNode::make_base_page(4096) };
 
         // Insert values to base page
-        for i in 0..base_page_values.len() {
-            let n = &base_page_values[i];
+        for n in &base_page_values {
+            // SAFETY: n is a valid reference to a usize; we read exactly 1 element.
             let n_slice = unsafe { core::slice::from_raw_parts(n as *const usize, 1) };
             let key = cast_slice::<usize, u8>(n_slice);
             let value = cast_slice::<usize, u8>(n_slice);
@@ -2183,13 +2183,14 @@ mod tests {
         // All values less than splitting key are in the left side node (self)
         // while those greater than or equal to the key are in the sibling node
         let mut out_buffer = vec![0u8; 1024];
-        for i in 0..base_page_values.len() {
-            let mut page = &mut *base;
-            if base_page_values[i] >= splitting_key {
-                page = &mut *sibling;
-            }
+        for n in &base_page_values {
+            let page = if *n >= splitting_key {
+                &mut *sibling
+            } else {
+                &mut *base
+            };
 
-            let n = &base_page_values[i];
+            // SAFETY: n is a valid reference to a usize; we read exactly 1 element.
             let n_slice = unsafe { core::slice::from_raw_parts(n as *const usize, 1) };
             let key = cast_slice::<usize, u8>(n_slice);
 

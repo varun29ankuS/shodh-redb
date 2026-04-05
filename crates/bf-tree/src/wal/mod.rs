@@ -421,10 +421,12 @@ mod tests {
             8
         }
 
+        #[allow(clippy::disallowed_methods)] // test-only: usize serialization for test entries
         fn write_to_buffer(&self, buffer: &mut [u8]) {
             buffer.copy_from_slice(&self.val.to_le_bytes());
         }
 
+        #[allow(clippy::disallowed_methods)] // test-only: usize deserialization for test entries
         fn read_from_buffer(buffer: &[u8]) -> Self {
             let val = usize::from_le_bytes(buffer.try_into().unwrap());
             TestLogEntry { val }

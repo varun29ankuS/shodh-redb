@@ -9,12 +9,13 @@
 //! - **Concurrent writes**: Multiple `BfTreeTable` handles from different transactions
 //!   can write to the same table simultaneously without blocking.
 
+use crate::compat::Mutex;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use crate::TableHandle;
 use crate::cdc::types::{CdcEvent, ChangeOp};
@@ -90,7 +91,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     /// Record a CDC event if CDC is enabled.
     fn record_cdc(&self, event: CdcEvent) {
         if let Some(log) = self.cdc_log {
-            log.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+            log.lock().push(event);
         }
     }
 
@@ -122,7 +123,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         // TOCTOU races where a concurrent writer could interleave between the
         // old-value read and the new-value write, causing stale CDC events.
         let previous = {
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.buffer.lock();
             let prev_raw = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
@@ -184,7 +185,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         // prevent TOCTOU races where a concurrent writer could insert between
         // the old-value read and the tombstone write.
         let previous = {
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.buffer.lock();
             let prev_raw = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
@@ -238,7 +239,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
         let checksumming = self.verify_mode.is_enabled();
 
-        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let buffer = self.buffer.lock();
         match buffer.get(&encoded_key) {
             BufferLookup::Found(v) => {
                 return if checksumming {
@@ -292,7 +293,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         // TOCTOU races where a concurrent merge could read the same stale
         // value, causing a classic lost-update problem.
         let (old_value, new_value) = {
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.buffer.lock();
             let existing_raw = match buffer.get(&encoded_key) {
                 BufferLookup::Found(v) => Some(v),
                 BufferLookup::Tombstone => None,
@@ -359,7 +360,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
 
-        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let buffer = self.buffer.lock();
         match buffer.get(&encoded_key) {
             BufferLookup::Found(_) => return true,
             BufferLookup::Tombstone => return false,
@@ -462,6 +463,8 @@ pub struct BfTreeRangeIter<'a, K: Key + 'static, V: Value + 'static> {
     exclude_start: Option<Vec<u8>>,
     /// If set, skip entries whose raw (pre-strip) key matches this exactly (exclusive end).
     exclude_end: Option<Vec<u8>>,
+    /// Verification mode for checksum unwrapping of values.
+    verify_mode: Arc<VerifyMode>,
     _key: PhantomData<K>,
     _val: PhantomData<V>,
 }
@@ -472,12 +475,14 @@ impl<'a, K: Key + 'static, V: Value + 'static> BfTreeRangeIter<'a, K, V> {
         max_record_size: usize,
         exclude_start: Option<Vec<u8>>,
         exclude_end: Option<Vec<u8>>,
+        verify_mode: Arc<VerifyMode>,
     ) -> Self {
         Self {
             scan,
             buf: vec![0u8; max_record_size * 2],
             exclude_start,
             exclude_end,
+            verify_mode,
             _key: PhantomData,
             _val: PhantomData,
         }
@@ -520,7 +525,15 @@ impl<K: Key + 'static, V: Value + 'static> Iterator for BfTreeRangeIter<'_, K, V
             }
 
             let k = OwnedKv::new(key_owned);
-            let v = OwnedKv::new(val_owned);
+            let v = if self.verify_mode.is_enabled() {
+                let verify = should_verify(self.verify_mode.as_ref());
+                match unwrap_value(&val_owned, verify) {
+                    Ok(data) => OwnedKv::new(data.to_vec()),
+                    Err(e) => return Some(Err(e.into())),
+                }
+            } else {
+                OwnedKv::new(val_owned)
+            };
             return Some(Ok((k, v)));
         }
     }
@@ -537,6 +550,7 @@ fn build_bf_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     end: Option<&K::SelfType<'_>>,
     start_inclusive: bool,
     end_inclusive: bool,
+    verify_mode: Arc<VerifyMode>,
 ) -> crate::Result<BfTreeRangeIter<'a, K, V>> {
     // bf_tree::scan_with_end_key uses inclusive bounds [start, end].
     // We handle exclusivity via iterator-level filtering on the user key.
@@ -580,6 +594,7 @@ fn build_bf_range_scan<'a, K: Key + 'static, V: Value + 'static>(
         max_record_size,
         exclude_start,
         exclude_end,
+        verify_mode,
     ))
 }
 
@@ -587,6 +602,7 @@ fn build_bf_range_scan<'a, K: Key + 'static, V: Value + 'static>(
 // Helper: build a buffered range scan (merge buffer + BfTree)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     name: &str,
     adapter: &'a Arc<BfTreeAdapter>,
@@ -595,6 +611,7 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     end: Option<&K::SelfType<'_>>,
     start_inclusive: bool,
     end_inclusive: bool,
+    verify_mode: Arc<VerifyMode>,
 ) -> crate::Result<BufferedScanIter<'a, K, V>> {
     // BfTree scan uses inclusive bounds [start, end].
     // Exclusivity is handled at the iterator level via exclude_start/exclude_end.
@@ -632,7 +649,7 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     let max_record_size = adapter.inner().config().get_cb_max_record_size();
 
     // Collect buffer entries for this range (prefix-stripped keys).
-    let buf = buffer_mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let buf = buffer_mutex.lock();
     let buf_entries =
         collect_buffer_entries_for_table(&buf, name, TableKind::Regular, &scan_start, &scan_end);
     drop(buf);
@@ -643,6 +660,7 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
         max_record_size,
         exclude_start,
         exclude_end,
+        verify_mode,
     ))
 }
 
@@ -701,6 +719,7 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
             end,
             start_inclusive,
             end_inclusive,
+            Arc::clone(self.verify_mode),
         )
     }
 
@@ -731,7 +750,7 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
                 keys
             };
 
-            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.buffer.lock();
             let pass_count = buffer.drain_table(&bftree_encoded_keys, &prefix, &prefix_end);
             drop(buffer);
 
@@ -826,6 +845,7 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V
             end,
             start_inclusive,
             end_inclusive,
+            Arc::clone(self.verify_mode),
         )
     }
 }

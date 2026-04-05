@@ -172,6 +172,7 @@ impl core::fmt::Display for UnifiedError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for UnifiedError {}
 
 impl From<crate::DatabaseError> for UnifiedError {

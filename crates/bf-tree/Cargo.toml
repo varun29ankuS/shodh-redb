@@ -1,0 +1,97 @@
+[package]
+name = "bf-tree"
+version = "0.5.0"
+edition = "2021"
+description = "Bf-Tree: read-write-optimized concurrent larger-than-memory range index. Forked from MSR bf-tree 0.4.9 with no_std support."
+license = "MIT"
+
+[lib]
+name = "bf_tree"
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = [
+    "dep:toml",
+    "dep:serde_json",
+    "dep:thread_local",
+    "dep:io-uring",
+    "dep:libc",
+    "dep:windows-sys",
+    "rand/std",
+    "rand/std_rng",
+    "serde/std",
+]
+metrics = [
+    "std",
+    "dep:auto_ops",
+    "dep:hdrhistogram",
+    "dep:chrono",
+    "dep:variant_count",
+]
+metrics-rt = [
+    "std",
+    "dep:auto_ops",
+    "dep:hdrhistogram",
+    "dep:chrono",
+    "dep:variant_count",
+]
+metrics-rt-debug-all = [
+    "std",
+    "dep:auto_ops",
+    "dep:hdrhistogram",
+    "dep:chrono",
+    "dep:variant_count",
+]
+metrics-rt-debug-timer = [
+    "std",
+    "dep:auto_ops",
+    "dep:hdrhistogram",
+    "dep:chrono",
+    "dep:variant_count",
+]
+shuttle = ["std"]
+tracing = ["std", "dep:tracing"]
+
+[dependencies]
+cfg-if = "=1.0.0"
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+
+portable-atomic = { version = "1", default-features = false, features = ["fallback"] }
+rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+# std-only deps
+serde_json = { version = "1.0.116", optional = true }
+thread_local = { version = "1.1.9", optional = true }
+toml = { version = "0.8.23", optional = true }
+tracing = { version = "0.1", optional = true }
+
+# metrics deps (all require std)
+auto_ops = { version = "0.3", optional = true }
+hdrhistogram = { version = "7.5.4", optional = true }
+chrono = { version = "0.4.38", optional = true }
+variant_count = { version = "1.1.0", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.6.4", optional = true }
+libc = { version = "0.2.155", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59.0", optional = true, features = [
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
+[dev-dependencies]
+bytemuck = { version = "1.24.0", features = ["must_cast"] }
+proptest = "1.6.0"
+proptest-derive = "0.5.1"
+rand_test = { version = "0.9.2", package = "rand" }
+rstest = "0.19.0"
+shuttle = "0.7.1"
+tempfile = "3.10.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+debug = 2

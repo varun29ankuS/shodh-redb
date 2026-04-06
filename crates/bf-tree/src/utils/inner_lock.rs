@@ -20,10 +20,14 @@ impl<'a> ReadGuard<'a> {
     pub(crate) fn new(v: u16, node: &'a InnerNode) -> Self {
         Self {
             version: v,
-            node: unsafe { &*(node as *const InnerNode as *const UnsafeCell<InnerNode>) }, // todo: the caller should pass UnsafeCell<BaseNode> instead
+            // SAFETY: InnerNode and UnsafeCell<InnerNode> have identical layout (#[repr(transparent)]
+            // for UnsafeCell). The caller guarantees node is valid for lifetime 'a.
+            node: unsafe { &*(node as *const InnerNode as *const UnsafeCell<InnerNode>) },
         }
     }
     pub(crate) fn try_read(ptr: *const InnerNode) -> Result<ReadGuard<'a>, TreeError> {
+        // SAFETY: The caller guarantees ptr is a valid, aligned pointer to a live InnerNode
+        // with lifetime 'a. We create only a shared reference for reading version_lock.
         let node = unsafe { &*ptr };
         let v = node.version_lock.load(Ordering::Acquire);
         if is_locked(v) {
@@ -44,6 +48,9 @@ impl<'a> ReadGuard<'a> {
     }
 
     pub(crate) fn as_ref(&self) -> &InnerNode {
+        // SAFETY: ReadGuard holds a shared (optimistic) lock on the node. The UnsafeCell::get()
+        // returns a raw pointer to the inner InnerNode; creating a shared reference is safe
+        // because the version check ensures no concurrent writer has modified the node.
         unsafe { &*self.node.get() }
     }
 
@@ -68,10 +75,16 @@ pub struct WriteGuard<'a> {
 
 impl<'a> WriteGuard<'a> {
     pub(crate) fn as_ref(&self) -> &'a InnerNode {
+        // SAFETY: WriteGuard has exclusive ownership of the node (version_lock is held in
+        // locked state). UnsafeCell::get() yields a valid pointer; no other thread can hold
+        // a read or write lock simultaneously.
         unsafe { &*self.node.get() }
     }
 
     pub(crate) fn as_mut(&mut self) -> &'a mut InnerNode {
+        // SAFETY: WriteGuard has exclusive ownership (&mut self ensures single access).
+        // The version_lock is in locked state preventing concurrent readers from validating
+        // their version checks. Creating a mutable reference is sound.
         unsafe { &mut *self.node.get() }
     }
 
@@ -89,6 +102,10 @@ impl<'a> WriteGuard<'a> {
             .fetch_add(0b10, Ordering::Release)
             + 0b10;
         let n = self.node.get();
+        // SAFETY: n was obtained from UnsafeCell::get() which returns a valid pointer.
+        // The version_lock has just been updated (unlocked), so creating a shared reference
+        // for the new ReadGuard is safe. mem::forget(self) prevents the Drop impl from
+        // double-incrementing the version.
         let rt = ReadGuard::new(new_v, unsafe { &*n });
         core::mem::forget(self);
         rt

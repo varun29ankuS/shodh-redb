@@ -55,6 +55,8 @@ impl TimerRecorder {
     }
 
     pub(crate) fn add_time(&mut self, event: Timer, time: Duration) {
+        // SAFETY: Timer is #[repr(u8)] with variants 0..VARIANT_COUNT-1. The `event as usize`
+        // cast is always < VARIANT_COUNT which equals self.timers.len(), so the index is in bounds.
         unsafe {
             self.timers
                 .get_unchecked_mut(event as usize)
@@ -122,6 +124,8 @@ impl Serialize for TimerRecorder {
         state.serialize_field("file", &file_name)?;
 
         for (i, timer) in self.timers.iter().enumerate() {
+            // SAFETY: i iterates over 0..self.timers.len() == Timer::VARIANT_COUNT.
+            // Timer is #[repr(u8)] with contiguous discriminants, so i as u8 is always valid.
             let variant: Timer = unsafe { std::mem::transmute(i as u8) };
             match variant {
                 Timer::Read => {
@@ -191,6 +195,8 @@ impl DebugTimerGuard {
 
         if let Some(ref r) = self.tls_recorder {
             let rc = r.get_or(|| UnsafeCell::new(TlsRecorder::default()));
+            // SAFETY: rc is a thread-local UnsafeCell, so only the current thread accesses it.
+            // No other mutable references to this TlsRecorder exist within this thread.
             let rc_mut = unsafe { &mut *rc.get() };
             rc_mut.add_time(self.event.clone(), elapsed);
         }

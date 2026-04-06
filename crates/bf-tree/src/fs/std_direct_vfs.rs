@@ -13,6 +13,7 @@ use std::{
 };
 
 use crate::counter;
+use crate::error::IoErrorKind;
 
 use super::{OffsetAlloc, VfsImpl};
 
@@ -23,13 +24,16 @@ pub(crate) struct StdDirectVfs {
 }
 
 impl StdDirectVfs {
-    pub(crate) fn open(path: impl AsRef<std::path::Path>) -> Self {
+    pub(crate) fn open(path: impl AsRef<std::path::Path>) -> Result<Self, IoErrorKind> {
         let path = path.as_ref();
 
-        let parent = path.parent().unwrap();
+        let parent = path.parent().ok_or(IoErrorKind::VfsRead { offset: 0 })?;
         _ = std::fs::create_dir_all(parent);
 
-        let path_cstr = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let path_cstr = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| IoErrorKind::VfsRead { offset: 0 })?;
+        // SAFETY: path_cstr is a valid null-terminated C string. O_CREAT|O_RDWR opens or
+        // creates the file. The mode bits grant owner read/write.
         let raw_fd = unsafe {
             libc::open(
                 path_cstr.as_ptr(),
@@ -37,23 +41,23 @@ impl StdDirectVfs {
                 libc::S_IRUSR | libc::S_IWUSR,
             )
         };
-        assert!(
-            raw_fd >= 0,
-            "Failed to open file {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        );
+        if raw_fd < 0 {
+            return Err(IoErrorKind::VfsRead { offset: 0 });
+        }
 
         // SAFETY: raw_fd is a valid file descriptor returned by libc::open above.
         let mut file = unsafe { File::from_raw_fd(raw_fd) };
-        file.flush().unwrap();
-        let offset = file.metadata().unwrap().len();
+        file.flush().map_err(|_| IoErrorKind::VfsFlush)?;
+        let offset = file
+            .metadata()
+            .map_err(|_| IoErrorKind::VfsRead { offset: 0 })?
+            .len();
 
-        Self {
+        Ok(Self {
             file,
             offset_alloc: OffsetAlloc::new_with(offset as usize),
             _path: path.to_path_buf(),
-        }
+        })
     }
 }
 
@@ -66,17 +70,23 @@ impl VfsImpl for StdDirectVfs {
         self.offset_alloc.dealloc_offset(offset)
     }
 
-    fn read(&self, offset: usize, buf: &mut [u8]) {
+    fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), IoErrorKind> {
         counter!(IOReadRequest);
-        self.file.read_at(buf, offset as u64).unwrap();
+        self.file
+            .read_at(buf, offset as u64)
+            .map_err(|_| IoErrorKind::VfsRead { offset })?;
+        Ok(())
     }
 
-    fn flush(&self) {
-        self.file.sync_all().unwrap();
+    fn flush(&self) -> Result<(), IoErrorKind> {
+        self.file.sync_all().map_err(|_| IoErrorKind::VfsFlush)
     }
 
-    fn write(&self, offset: usize, buf: &[u8]) {
+    fn write(&self, offset: usize, buf: &[u8]) -> Result<(), IoErrorKind> {
         counter!(IOWriteRequest);
-        self.file.write_at(buf, offset as u64).unwrap();
+        self.file
+            .write_at(buf, offset as u64)
+            .map_err(|_| IoErrorKind::VfsWrite { offset })?;
+        Ok(())
     }
 }

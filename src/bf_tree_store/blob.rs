@@ -173,7 +173,7 @@ fn scan_range_buffered(
     let mut combined: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
 
     if let Ok(mut iter) = adapter.scan_range(start, end) {
-        while let Some((key_len, val_len)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, val_len))) = iter.next(&mut scan_buf) {
             // Validate that key + value fits within the scan buffer.
             if key_len + val_len > scan_buf.len() {
                 continue;
@@ -844,7 +844,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
 
         if let Ok(mut iter) = self.adapter.scan_range(&prefix, &prefix_end) {
-            while let Some((key_len, val_len)) = iter.next(&mut scan_buf) {
+            while let Ok(Some((key_len, val_len))) = iter.next(&mut scan_buf) {
                 if key_len + val_len > scan_buf.len() {
                     continue;
                 }
@@ -897,7 +897,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
 
         if let Ok(mut iter) = self.adapter.scan_range(&prefix, &prefix_end) {
-            while let Some((key_len, val_len)) = iter.next(&mut scan_buf) {
+            while let Ok(Some((key_len, val_len))) = iter.next(&mut scan_buf) {
                 if key_len + val_len > scan_buf.len() {
                     continue;
                 }
@@ -955,7 +955,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
 
         // Scan committed BfTree entries.
         if let Ok(mut iter) = self.adapter.scan_range(&start_encoded, &end_encoded) {
-            while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+            while let Ok(Some((key_len, _))) = iter.next(&mut scan_buf) {
                 keys_to_delete.push(scan_buf[..key_len].to_vec());
             }
         }
@@ -993,7 +993,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
 
         // Scan committed BfTree entries.
         if let Ok(mut iter) = self.adapter.scan_range(&prefix, &prefix_end) {
-            while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+            while let Ok(Some((key_len, _))) = iter.next(&mut scan_buf) {
                 if key_len <= prefix_len {
                     continue;
                 }
@@ -1443,7 +1443,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
         let mut results = Vec::new();
 
-        while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, _))) = iter.next(&mut scan_buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -1469,7 +1469,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
         let mut results = Vec::new();
 
-        while let Some((key_len, val_len)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, val_len))) = iter.next(&mut scan_buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -1498,7 +1498,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_key, &end_key)?;
 
-        while let Some((key_len, val_len)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, val_len))) = iter.next(&mut scan_buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -1537,7 +1537,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
         let mut results = Vec::new();
 
-        while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, _))) = iter.next(&mut scan_buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -1571,7 +1571,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
         let mut results = Vec::new();
 
-        while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, _))) = iter.next(&mut scan_buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -1956,5 +1956,122 @@ mod tests {
         assert_eq!(meta.blob_ref.length, 0);
         let _ = blob_store;
         wtxn.commit().unwrap();
+    }
+
+    /// Dedup pipeline: two identical blobs share chunk data.
+    ///
+    /// Stores two blobs with identical content (>= `DEDUP_MIN_SIZE`). The second
+    /// blob should be deduped: it shares the first blob's chunk data instead of
+    /// writing its own. Both blobs remain independently readable.
+    #[test]
+    fn dedup_identical_blobs_share_chunks() {
+        let db = test_db();
+
+        // Data must be >= DEDUP_MIN_SIZE (4096) to trigger dedup.
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+
+        let wtxn = db.begin_write();
+        let blob_store = wtxn.open_blob_store();
+
+        let id1 = blob_store
+            .store(
+                &data,
+                ContentType::OctetStream,
+                "blob-1",
+                StoreOptions::default(),
+            )
+            .unwrap();
+
+        let id2 = blob_store
+            .store(
+                &data,
+                ContentType::OctetStream,
+                "blob-2",
+                StoreOptions::default(),
+            )
+            .unwrap();
+
+        // IDs must differ (unique sequence numbers).
+        assert_ne!(id1, id2);
+
+        // Both blobs must be independently readable with identical content.
+        let read1 = blob_store.read(id1).unwrap().unwrap();
+        let read2 = blob_store.read(id2).unwrap().unwrap();
+        assert_eq!(read1, data);
+        assert_eq!(read2, data);
+
+        let _ = blob_store;
+        wtxn.commit().unwrap();
+
+        // After commit, both blobs are still readable.
+        let wtxn2 = db.begin_write();
+        let bs2 = wtxn2.open_blob_store();
+        assert_eq!(bs2.read(id1).unwrap().unwrap(), data);
+        assert_eq!(bs2.read(id2).unwrap().unwrap(), data);
+    }
+
+    /// Deleting one deduped blob leaves the other intact.
+    ///
+    /// After dedup, both blobs share chunk data. Deleting the first blob
+    /// should not affect the second blob's readability. The dedup ref-count
+    /// prevents premature cleanup.
+    #[test]
+    fn dedup_delete_one_leaves_other_intact() {
+        let db = test_db();
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+
+        // Store and commit first blob.
+        let id1;
+        {
+            let wtxn = db.begin_write();
+            let bs = wtxn.open_blob_store();
+            id1 = bs
+                .store(
+                    &data,
+                    ContentType::OctetStream,
+                    "first",
+                    StoreOptions::default(),
+                )
+                .unwrap();
+            let _ = bs;
+            wtxn.commit().unwrap();
+        }
+
+        // Store identical blob in a new transaction (dedup across commits).
+        let id2;
+        {
+            let wtxn = db.begin_write();
+            let bs = wtxn.open_blob_store();
+            id2 = bs
+                .store(
+                    &data,
+                    ContentType::OctetStream,
+                    "second",
+                    StoreOptions::default(),
+                )
+                .unwrap();
+            let _ = bs;
+            wtxn.commit().unwrap();
+        }
+
+        // Delete the first blob.
+        {
+            let wtxn = db.begin_write();
+            let bs = wtxn.open_blob_store();
+            bs.delete(id1).unwrap();
+            let _ = bs;
+            wtxn.commit().unwrap();
+        }
+
+        // Second blob must still be readable with correct data.
+        {
+            let wtxn = db.begin_write();
+            let bs = wtxn.open_blob_store();
+            let read2 = bs.read(id2).unwrap().unwrap();
+            assert_eq!(read2, data, "deduped blob must survive partner deletion");
+
+            // First blob should be gone.
+            assert!(bs.read(id1).unwrap().is_none());
+        }
     }
 }

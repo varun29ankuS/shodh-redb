@@ -291,9 +291,13 @@ impl TestVfs {
 
 #[cfg(all(test, feature = "std"))]
 impl crate::fs::VfsImpl for TestVfs {
-    fn read(&self, _offset: usize, _buf: &mut [u8]) {}
+    fn read(&self, _offset: usize, _buf: &mut [u8]) -> Result<(), crate::error::IoErrorKind> {
+        Ok(())
+    }
 
-    fn write(&self, _offset: usize, _buf: &[u8]) {}
+    fn write(&self, _offset: usize, _buf: &[u8]) -> Result<(), crate::error::IoErrorKind> {
+        Ok(())
+    }
 
     fn alloc_offset(&self, _size: usize) -> usize {
         0
@@ -301,5 +305,7 @@ impl crate::fs::VfsImpl for TestVfs {
 
     fn dealloc_offset(&self, _offset: usize) {}
 
-    fn flush(&self) {}
+    fn flush(&self) -> Result<(), crate::error::IoErrorKind> {
+        Ok(())
+    }
 }

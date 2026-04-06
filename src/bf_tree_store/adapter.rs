@@ -129,7 +129,7 @@ impl BfTreeAdapter {
     ///
     /// This is a stop-the-world operation that flushes the circular buffer
     /// to disk and writes snapshot metadata.
-    pub fn snapshot(&self) -> std::path::PathBuf {
+    pub fn snapshot(&self) -> Result<std::path::PathBuf, bf_tree::BfTreeError> {
         self.inner.snapshot()
     }
 
@@ -253,7 +253,7 @@ mod tests {
         let mut iter = adapter.scan_from(b"aaa", 10).unwrap();
         let mut buf = [0u8; 256];
         let mut count = 0;
-        while iter.next(&mut buf).is_some() {
+        while matches!(iter.next(&mut buf), Ok(Some(_))) {
             count += 1;
         }
         assert_eq!(count, 3);

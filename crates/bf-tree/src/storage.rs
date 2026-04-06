@@ -204,8 +204,11 @@ impl Drop for LeafStorage {
 
 impl LeafStorage {
     #[cfg(feature = "std")]
-    pub(crate) fn new(config: Arc<Config>, buffer_ptr: Option<*mut u8>) -> Self {
-        let vfs: Arc<dyn VfsImpl> = make_vfs(&config.storage_backend, &config.file_path);
+    pub(crate) fn new(
+        config: Arc<Config>,
+        buffer_ptr: Option<*mut u8>,
+    ) -> Result<Self, crate::error::IoErrorKind> {
+        let vfs: Arc<dyn VfsImpl> = make_vfs(&config.storage_backend, &config.file_path)?;
         let page_table = PageTable::new(vfs.clone(), config.clone());
         let circular_buffer = CircularBuffer::new(
             config.cb_size_byte,
@@ -217,11 +220,14 @@ impl LeafStorage {
             buffer_ptr,
             config.cache_only,
         );
-        Self::new_inner(config, page_table, circular_buffer, vfs)
+        Ok(Self::new_inner(config, page_table, circular_buffer, vfs))
     }
 
     #[cfg(not(feature = "std"))]
-    pub(crate) fn new(config: Arc<Config>, buffer_ptr: Option<*mut u8>) -> Self {
+    pub(crate) fn new(
+        config: Arc<Config>,
+        buffer_ptr: Option<*mut u8>,
+    ) -> Result<Self, crate::error::IoErrorKind> {
         let vfs: Arc<dyn VfsImpl> = Arc::new(crate::fs::MemoryVfs::new());
         let page_table = PageTable::new(vfs.clone(), config.clone());
         let circular_buffer = CircularBuffer::new(
@@ -234,7 +240,7 @@ impl LeafStorage {
             buffer_ptr,
             config.cache_only,
         );
-        Self::new_inner(config, page_table, circular_buffer, vfs)
+        Ok(Self::new_inner(config, page_table, circular_buffer, vfs))
     }
 
     pub(crate) fn new_inner(
@@ -296,6 +302,8 @@ impl LeafStorage {
         &self,
         mini_page: *mut LeafNode,
     ) -> Result<TombstoneHandle, TreeError> {
+        // SAFETY: mini_page points to a live allocation within the circular buffer.
+        // The caller guarantees this pointer was obtained from a prior alloc_mini_page call.
         match unsafe {
             self.circular_buffer
                 .acquire_exclusive_dealloc_handle(mini_page as *mut u8)
@@ -309,8 +317,13 @@ impl LeafStorage {
     pub(crate) fn finish_dealloc_mini_page(&self, mini_page: TombstoneHandle) {
         #[cfg(debug_assertions)]
         {
+            // SAFETY: mini_page.ptr is a valid circular buffer allocation (TombstoneHandle
+            // guarantees exclusive access), and casting to LeafNode is valid because the
+            // buffer was initialized as a LeafNode by alloc_mini_page.
             let mini_page_ref = unsafe { &*(mini_page.ptr as *mut LeafNode) };
             let size = mini_page_ref.meta.node_size;
+            // SAFETY: ptr is valid for node_size bytes and we have exclusive ownership
+            // via TombstoneHandle. Zeroing is a debug-only poison to detect use-after-free.
             unsafe {
                 core::ptr::write_bytes(mini_page.ptr, 0, size as usize);
             }
@@ -336,6 +349,8 @@ impl LeafStorage {
     ) -> Result<CircularBufferPtr<'_>, TreeError> {
         let new_page = self.circular_buffer.alloc(size)?;
 
+        // SAFETY: mini_page.ptr (source) and new_page.as_ptr() (dest) are both valid circular
+        // buffer allocations of at least `size` bytes and do not overlap (separate alloc calls).
         unsafe {
             core::ptr::copy_nonoverlapping(mini_page.ptr, new_page.as_ptr(), size);
         }
@@ -351,6 +366,8 @@ impl LeafStorage {
         let new_page = self.circular_buffer.alloc(size)?;
 
         let mini_page_ptr = mini_page.ptr as *mut LeafNode;
+        // SAFETY: mini_page_ptr is valid (TombstoneHandle guarantees the allocation is live)
+        // and was originally initialized as a LeafNode by the circular buffer allocator.
         unsafe { &*mini_page_ptr }.copy_initialize_to(
             new_page.as_ptr() as *mut LeafNode,
             size,
@@ -358,6 +375,8 @@ impl LeafStorage {
         );
 
         self.circular_buffer.dealloc(mini_page);
+        // SAFETY: new_page was freshly allocated and copy_initialize_to wrote a valid
+        // LeafNode into it, so dereferencing as LeafNode is sound.
         unsafe {
             debug_assert!(
                 (&*(new_page.as_ptr() as *mut LeafNode))
@@ -397,19 +416,19 @@ impl Drop for DiskOffsetGuard<'_> {
 pub(crate) fn make_vfs(
     storage_backend: &StorageBackend,
     path: impl AsRef<Path>,
-) -> Arc<dyn VfsImpl> {
+) -> Result<Arc<dyn VfsImpl>, crate::error::IoErrorKind> {
     match storage_backend {
-        StorageBackend::Memory => Arc::new(MemoryVfs::new()),
-        StorageBackend::Std => Arc::new(StdVfs::open(path.as_ref())),
+        StorageBackend::Memory => Ok(Arc::new(MemoryVfs::new())),
+        StorageBackend::Std => Ok(Arc::new(StdVfs::open(path.as_ref())?)),
 
         #[cfg(target_os = "linux")]
-        StorageBackend::IoUringPolling => Arc::new(IoUringVfs::open(path.as_ref())),
+        StorageBackend::IoUringPolling => Ok(Arc::new(IoUringVfs::open(path.as_ref())?)),
 
         #[cfg(target_os = "linux")]
-        StorageBackend::IoUringBlocking => Arc::new(IoUringVfs::new_blocking(path.as_ref())),
+        StorageBackend::IoUringBlocking => Ok(Arc::new(IoUringVfs::new_blocking(path.as_ref())?)),
 
         #[cfg(target_os = "linux")]
-        StorageBackend::StdDirect => Arc::new(crate::fs::StdDirectVfs::open(path.as_ref())),
+        StorageBackend::StdDirect => Ok(Arc::new(crate::fs::StdDirectVfs::open(path.as_ref())?)),
     }
 }
 

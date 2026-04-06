@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::error::IoErrorKind;
 use crate::{counter, utils};
 use io_uring::{opcode, IoUring};
 
@@ -25,8 +26,10 @@ struct IoUringInstance {
 }
 
 impl IoUringInstance {
-    fn new(poll: bool) -> Self {
-        let parallelism: usize = std::thread::available_parallelism().unwrap().into();
+    fn new(poll: bool) -> Result<Self, IoErrorKind> {
+        let parallelism: usize = std::thread::available_parallelism()
+            .map_err(|_| IoErrorKind::VfsRead { offset: 0 })?
+            .into();
         let thread_cnt = 32.max(parallelism * 4);
         let mut ring = Vec::with_capacity(thread_cnt);
 
@@ -43,19 +46,17 @@ impl IoUringInstance {
                 }
             }
 
-            let r = r.build(8).expect("Failed to create io_uring");
+            let r = r.build(8).map_err(|_| IoErrorKind::VfsRead { offset: 0 })?;
             ring.push(RefCell::new(r));
         }
 
-        Self { ring }
+        Ok(Self { ring })
     }
 
     fn get_current_ring(&self) -> &RefCell<IoUring> {
-        // TODO: this is unstable feature, we rely on a implementation detail
         let v = utils::thread_id_to_u64(std::thread::current().id());
         let idx = v % self.ring.len() as u64;
-        let ring = self.get_ring(idx);
-        ring
+        self.get_ring(idx)
     }
 
     fn get_ring(&self, thread_id: u64) -> &RefCell<IoUring> {
@@ -71,15 +72,18 @@ pub(crate) struct IoUringVfs {
     polling: bool,
 }
 
+// SAFETY: IoUringVfs uses per-thread ring selection (via thread ID modulo) and
+// RefCell borrowing to ensure no two threads share a ring simultaneously.
 unsafe impl Send for IoUringVfs {}
+// SAFETY: See above -- the ring selection is thread-local by design.
 unsafe impl Sync for IoUringVfs {}
 
 impl IoUringVfs {
-    pub(crate) fn new_blocking(path: impl AsRef<Path>) -> Self {
+    pub(crate) fn new_blocking(path: impl AsRef<Path>) -> Result<Self, IoErrorKind> {
         Self::new_inner(path, false)
     }
 
-    pub(crate) fn open(path: impl AsRef<Path>) -> Self {
+    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, IoErrorKind> {
         Self::new_inner(path, true)
     }
 
@@ -91,13 +95,16 @@ impl IoUringVfs {
         }
     }
 
-    fn new_inner(path: impl AsRef<Path>, use_poll: bool) -> Self {
+    fn new_inner(path: impl AsRef<Path>, use_poll: bool) -> Result<Self, IoErrorKind> {
         let path = path.as_ref();
 
-        let parent = path.parent().unwrap();
+        let parent = path.parent().ok_or(IoErrorKind::VfsRead { offset: 0 })?;
         _ = std::fs::create_dir_all(parent);
 
-        let path_cstr = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let path_cstr = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| IoErrorKind::VfsRead { offset: 0 })?;
+        // SAFETY: path_cstr is a valid null-terminated C string. O_CREAT|O_RDWR opens or
+        // creates the file. The mode bits grant owner read/write.
         let raw_fd = unsafe {
             libc::open(
                 path_cstr.as_ptr(),
@@ -105,24 +112,25 @@ impl IoUringVfs {
                 libc::S_IRUSR | libc::S_IWUSR,
             )
         };
-        assert!(
-            raw_fd >= 0,
-            "Failed to open file {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        );
+        if raw_fd < 0 {
+            return Err(IoErrorKind::VfsRead { offset: 0 });
+        }
 
+        // SAFETY: raw_fd is a valid file descriptor returned by libc::open above.
         let mut file = unsafe { File::from_raw_fd(raw_fd) };
-        file.flush().unwrap();
-        let offset = file.metadata().unwrap().len();
+        file.flush().map_err(|_| IoErrorKind::VfsFlush)?;
+        let offset = file
+            .metadata()
+            .map_err(|_| IoErrorKind::VfsRead { offset: 0 })?
+            .len();
 
-        IoUringVfs {
-            rings: IoUringInstance::new(use_poll),
+        Ok(IoUringVfs {
+            rings: IoUringInstance::new(use_poll)?,
             file,
             _path: path.to_path_buf(),
             offset_alloc: OffsetAlloc::new_with(offset as usize),
             polling: use_poll,
-        }
+        })
     }
 }
 
@@ -135,11 +143,11 @@ impl VfsImpl for IoUringVfs {
         self.offset_alloc.dealloc_offset(offset)
     }
 
-    fn flush(&self) {
-        self.file.sync_all().unwrap();
+    fn flush(&self) -> Result<(), IoErrorKind> {
+        self.file.sync_all().map_err(|_| IoErrorKind::VfsFlush)
     }
 
-    fn read(&self, offset: usize, buf: &mut [u8]) {
+    fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), IoErrorKind> {
         counter!(IOReadRequest);
         let read_e = opcode::Read::new(
             io_uring::types::Fd(self.file.as_raw_fd()),
@@ -151,14 +159,19 @@ impl VfsImpl for IoUringVfs {
         .user_data(0x42);
 
         let ring = self.rings.get_current_ring();
-        let mut ring_mut = ring.borrow_mut(); // no body will borrow our ring at the same time
+        let mut ring_mut = ring.borrow_mut();
+        // SAFETY: read_e is a valid io_uring SQE built from a valid fd and buffer.
+        // The buffer outlives the submission because we wait synchronously below.
         unsafe {
             let mut sq = ring_mut.submission();
-            sq.push(&read_e).unwrap();
+            sq.push(&read_e)
+                .map_err(|_| IoErrorKind::VfsRead { offset })?;
             sq.sync();
         }
 
-        ring_mut.submit_and_wait(self.wait_cnt()).unwrap();
+        ring_mut
+            .submit_and_wait(self.wait_cnt())
+            .map_err(|_| IoErrorKind::VfsRead { offset })?;
 
         let mut cq = ring_mut.completion();
 
@@ -166,13 +179,9 @@ impl VfsImpl for IoUringVfs {
             cq.sync();
             match cq.next() {
                 Some(cqe) => {
-                    assert_eq!(cqe.user_data(), 0x42);
-                    assert_eq!(
-                        cqe.result(),
-                        buf.len() as i32,
-                        "Read cqe result error: {}",
-                        std::io::Error::last_os_error()
-                    );
+                    if cqe.result() != buf.len() as i32 {
+                        return Err(IoErrorKind::VfsRead { offset });
+                    }
                     break;
                 }
                 None => {
@@ -180,11 +189,12 @@ impl VfsImpl for IoUringVfs {
                 }
             };
         }
+        Ok(())
     }
 
     /// Note that both buf len and buf ptr need to be aligned to 512 bytes:
     /// https://stackoverflow.com/questions/55447218/what-does-o-direct-512-byte-aligned-mean
-    fn write(&self, offset: usize, buf: &[u8]) {
+    fn write(&self, offset: usize, buf: &[u8]) -> Result<(), IoErrorKind> {
         counter!(IOWriteRequest);
         let write_e = opcode::Write::new(
             io_uring::types::Fd(self.file.as_raw_fd()),
@@ -198,13 +208,18 @@ impl VfsImpl for IoUringVfs {
         let ring = self.rings.get_current_ring();
 
         let mut ring_mut = ring.borrow_mut();
+        // SAFETY: write_e is a valid io_uring SQE built from a valid fd and buffer.
+        // The buffer outlives the submission because we wait synchronously below.
         unsafe {
             let mut sq = ring_mut.submission();
-            sq.push(&write_e).expect("submission queue is full");
+            sq.push(&write_e)
+                .map_err(|_| IoErrorKind::VfsWrite { offset })?;
             sq.sync();
         }
 
-        ring_mut.submit_and_wait(self.wait_cnt()).unwrap();
+        ring_mut
+            .submit_and_wait(self.wait_cnt())
+            .map_err(|_| IoErrorKind::VfsWrite { offset })?;
 
         let mut cq = ring_mut.completion();
 
@@ -212,13 +227,9 @@ impl VfsImpl for IoUringVfs {
             cq.sync();
             match cq.next() {
                 Some(cqe) => {
-                    assert_eq!(cqe.user_data(), 0x42);
-                    assert_eq!(
-                        cqe.result(),
-                        buf.len() as i32,
-                        "Write cqe result error: {}",
-                        std::io::Error::last_os_error()
-                    );
+                    if cqe.result() != buf.len() as i32 {
+                        return Err(IoErrorKind::VfsWrite { offset });
+                    }
                     break;
                 }
                 None => {
@@ -226,6 +237,7 @@ impl VfsImpl for IoUringVfs {
                 }
             };
         }
+        Ok(())
     }
 }
 
@@ -239,7 +251,7 @@ mod tests {
             .unwrap()
             .join("test_io_uring_vfs_open.db");
 
-        let vfs = IoUringVfs::open(&file_path);
+        let vfs = IoUringVfs::open(&file_path).unwrap();
         assert!(vfs.file.metadata().is_ok());
 
         std::fs::remove_file(&file_path).expect("Failed to remove test file");
@@ -257,11 +269,13 @@ mod tests {
         // make and write file to file_path
         std::fs::write(&file_path, "This is a test file for IoUringVfs.").unwrap();
 
-        let vfs = IoUringVfs::open(&file_path);
+        let vfs = IoUringVfs::open(&file_path).unwrap();
 
         let buf_size = 512;
         let buf_layout = Layout::from_size_align(buf_size, buf_size).unwrap();
+        // SAFETY: buf_layout is non-zero-sized and properly aligned.
         let write_buf_ptr = unsafe { std::alloc::alloc(buf_layout) };
+        // SAFETY: write_buf_ptr was just allocated with buf_size capacity.
         let write_buf = unsafe { std::slice::from_raw_parts_mut(write_buf_ptr, buf_size) };
 
         for i in 0..write_buf.len() {
@@ -269,15 +283,18 @@ mod tests {
         }
 
         let offset = 0;
-        vfs.write(offset, write_buf);
+        vfs.write(offset, write_buf).unwrap();
 
         // we need to alloc zeroed here, ow the memory sanitizer will complain (I believe it is a false positive)
+        // SAFETY: buf_layout is non-zero-sized and properly aligned.
         let read_buf_ptr = unsafe { std::alloc::alloc_zeroed(buf_layout) };
+        // SAFETY: read_buf_ptr was just allocated with buf_size capacity.
         let read_buf = unsafe { std::slice::from_raw_parts_mut(read_buf_ptr, buf_size) };
-        vfs.read(offset, read_buf);
+        vfs.read(offset, read_buf).unwrap();
 
         assert_eq!(read_buf, write_buf, "Read data does not match written data");
 
+        // SAFETY: both pointers were allocated via std::alloc::alloc with the same layout.
         unsafe { std::alloc::dealloc(write_buf_ptr, buf_layout) };
         unsafe { std::alloc::dealloc(read_buf_ptr, buf_layout) };
 

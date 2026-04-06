@@ -19,10 +19,13 @@ pub(crate) enum TreeError {
 pub enum IoErrorKind {
     VfsRead { offset: usize },
     VfsWrite { offset: usize },
+    VfsFlush,
     WalAppend,
     WalFlush,
     SnapshotRead,
     SnapshotWrite,
+    ConfigRead,
+    ConfigParse,
     Corruption,
 }
 
@@ -31,10 +34,13 @@ impl fmt::Display for IoErrorKind {
         match self {
             IoErrorKind::VfsRead { offset } => write!(f, "VFS read failed at offset {}", offset),
             IoErrorKind::VfsWrite { offset } => write!(f, "VFS write failed at offset {}", offset),
+            IoErrorKind::VfsFlush => write!(f, "VFS flush/sync failed"),
             IoErrorKind::WalAppend => write!(f, "WAL append failed"),
             IoErrorKind::WalFlush => write!(f, "WAL flush failed"),
             IoErrorKind::SnapshotRead => write!(f, "snapshot read failed"),
             IoErrorKind::SnapshotWrite => write!(f, "snapshot write failed"),
+            IoErrorKind::ConfigRead => write!(f, "config file read failed"),
+            IoErrorKind::ConfigParse => write!(f, "config file parse failed"),
             IoErrorKind::Corruption => write!(f, "data corruption detected"),
         }
     }

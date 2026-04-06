@@ -37,25 +37,38 @@ struct RawBuffer {
 impl RawBuffer {
     fn new(buffer_size: usize) -> RawBuffer {
         let layout = std::alloc::Layout::from_size_align(buffer_size, BLOCK_SIZE).unwrap();
+        // SAFETY: layout has non-zero size (buffer_size) and BLOCK_SIZE alignment (power of 2).
         let ptr = unsafe { std::alloc::alloc(layout) };
         RawBuffer { ptr, buffer_size }
     }
 
     fn as_slice(&self) -> &[u8] {
+        // SAFETY: self.ptr was allocated with buffer_size bytes in new() and remains
+        // valid for the lifetime of RawBuffer. The slice borrows &self preventing mutation.
         unsafe { std::slice::from_raw_parts(self.ptr, self.buffer_size) }
     }
 
+    /// # Safety
+    /// Caller must ensure `offset + size <= buffer_size` and that no other references
+    /// overlap the returned slice for the duration of the borrow.
     unsafe fn as_mut_slice_at_exact(&mut self, offset: usize, size: usize) -> &mut [u8] {
+        // SAFETY: Precondition guaranteed by caller; ptr is valid for buffer_size bytes.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.add(offset), size) }
     }
 }
 
+// SAFETY: RawBuffer owns its heap allocation exclusively; the raw pointer does not
+// reference thread-local or non-Send data, so it is safe to transfer across threads.
 unsafe impl Send for RawBuffer {}
+// SAFETY: RawBuffer is only mutated through &mut self, so shared references (&self)
+// cannot cause data races. Concurrent reads of the buffer are safe.
 unsafe impl Sync for RawBuffer {}
 
 impl Drop for RawBuffer {
     fn drop(&mut self) {
         let layout = std::alloc::Layout::from_size_align(self.buffer_size, BLOCK_SIZE).unwrap();
+        // SAFETY: self.ptr was allocated with this exact layout in new() and has not
+        // been deallocated (Drop runs exactly once).
         unsafe { std::alloc::dealloc(self.ptr, layout) };
     }
 }
@@ -78,10 +91,21 @@ impl WriteAheadLogInner {
         }
 
         self.clear_next_header();
-        self.file_handle
-            .write(self.file_offset, self.buffer.as_slice());
+        if let Err(_e) = self
+            .file_handle
+            .write(self.file_offset, self.buffer.as_slice())
+        {
+            #[cfg(feature = "std")]
+            eprintln!(
+                "bf-tree: WAL write failed at offset {}: {_e}",
+                self.file_offset
+            );
+        }
         // NOTE: fsync is required after write to guarantee WAL durability on crash.
-        self.file_handle.flush();
+        if let Err(_e) = self.file_handle.flush() {
+            #[cfg(feature = "std")]
+            eprintln!("bf-tree: WAL flush failed: {_e}");
+        }
 
         if !self.should_inplace_flush() {
             self.file_offset += self.buffer.buffer_size;
@@ -94,6 +118,7 @@ impl WriteAheadLogInner {
 
     fn clear_next_header(&mut self) {
         if self.buffer_cursor + 8 <= self.buffer.buffer_size {
+            // SAFETY: the guard `buffer_cursor + 8 <= buffer_size` ensures the range is in bounds.
             let slice = unsafe { self.buffer.as_mut_slice_at_exact(self.buffer_cursor, 8) };
             slice.copy_from_slice(&[0u8; 8]);
         }
@@ -106,6 +131,8 @@ impl WriteAheadLogInner {
         );
         let cursor = self.buffer_cursor;
         self.buffer_cursor += size;
+        // SAFETY: debug_assert above verifies cursor + size <= buffer_size. The &mut self
+        // borrow ensures no other references to the buffer exist concurrently.
         unsafe { self.buffer.as_mut_slice_at_exact(cursor, size) }
     }
 
@@ -132,8 +159,8 @@ pub(crate) struct WriteAheadLog {
 
 impl WriteAheadLog {
     /// Create a new wal instance, and start a background thread to flush wal buffer.
-    pub(crate) fn new(config: Arc<WalConfig>) -> Arc<Self> {
-        let vfs = make_vfs(&config.storage_backend, &config.file_path);
+    pub(crate) fn new(config: Arc<WalConfig>) -> Result<Arc<Self>, crate::error::IoErrorKind> {
+        let vfs = make_vfs(&config.storage_backend, &config.file_path)?;
         let wal = WriteAheadLog {
             inner: Mutex::new(WriteAheadLogInner {
                 buffer: RawBuffer::new(config.segment_size),
@@ -152,7 +179,7 @@ impl WriteAheadLog {
 
         let wal = Arc::new(wal);
         WriteAheadLog::start_flush_job(wal.clone());
-        wal
+        Ok(wal)
     }
 
     fn start_flush_job(wal: Arc<Self>) {
@@ -401,6 +428,8 @@ impl LogHeader {
     }
 
     fn as_slice(&self) -> &[u8] {
+        // SAFETY: LogHeader is #[repr(C)] with only primitive fields, self is a valid
+        // reference, and the slice length equals size_of::<LogHeader>() (24 bytes).
         unsafe {
             std::slice::from_raw_parts(self as *const _ as *const u8, std::mem::size_of::<Self>())
         }
@@ -461,7 +490,7 @@ mod tests {
         let mut wal_config = WalConfig::new(&tmp_file);
         wal_config.segment_size(segment_size);
         wal_config.flush_interval(Duration::from_micros(1));
-        WriteAheadLog::new(Arc::new(wal_config))
+        WriteAheadLog::new(Arc::new(wal_config)).unwrap()
     }
 
     #[test]

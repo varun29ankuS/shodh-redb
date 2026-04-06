@@ -151,7 +151,20 @@ impl<T> Deref for RwLockReadGuard<'_, T> {
 }
 
 impl<'a, T> RwLockReadGuard<'a, T> {
+    /// Attempt to atomically upgrade a read lock to a write lock.
+    ///
+    /// Succeeds only when the calling thread holds the **sole** read lock
+    /// (`lock_val == 2`). With any other readers, the CAS fails and the
+    /// read guard is returned in `Err`.
+    ///
+    /// This prevents deadlock: if two readers tried to upgrade simultaneously,
+    /// neither could succeed. By requiring sole-reader status, at most one
+    /// upgrade can succeed.
+    ///
+    /// On failure, release the read lock and retry with `write()`.
     pub fn try_upgrade(self) -> Result<RwLockWriteGuard<'a, T>, RwLockReadGuard<'a, T>> {
+        // Each reader adds 2 to lock_val, so a single reader means lock_val == 2.
+        // We CAS from 2 -> u32::MAX (write-locked).
         let old_v = 2;
 
         match self.lock.lock_val.compare_exchange_weak(
@@ -162,6 +175,9 @@ impl<'a, T> RwLockReadGuard<'a, T> {
         ) {
             Ok(_) => {
                 let lock = self.lock;
+                // SAFETY: We successfully CAS'd lock_val from 2 (one reader) to
+                // u32::MAX (writer). We must forget `self` to avoid the read-guard
+                // Drop decrementing lock_val, which would corrupt the lock state.
                 core::mem::forget(self);
                 Ok(RwLockWriteGuard { lock })
             }
@@ -170,6 +186,8 @@ impl<'a, T> RwLockReadGuard<'a, T> {
     }
 
     pub(crate) fn as_ref(&self) -> &T {
+        // SAFETY: We hold a read lock (lock_val >= 2, even), so no writer
+        // exists and shared access is safe.
         unsafe { &*self.lock.val.get() }
     }
 }
@@ -205,10 +223,109 @@ impl<T> Drop for RwLockWriteGuard<'_, T> {
 
 impl<T> RwLockWriteGuard<'_, T> {
     pub(crate) fn as_mut(&mut self) -> &mut T {
+        // SAFETY: We hold the write lock (lock_val == u32::MAX), so we have
+        // exclusive access to the inner value.
         unsafe { &mut *self.lock.val.get() }
     }
 
     pub(crate) fn as_ref(&self) -> &T {
+        // SAFETY: We hold the write lock (lock_val == u32::MAX), so no other
+        // reader or writer can access the value.
         unsafe { &*self.lock.val.get() }
+    }
+}
+
+#[cfg(all(test, feature = "std", not(feature = "shuttle")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_reader_upgrade_succeeds() {
+        let lock = RwLock::new(42u32);
+        let read_guard = lock.read();
+        assert_eq!(*read_guard, 42);
+
+        let write_guard = match read_guard.try_upgrade() {
+            Ok(w) => w,
+            Err(_) => panic!("sole reader upgrade must succeed"),
+        };
+        assert_eq!(*write_guard, 42);
+        drop(write_guard);
+
+        // Lock is usable again after drop.
+        let g = lock.read();
+        assert_eq!(*g, 42);
+    }
+
+    #[test]
+    fn upgrade_fails_with_multiple_readers() {
+        let lock = RwLock::new(0u32);
+        let r1 = lock.read();
+        let r2 = lock.read();
+
+        // With two readers, upgrade must fail.
+        let r1 = match r1.try_upgrade() {
+            Err(guard) => guard,
+            Ok(_) => panic!("upgrade must fail with two readers"),
+        };
+        drop(r1);
+        drop(r2);
+
+        // After releasing both, a fresh write lock succeeds.
+        let mut w = lock.write();
+        *w = 99;
+        drop(w);
+        assert_eq!(*lock.read(), 99);
+    }
+
+    #[test]
+    fn upgrade_failure_preserves_read_guard() {
+        let lock = RwLock::new(7u32);
+        let r1 = lock.read();
+        let r2 = lock.read();
+
+        // Upgrade fails, we get our read guard back.
+        let r1_returned = match r1.try_upgrade() {
+            Err(guard) => guard,
+            Ok(_) => panic!("upgrade must fail with two readers"),
+        };
+        assert_eq!(*r1_returned, 7);
+
+        drop(r1_returned);
+        drop(r2);
+    }
+
+    #[test]
+    fn read_write_mutual_exclusion() {
+        let lock = RwLock::new(0u32);
+        {
+            let mut w = lock.write();
+            *w = 10;
+            // While write lock is held, try_read must fail.
+            assert!(lock.try_read().is_err());
+        }
+        // After dropping write lock, read succeeds.
+        assert_eq!(*lock.read(), 10);
+    }
+
+    #[test]
+    fn concurrent_readers_allowed() {
+        let lock = RwLock::new(42u32);
+        let r1 = lock.read();
+        let r2 = lock.try_read().expect("concurrent read must succeed");
+        let r3 = lock.try_read().expect("concurrent read must succeed");
+        assert_eq!(*r1, 42);
+        assert_eq!(*r2, 42);
+        assert_eq!(*r3, 42);
+        drop(r1);
+        drop(r2);
+        drop(r3);
+    }
+
+    #[test]
+    fn try_write_fails_while_read_held() {
+        let lock = RwLock::new(0u32);
+        let _r = lock.read();
+        assert!(lock.try_write().is_err());
     }
 }

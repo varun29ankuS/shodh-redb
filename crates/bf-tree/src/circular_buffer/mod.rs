@@ -228,6 +228,9 @@ impl AllocMeta {
     }
 
     fn data_ptr(&self) -> *mut u8 {
+        // SAFETY: AllocMeta is placed at the start of each allocation in the circular buffer.
+        // The data region begins immediately after the AllocMeta header, so adding size_of::<Self>()
+        // to the base pointer yields a valid pointer within the same allocation.
         unsafe { (self as *const Self as *mut u8).add(core::mem::size_of::<Self>()) }
     }
 
@@ -589,6 +592,9 @@ impl CircularBuffer {
             assert!(physical_remaining >= CB_ALLOC_META_SIZE);
             let physical_addr = self.logical_to_physical(states.tail_addr);
             let meta = AllocMeta::new((physical_remaining - CB_ALLOC_META_SIZE) as u32, true);
+            // SAFETY: physical_addr was derived from logical_to_physical which produces a valid
+            // pointer within the data_ptr allocation. The remaining space is >= CB_ALLOC_META_SIZE
+            // (asserted above), so writing an AllocMeta is within bounds. We hold the mutex lock.
             unsafe {
                 physical_addr.cast::<AllocMeta>().write(meta);
             }
@@ -599,6 +605,9 @@ impl CircularBuffer {
 
         let meta = AllocMeta::new(aligned_size as u32, false);
 
+        // SAFETY: logical_to_physical returns a valid pointer within our data_ptr allocation.
+        // The space check above ensures sufficient room for AllocMeta + aligned_size. We hold
+        // the mutex lock so no concurrent writes to this tail region.
         unsafe {
             let physical_addr = self.logical_to_physical(states.tail_addr);
             physical_addr.cast::<AllocMeta>().write(meta);
@@ -612,6 +621,8 @@ impl CircularBuffer {
 
     fn logical_to_physical(&self, addr: usize) -> *mut u8 {
         let offset = addr & (self.capacity - 1);
+        // SAFETY: data_ptr points to a buffer of self.capacity bytes. The bitmask ensures
+        // offset < capacity, so data_ptr.add(offset) stays within the allocation.
         unsafe { self.data_ptr.add(offset) }
     }
 
@@ -643,6 +654,9 @@ impl CircularBuffer {
     }
 
     fn get_fuzzy_tail_addr(&self) -> usize {
+        // SAFETY: states is an UnsafeCell containing States. We only read tail_addr which is
+        // an AtomicUsize, so concurrent access is safe via atomic ordering. No mutable reference
+        // is created to the full States, only a shared ref to read the atomic field.
         unsafe { &*self.states.get() }.tail_addr()
     }
 
@@ -844,12 +858,20 @@ impl CircularBuffer {
         let ptr = self.logical_to_physical(logical_address);
         self.debug_check_ptr_is_from_me(ptr);
         let meta_ptr = ptr.cast::<AllocMeta>();
+        // SAFETY: ptr was obtained from logical_to_physical and validated by
+        // debug_check_ptr_is_from_me, so it points to a valid AllocMeta within the buffer.
+        // AllocMeta is #[repr(C)] and the pointer is aligned to BUFFER_ALIGNMENT (4096).
         unsafe { &*meta_ptr }
     }
 
     fn get_meta_from_data_ptr<'a>(data_ptr: *mut u8) -> &'a AllocMeta {
         debug_assert_eq!(data_ptr as usize % 8, 0);
+        // SAFETY: data_ptr points to the data region immediately after an AllocMeta header.
+        // Subtracting CB_ALLOC_META_SIZE yields the original AllocMeta pointer. The pointer
+        // remains within the circular buffer allocation and is properly aligned (debug-asserted).
         let meta_ptr = unsafe { data_ptr.sub(CB_ALLOC_META_SIZE) } as *mut AllocMeta;
+        // SAFETY: meta_ptr now points to a valid AllocMeta that was written during alloc().
+        // The lifetime 'a is caller-controlled; the buffer must outlive the returned reference.
         unsafe { &*meta_ptr }
     }
 
@@ -946,6 +968,9 @@ impl CircularBuffer {
 
         // evict the data using the callback, IO long running call.
         loop {
+            // SAFETY: data_ptr was obtained from get_meta(start_addr).data_ptr() which returns
+            // a pointer within this buffer's allocation. The pointer was originally allocated
+            // by this buffer's alloc() method.
             let h = unsafe { self.acquire_exclusive_dealloc_handle(data_ptr) };
             match h {
                 Ok(v) => {
@@ -1078,6 +1103,7 @@ mod tests {
         let buffer_ptr = if pre_allocated_buffer {
             let layout =
                 std::alloc::Layout::from_size_align(leaf_page_size * 2, BUFFER_ALIGNMENT).unwrap();
+            // SAFETY: Layout is valid (non-zero size, power-of-2 alignment from BUFFER_ALIGNMENT).
             let ptr = unsafe { std::alloc::alloc(layout) };
             Some(ptr)
         } else {
@@ -1106,6 +1132,8 @@ mod tests {
             let alloc_ptr = buffer.alloc(size).expect("Allocation failed").ptr;
             assert!(!alloc_ptr.is_null());
 
+            // SAFETY: alloc_ptr was just allocated by buffer.alloc() above, so it is a valid
+            // pointer owned by this buffer. The allocation has been dropped (Ready state).
             unsafe {
                 let p = buffer.acquire_exclusive_dealloc_handle(alloc_ptr).unwrap();
                 buffer.dealloc(p);
@@ -1173,6 +1201,7 @@ mod tests {
         // Fill up the circular buffer
         for _i in 0..3 {
             let alloc = buffer.alloc(2048).unwrap();
+            // SAFETY: alloc.as_ptr() is a valid, writable pointer returned by buffer.alloc().
             unsafe { *alloc.as_ptr() = 42 };
             drop(alloc);
         }
@@ -1185,6 +1214,7 @@ mod tests {
         // Evict everything in the circular buffer
         buffer
             .evict_n(usize::MAX, |h| {
+                // SAFETY: h.as_ptr() points to data written as 42 above, still valid during eviction.
                 assert_eq!(unsafe { *(h.as_ptr()) }, 42);
                 Ok(h)
             })
@@ -1194,6 +1224,8 @@ mod tests {
         let allocated = buffer.alloc(2048).unwrap();
         let ptr = allocated.as_ptr();
         drop(allocated);
+        // SAFETY: ptr was obtained from buffer.alloc() and the guard has been dropped (Ready
+        // state), so acquire_exclusive_dealloc_handle is valid for this buffer-owned pointer.
         unsafe {
             let p = buffer.acquire_exclusive_dealloc_handle(ptr).unwrap();
             buffer.dealloc(p);

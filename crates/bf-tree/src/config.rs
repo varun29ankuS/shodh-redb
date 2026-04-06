@@ -175,9 +175,10 @@ impl Config {
     pub fn new(file_path: impl AsRef<Path>, circular_buffer_size: usize) -> Self {
         let mut config = Self::default();
         let mut cache_only = false;
-        let storage_backend = if file_path.as_ref().to_str().unwrap().starts_with(":memory:") {
+        let path_str = file_path.as_ref().to_string_lossy();
+        let storage_backend = if path_str.starts_with(":memory:") {
             StorageBackend::Memory
-        } else if file_path.as_ref().to_str().unwrap().starts_with(":cache:") {
+        } else if path_str.starts_with(":cache:") {
             cache_only = true;
             StorageBackend::Memory
         } else {
@@ -205,10 +206,20 @@ impl Config {
     /// The config file must have all fields defined in ConfigFile.
     #[cfg(feature = "std")]
     pub fn new_with_config_file<P: AsRef<Path>>(config_file_path: P) -> Self {
-        let config_file_str =
-            fs::read_to_string(config_file_path).expect("couldn't read config file");
-        let config_file: ConfigFile =
-            toml::from_str(&config_file_str).expect("Fail to parse config file");
+        let config_file_str = match fs::read_to_string(&config_file_path) {
+            Ok(s) => s,
+            Err(e) => panic!(
+                "failed to read config file {}: {e}",
+                config_file_path.as_ref().display()
+            ),
+        };
+        let config_file: ConfigFile = match toml::from_str(&config_file_str) {
+            Ok(c) => c,
+            Err(e) => panic!(
+                "failed to parse config file {}: {e}",
+                config_file_path.as_ref().display()
+            ),
+        };
         let scan_promotion_rate = if cfg!(debug_assertions) {
             DEFAULT_PROMOTION_RATE_DEBUG
         } else {
@@ -322,7 +333,8 @@ impl Config {
     /// (WAL is always sequence write and requires durability).
     #[cfg(feature = "std")]
     pub fn enable_write_ahead_log_default(&mut self) -> &mut Self {
-        let wal_config = WalConfig::new(self.file_path.parent().unwrap().join("wal.log"));
+        let parent = self.file_path.parent().unwrap_or_else(|| Path::new("."));
+        let wal_config = WalConfig::new(parent.join("wal.log"));
         self.write_ahead_log = Some(Arc::new(wal_config));
         self
     }

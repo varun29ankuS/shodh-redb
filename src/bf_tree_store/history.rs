@@ -183,7 +183,7 @@ impl BfTreeHistory {
             }
 
             if let Ok(mut iter) = rtxn.adapter.scan_range(&prefix, &prefix_end) {
-                while let Some((key_len, val_len)) = iter.next(&mut buf) {
+                while let Ok(Some((key_len, val_len))) = iter.next(&mut buf) {
                     if key_len > prefix_len + 8 {
                         continue;
                     }
@@ -265,7 +265,7 @@ impl BfTreeHistory {
             .insert(&hwm_key, &snapshot_id.to_le_bytes())?;
 
         // Phase 1: Take the BfTree snapshot to determine the file path.
-        let snapshot_path = self.db.snapshot();
+        let snapshot_path = self.db.snapshot()?;
         let snapshot_path_str = snapshot_path.to_string_lossy().to_string();
         let timestamp = now_ns();
 
@@ -308,7 +308,7 @@ impl BfTreeHistory {
         let mut iter = rtxn.adapter.scan_range(&prefix, &prefix_end)?;
         let mut results = Vec::new();
 
-        while let Some((key_len, val_len)) = iter.next(&mut buf) {
+        while let Ok(Some((key_len, val_len))) = iter.next(&mut buf) {
             if key_len <= prefix_len {
                 continue;
             }

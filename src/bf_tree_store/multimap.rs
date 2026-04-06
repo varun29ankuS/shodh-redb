@@ -292,7 +292,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
             let mut keys = Vec::new();
             if let Some(ref end) = scan_end {
                 let mut iter = self.adapter.scan_range(&prefix, end)?;
-                while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+                while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
                     keys.push(buf[..key_len].to_vec());
                 }
             } else {
@@ -304,7 +304,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
                 };
                 // Use a scan that goes past our prefix; filter results.
                 let mut iter = self.adapter.scan_range(&prefix, &max_end)?;
-                while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+                while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
                     let k = &buf[..key_len];
                     if key_matches_prefix(k, &prefix) {
                         keys.push(k.to_vec());
@@ -386,7 +386,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
             let mut keys = Vec::new();
             if let Some(ref end) = scan_end {
                 let mut iter = self.adapter.scan_range(&prefix, end)?;
-                while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+                while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
                     keys.push(buf[..key_len].to_vec());
                 }
             } else {
@@ -396,7 +396,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
                     m
                 };
                 let mut iter = self.adapter.scan_range(&prefix, &max_end)?;
-                while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+                while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
                     let k = &buf[..key_len];
                     if key_matches_prefix(k, &prefix) {
                         keys.push(k.to_vec());
@@ -509,7 +509,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeReadOnlyMultimapTable<'txn,
         let mut values = Vec::new();
         if let Some(end) = scan_end {
             let mut iter = self.adapter.scan_range(&prefix, &end)?;
-            while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+            while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
                 let val_key = extract_value_key(&buf[..key_len], prefix_len);
                 values.push(val_key.to_vec());
             }
@@ -520,7 +520,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeReadOnlyMultimapTable<'txn,
                 m
             };
             let mut iter = self.adapter.scan_range(&prefix, &max_end)?;
-            while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+            while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
                 let k = &buf[..key_len];
                 if key_matches_prefix(k, &prefix) {
                     let val_key = extract_value_key(k, prefix_len);

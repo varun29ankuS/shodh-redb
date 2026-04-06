@@ -41,6 +41,8 @@ pub(super) struct FreeList {
     list_heads: Vec<Mutex<*mut ListNode>>,
 }
 
+// SAFETY: FreeList's raw pointers are only accessed while holding the corresponding
+// Mutex lock, so they can be safely sent across and shared between threads.
 unsafe impl Send for FreeList {}
 unsafe impl Sync for FreeList {}
 
@@ -136,6 +138,9 @@ impl FreeList {
             return None;
         }
         let old = *node.deref();
+        // SAFETY: `node` is non-null (checked above), so dereferencing the head
+        // ListNode pointer to read its `next` field is valid. Nodes are only
+        // added via `try_add` which writes a valid `next` pointer.
         let new = unsafe { (*(*node.deref())).next };
         *node.deref_mut() = new;
         Some(NonNull::new(old as *mut u8).unwrap())
@@ -163,6 +168,9 @@ impl FreeList {
         debug_assert!(core::mem::align_of::<ListNode>() <= self.size_classes[size_class_idx]);
 
         let node = ListNode::from_u8_ptr_unchecked(ptr);
+        // SAFETY: `node` points to a memory region of at least `size` bytes (caller
+        // invariant), which is >= size_class >= sizeof(ListNode). The alignment
+        // assertion in `from_u8_ptr_unchecked` ensures proper alignment.
         unsafe { (*node).next = *head };
         *head = node;
         Ok(head)
@@ -185,13 +193,19 @@ impl FreeList {
             }
             if node as *mut u8 == ptr {
                 if prev.is_null() {
+                    // SAFETY: `node` is non-null (checked at loop top) and was
+                    // inserted via `try_add`, so its `next` field is valid.
                     *node_guard.deref_mut() = unsafe { (*node).next };
                 } else {
+                    // SAFETY: `prev` is non-null (checked above) and `node` is
+                    // non-null. Both are valid ListNode pointers from the free list.
                     unsafe { (*prev).next = (*node).next };
                 }
                 return true;
             }
             prev = node;
+            // SAFETY: `node` is non-null (checked at loop top). Traversing the
+            // linked list via `next`; each node was inserted with a valid `next`.
             node = unsafe { (*node).next };
         }
     }

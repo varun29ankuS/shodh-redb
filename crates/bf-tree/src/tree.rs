@@ -796,7 +796,8 @@ impl BfTree {
                         OpType::Delete => WalWriteOp::make_delete(write_op.key),
                         _ => WalWriteOp::make_insert(write_op.key, write_op.value),
                     };
-                    let lsn = wal.append_and_wait(&wal_op, leaf_entry.get_disk_offset())?;
+                    let log_entry = WalLogEntry::Write(wal_op);
+                    let lsn = wal.append_and_wait(&log_entry, leaf_entry.get_disk_offset())?;
                     leaf_entry.update_lsn(lsn)?;
                 }
             }

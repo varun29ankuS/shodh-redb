@@ -861,4 +861,101 @@ mod tests {
         let keys: Vec<&str> = entries.iter().map(|(k, _)| k.value()).collect();
         assert_eq!(keys, vec!["visible"]);
     }
+
+    /// Exercises the compensating rollback path in WriteBuffer::flush().
+    ///
+    /// Strategy: buffer two entries where the first (sorted by key) succeeds
+    /// but the second fails on BfTree's combined key+value size check. The
+    /// pre-validation in flush() checks key and value lengths independently,
+    /// but BfTree rejects records where key.len() + value.len() exceeds
+    /// cb_max_record_size. After the second insert fails, the first insert
+    /// must be rolled back (deleted from BfTree).
+    #[test]
+    fn flush_rollback_undoes_partial_writes() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+        let adapter = db.adapter();
+        let max_record_size = adapter.inner().config().get_cb_max_record_size();
+        let max_key_len = adapter.max_key_len();
+
+        // key_a sorts before key_b so it gets flushed first.
+        let key_a = encode_table_key("t", TableKind::Regular, b"aaa");
+        let val_a = vec![1u8; 8];
+
+        // key_b: large key + large value that individually pass pre-validation
+        // but combined exceed cb_max_record_size.
+        let raw_key_b = vec![b'b'; max_key_len - 4]; // -4 for encode_table_key overhead
+        let key_b = encode_table_key("t", TableKind::Regular, &raw_key_b);
+        assert!(key_b.len() <= max_key_len, "key_b must pass pre-validation");
+        // value sized so key_b.len() + val_b.len() > max_record_size
+        let val_b_len = max_record_size - key_b.len() + 1;
+        assert!(
+            val_b_len <= max_record_size,
+            "val_b must pass pre-validation"
+        );
+        let val_b = vec![2u8; val_b_len];
+
+        let mut buf = WriteBuffer::new();
+        buf.put(key_a.clone(), val_a.clone()).unwrap();
+        buf.put(key_b.clone(), val_b).unwrap();
+
+        // Flush should fail because key_b's combined size exceeds max_record_size.
+        let result = buf.flush(adapter);
+        assert!(
+            result.is_err(),
+            "flush must fail on oversized combined record"
+        );
+
+        // key_a must NOT be in BfTree -- it was rolled back.
+        let mut rbuf = vec![0u8; max_record_size];
+        assert!(
+            adapter.read(&key_a, &mut rbuf).is_err(),
+            "key_a must be rolled back after partial flush failure"
+        );
+    }
+
+    /// Rollback restores previously-deleted values when flush fails mid-way.
+    ///
+    /// Scenario: a pre-existing key is deleted in the buffer, then a later
+    /// insert fails. The compensating rollback must re-insert the deleted
+    /// key's original value.
+    #[test]
+    fn flush_rollback_restores_deleted_values() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+        let adapter = db.adapter();
+        let max_record_size = adapter.inner().config().get_cb_max_record_size();
+        let max_key_len = adapter.max_key_len();
+
+        // Pre-populate BfTree with a key that will be deleted in the buffer.
+        let key_a = encode_table_key("t", TableKind::Regular, b"aaa");
+        let original_val = b"original_value";
+        adapter.insert(&key_a, original_val).unwrap();
+
+        // Buffer: delete key_a (tombstone), then insert oversized key_z.
+        let raw_key_z = vec![b'z'; max_key_len - 4];
+        let key_z = encode_table_key("t", TableKind::Regular, &raw_key_z);
+        let val_z_len = max_record_size - key_z.len() + 1;
+        let val_z = vec![3u8; val_z_len];
+
+        let mut buf = WriteBuffer::new();
+        buf.delete(key_a.clone());
+        buf.put(key_z.clone(), val_z).unwrap();
+
+        // Flush fails on key_z insert.
+        let result = buf.flush(adapter);
+        assert!(
+            result.is_err(),
+            "flush must fail on oversized combined record"
+        );
+
+        // key_a must be restored to its original value.
+        let mut rbuf = vec![0u8; max_record_size];
+        let len = adapter
+            .read(&key_a, &mut rbuf)
+            .expect("key_a must be restored after rollback");
+        assert_eq!(
+            &rbuf[..len as usize],
+            original_val,
+            "restored value must match original"
+        );
+    }
 }

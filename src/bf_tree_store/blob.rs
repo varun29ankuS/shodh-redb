@@ -1957,4 +1957,121 @@ mod tests {
         let _ = blob_store;
         wtxn.commit().unwrap();
     }
+
+    /// Dedup pipeline: two identical blobs share chunk data.
+    ///
+    /// Stores two blobs with identical content (>= DEDUP_MIN_SIZE). The second
+    /// blob should be deduped: it shares the first blob's chunk data instead of
+    /// writing its own. Both blobs remain independently readable.
+    #[test]
+    fn dedup_identical_blobs_share_chunks() {
+        let db = test_db();
+
+        // Data must be >= DEDUP_MIN_SIZE (4096) to trigger dedup.
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+
+        let wtxn = db.begin_write();
+        let blob_store = wtxn.open_blob_store();
+
+        let id1 = blob_store
+            .store(
+                &data,
+                ContentType::OctetStream,
+                "blob-1",
+                StoreOptions::default(),
+            )
+            .unwrap();
+
+        let id2 = blob_store
+            .store(
+                &data,
+                ContentType::OctetStream,
+                "blob-2",
+                StoreOptions::default(),
+            )
+            .unwrap();
+
+        // IDs must differ (unique sequence numbers).
+        assert_ne!(id1, id2);
+
+        // Both blobs must be independently readable with identical content.
+        let read1 = blob_store.read(id1).unwrap().unwrap();
+        let read2 = blob_store.read(id2).unwrap().unwrap();
+        assert_eq!(read1, data);
+        assert_eq!(read2, data);
+
+        let _ = blob_store;
+        wtxn.commit().unwrap();
+
+        // After commit, both blobs are still readable.
+        let wtxn2 = db.begin_write();
+        let bs2 = wtxn2.open_blob_store();
+        assert_eq!(bs2.read(id1).unwrap().unwrap(), data);
+        assert_eq!(bs2.read(id2).unwrap().unwrap(), data);
+    }
+
+    /// Deleting one deduped blob leaves the other intact.
+    ///
+    /// After dedup, both blobs share chunk data. Deleting the first blob
+    /// should not affect the second blob's readability. The dedup ref-count
+    /// prevents premature cleanup.
+    #[test]
+    fn dedup_delete_one_leaves_other_intact() {
+        let db = test_db();
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+
+        // Store and commit first blob.
+        let id1;
+        {
+            let wtxn = db.begin_write();
+            let bs = wtxn.open_blob_store();
+            id1 = bs
+                .store(
+                    &data,
+                    ContentType::OctetStream,
+                    "first",
+                    StoreOptions::default(),
+                )
+                .unwrap();
+            let _ = bs;
+            wtxn.commit().unwrap();
+        }
+
+        // Store identical blob in a new transaction (dedup across commits).
+        let id2;
+        {
+            let wtxn = db.begin_write();
+            let bs = wtxn.open_blob_store();
+            id2 = bs
+                .store(
+                    &data,
+                    ContentType::OctetStream,
+                    "second",
+                    StoreOptions::default(),
+                )
+                .unwrap();
+            let _ = bs;
+            wtxn.commit().unwrap();
+        }
+
+        // Delete the first blob.
+        {
+            let wtxn = db.begin_write();
+            let bs = wtxn.open_blob_store();
+            bs.delete(id1).unwrap();
+            let _ = bs;
+            wtxn.commit().unwrap();
+        }
+
+        // Second blob must still be readable with correct data.
+        {
+            let wtxn = db.begin_write();
+            let bs = wtxn.open_blob_store();
+            let read2 = bs.read(id2).unwrap().unwrap();
+            assert_eq!(read2, data, "deduped blob must survive partner deletion");
+
+            // First blob should be gone.
+            assert!(bs.read(id1).unwrap().is_none());
+        }
+    }
 }

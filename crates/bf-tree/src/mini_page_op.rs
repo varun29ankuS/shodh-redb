@@ -48,8 +48,13 @@ impl TmpBuffer {
 
     fn from_leaf_node(leaf: *mut LeafNode, size: usize) -> Self {
         let mut buffer = Self::new(size);
+        // SAFETY: The caller provides a valid `leaf` pointer to a LeafNode allocation.
+        // We only read the `node_size` field from the header, which is within bounds.
         assert!(unsafe { &*leaf }.meta.node_size as usize == size);
 
+        // SAFETY: `leaf` points to a valid LeafNode of `size` bytes (just asserted above).
+        // `buffer.ptr` was freshly allocated with the same `size`. The two allocations
+        // do not overlap, so copy_nonoverlapping is sound.
         unsafe {
             core::ptr::copy_nonoverlapping(leaf as *const u8, buffer.ptr, size);
         }
@@ -59,19 +64,28 @@ impl TmpBuffer {
     }
 
     fn as_u8_slice_mut(&mut self) -> &mut [u8] {
+        // SAFETY: `self.ptr` was allocated via `buffer_alloc` with `self.size` bytes and
+        // DISK_PAGE_SIZE alignment. We hold `&mut self`, so no aliasing references exist.
         unsafe { core::slice::from_raw_parts_mut(self.ptr, self.size) }
     }
 
     fn as_u8_slice(&self) -> &[u8] {
+        // SAFETY: `self.ptr` was allocated via `buffer_alloc` with `self.size` bytes.
+        // The buffer remains valid for the lifetime of `&self`.
         unsafe { core::slice::from_raw_parts(self.ptr, self.size) }
     }
 
     fn as_leaf_node(&self) -> &LeafNode {
+        // SAFETY: `self.ptr` was allocated with at least `size_of::<LeafNode>()` bytes and
+        // DISK_PAGE_SIZE alignment (which exceeds LeafNode alignment). The buffer contents
+        // were initialized as a valid LeafNode (via copy or init_node_with_fence).
         unsafe { &*(self.ptr as *const LeafNode) }
     }
 
     fn as_leaf_node_mut(&mut self) -> &mut LeafNode {
         self.is_dirty = true;
+        // SAFETY: Same alignment and size guarantees as `as_leaf_node`. We hold `&mut self`,
+        // ensuring exclusive access to the underlying buffer.
         unsafe { &mut *(self.ptr as *mut LeafNode) }
     }
 }
@@ -92,6 +106,9 @@ pub(crate) trait LeafOperations {
     fn load_base_page(&mut self, offset: usize) -> &LeafNode;
 
     fn load_cache_page(&self, ptr: *mut LeafNode) -> &LeafNode {
+        // SAFETY: `ptr` comes from a PageLocation::Mini or PageLocation::Full entry,
+        // which holds a pointer to a live CircularBuffer allocation containing a valid
+        // LeafNode. The allocation outlives the returned reference due to lock-guarded access.
         unsafe { &*ptr }
     }
 
@@ -259,7 +276,9 @@ impl LeafOperations for LeafEntrySLocked<'_> {
             None => {
                 let mut buffer = TmpBuffer::new(self.tmp_buffer_size);
                 let slice = buffer.as_u8_slice_mut();
-                self.file_handle.read(offset, slice);
+                if let Err(e) = self.file_handle.read(offset, slice) {
+                    panic!("fatal VFS read at offset {offset}: {e}");
+                }
 
                 if self.verify_checksums && slice.len() >= CRC32_SIZE {
                     let data_end = slice.len() - CRC32_SIZE;
@@ -379,7 +398,10 @@ impl Drop for LeafEntryXLocked<'_> {
             }
 
             let slice = b.as_u8_slice();
-            self.file_handle.write(offset, slice);
+            if let Err(_e) = self.file_handle.write(offset, slice) {
+                #[cfg(feature = "std")]
+                eprintln!("bf-tree: VFS write failed at offset {offset}: {_e}");
+            }
         }
     }
 }
@@ -401,7 +423,9 @@ impl LeafOperations for LeafEntryXLocked<'_> {
             None => {
                 let mut buffer = TmpBuffer::new(self.tmp_buffer_size);
                 let slice = buffer.as_u8_slice_mut();
-                self.file_handle.read(offset, slice);
+                if let Err(e) = self.file_handle.read(offset, slice) {
+                    panic!("fatal VFS read at offset {offset}: {e}");
+                }
 
                 if self.verify_checksums && slice.len() >= CRC32_SIZE {
                     let data_end = slice.len() - CRC32_SIZE;
@@ -468,9 +492,15 @@ impl<'a> LeafEntryXLocked<'a> {
         }
     }
 
+    /// Attempt to downgrade an exclusive lock to a shared lock.
+    ///
+    /// This is not currently supported because the underlying `RwLock`
+    /// does not provide an atomic downgrade path. Returns `Err(self)` so
+    /// the caller retains the exclusive guard and can retry with a fresh
+    /// read acquisition.
     #[allow(dead_code)]
-    pub(crate) fn downgrade(self) -> LeafEntrySLocked<'a> {
-        todo!("downgrade is very challenging with current implementation!")
+    pub(crate) fn downgrade(self) -> Result<LeafEntrySLocked<'a>, Self> {
+        Err(self)
     }
 
     pub(crate) fn dealloc_self(&mut self, storage: &LeafStorage, cache_only: bool) {
@@ -569,6 +599,9 @@ impl<'a> LeafEntryXLocked<'a> {
                 }
 
                 histogram!(HitMiniPage, storage.config.leaf_page_size as u64);
+                // SAFETY: `ptr` comes from PageLocation::Full, a valid pointer to a
+                // LeafNode in the circular buffer. We hold an exclusive write lock on
+                // this page table entry, ensuring no concurrent mutable access.
                 let mini_page = unsafe { &mut *ptr };
                 let insert_success =
                     mini_page.insert(key, value, op_type, storage.config.max_fence_len);
@@ -734,6 +767,9 @@ impl<'a> LeafEntryXLocked<'a> {
                                 let cur_page_loc = self.get_page_location().clone();
                                 match cur_page_loc {
                                     PageLocation::Mini(_) => {
+                                        // SAFETY: `new_mini_ptr` was just obtained from a freshly
+                                        // allocated mini page guard. We hold the write lock on the
+                                        // page entry, so no other thread accesses this pointer.
                                         let sibling_page = unsafe { &mut *new_mini_ptr };
                                         cur_mini_page.split_with_key(
                                             sibling_page,
@@ -822,6 +858,10 @@ impl<'a> LeafEntryXLocked<'a> {
     }
 
     pub(crate) fn load_cache_page_mut<'b>(&self, ptr: *mut LeafNode) -> &'b mut LeafNode {
+        // SAFETY: `ptr` comes from a PageLocation::Mini or PageLocation::Full entry pointing
+        // to a valid LeafNode in the circular buffer. The caller holds a write lock on this
+        // page table entry, ensuring exclusive mutable access. The lifetime 'b is bounded
+        // by the caller's lock scope.
         unsafe { &mut *ptr }
     }
 
@@ -858,7 +898,9 @@ impl<'a> LeafEntryXLocked<'a> {
 
                 let mut buffer = TmpBuffer::new(self.tmp_buffer_size);
                 let slice = buffer.as_u8_slice_mut();
-                self.file_handle.read(offset, slice);
+                if let Err(e) = self.file_handle.read(offset, slice) {
+                    panic!("fatal VFS read at offset {offset}: {e}");
+                }
 
                 self.tmp_buffer = Some(buffer);
 
@@ -945,6 +987,10 @@ impl<'a> LeafEntryXLocked<'a> {
             Some(mut b) => {
                 assert!(b.is_dirty);
 
+                // SAFETY: `mini_page_handle.as_ptr()` points to a valid full page of
+                // `node_size` bytes in the circular buffer. `b.ptr` is a separately
+                // allocated TmpBuffer of `tmp_buffer_size` (asserted equal to node_size).
+                // The two buffers do not overlap.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         mini_page_handle.as_ptr(),
@@ -959,6 +1005,9 @@ impl<'a> LeafEntryXLocked<'a> {
             }
             None => {
                 let mut buffer = TmpBuffer::new(self.tmp_buffer_size);
+                // SAFETY: `mini_page_handle.as_ptr()` points to a valid full page of
+                // `node_size` bytes. `buffer.ptr` is a freshly allocated TmpBuffer of
+                // `tmp_buffer_size` bytes. The two allocations do not overlap.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         mini_page_handle.as_ptr(),
@@ -1099,7 +1148,9 @@ impl<'a> LeafEntryXLocked<'a> {
             PageLocation::Base(offset) => {
                 let mut buffer = TmpBuffer::new(self.tmp_buffer_size);
                 let slice = buffer.as_u8_slice_mut();
-                self.file_handle.read(*offset, slice);
+                if let Err(e) = self.file_handle.read(*offset, slice) {
+                    panic!("fatal VFS read at offset {offset}: {e}");
+                }
                 let base_ref = buffer.as_leaf_node();
                 base_ref.get_stats()
             }
@@ -1180,6 +1231,9 @@ pub(crate) fn upgrade_to_full_page(
         base_page.meta.node_size as usize,
         storage.config.leaf_page_size
     );
+    // SAFETY: `base_page` is a valid LeafNode reference of `leaf_page_size` bytes (asserted
+    // above). `full_page.as_ptr()` is a freshly allocated circular buffer region of the same
+    // size. The source (base_page on disk/buffer) and dest (circular buffer) do not overlap.
     unsafe {
         core::ptr::copy_nonoverlapping(
             base_page as *const LeafNode as *const u8,
@@ -1188,6 +1242,9 @@ pub(crate) fn upgrade_to_full_page(
         );
     }
     let full_page_ptr = full_page.as_ptr() as *mut LeafNode;
+    // SAFETY: `full_page_ptr` points to the circular buffer region just initialized with a
+    // valid LeafNode copy above. The allocation is exclusively owned via `full_page` guard,
+    // so creating a mutable reference is sound.
     let full_page_ref = unsafe { &mut *full_page_ptr };
     full_page_ref.covert_insert_records_to_cache();
     full_page_ref.next_level = base_page_offset;

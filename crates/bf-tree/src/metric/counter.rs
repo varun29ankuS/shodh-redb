@@ -60,6 +60,8 @@ impl CounterRecorder {
     const LENGTH: usize = Counter::VARIANT_COUNT;
 
     pub(crate) fn increment(&mut self, event: Counter, amount: u64) {
+        // SAFETY: Counter is #[repr(u8)] with variants 0..VARIANT_COUNT-1. The `event as usize`
+        // cast is always < VARIANT_COUNT which equals self.counters.len(), so the index is in bounds.
         let counter = unsafe { self.counters.get_unchecked_mut(event as usize) };
         *counter += amount;
     }
@@ -73,6 +75,9 @@ impl Serialize for CounterRecorder {
         let mut state = serializer.serialize_map(Some(Self::LENGTH))?;
         for i in 0..self.counters.len() {
             let val = &self.counters[i];
+            // SAFETY: i iterates over 0..self.counters.len() which equals Counter::VARIANT_COUNT.
+            // Counter is #[repr(u8)] with contiguous discriminants 0..VARIANT_COUNT-1, so every
+            // value of i as u8 in this range is a valid Counter discriminant.
             let key: Counter = unsafe { std::mem::transmute(i as u8) };
             state.serialize_key(&format!("{key:?}"))?;
             state.serialize_value(val)?;

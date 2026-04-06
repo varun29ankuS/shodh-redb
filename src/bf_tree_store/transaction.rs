@@ -94,7 +94,7 @@ impl BfTreeWriteTxn {
         self.committed = true;
         // Ensure durability for non-memory backends by forcing a snapshot.
         if !self.adapter.inner().config().is_memory_backend() {
-            self.adapter.snapshot();
+            self.adapter.snapshot()?;
         }
         Ok(())
     }
@@ -105,7 +105,7 @@ impl BfTreeWriteTxn {
     /// even without WAL replay.
     pub fn commit_with_snapshot(mut self) -> Result<std::path::PathBuf, BfTreeError> {
         self.committed = true;
-        Ok(self.adapter.snapshot())
+        Ok(self.adapter.snapshot()?)
     }
 
     /// Number of insert/delete operations performed in this transaction.
@@ -298,7 +298,7 @@ mod tests {
         let mut iter = rtxn.scan_from(b"aaa", 10).unwrap();
         let mut buf = [0u8; 256];
         let mut count = 0;
-        while iter.next(&mut buf).is_some() {
+        while matches!(iter.next(&mut buf), Ok(Some(_))) {
             count += 1;
         }
         assert_eq!(count, 3);

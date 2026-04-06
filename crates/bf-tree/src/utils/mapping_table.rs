@@ -58,16 +58,24 @@ impl<T> Drop for MappingTable<T> {
         for i in 0..initialized_records {
             let batch_id = self.get_batch_id(i);
             let record_id = self.get_record_id(i);
+            // SAFETY: batch_id is derived from a valid record id < next_id, so the
+            // batch is initialized. Mutex is held via `states`.
             let batch = unsafe { self.get_batch_mut(batch_id, &mut states) };
+            // SAFETY: record_id is within [0, record_per_batch) by modular arithmetic.
             let record = unsafe { batch.data.get_unchecked_mut(record_id) };
+            // SAFETY: All records with id < next_id were previously written via `set`,
+            // so the MaybeUninit is initialized and safe to drop in place.
             unsafe {
                 record.as_mut_ptr().drop_in_place();
             }
         }
         let batch_cnt = states.current_initialized_batch + 1;
         for i in 0..batch_cnt {
+            // SAFETY: We hold &mut self (Drop), so no concurrent access to the UnsafeCell.
             let record_batch_vec = unsafe { &mut *self.batches.get() };
+            // SAFETY: i < batch_cnt <= MAX_BATCHES, within the pre-allocated Vec capacity.
             let batch = unsafe { record_batch_vec.get_unchecked_mut(i) };
+            // SAFETY: Batches 0..=current_initialized_batch were initialized in `new` or `set`.
             unsafe {
                 batch.as_mut_ptr().drop_in_place();
             }
@@ -118,9 +126,12 @@ impl<T> MappingTable<T> {
             batch_id < MAX_BATCHES,
             "batch_id {batch_id} >= MAX_BATCHES {MAX_BATCHES}"
         );
+        // SAFETY: Callers ensure no mutable aliases exist; the UnsafeCell access is
+        // safe because get_batch only produces a shared reference to the inner Vec.
         let record_batch_vec = unsafe { &mut *self.batches.get() };
         // SAFETY: batch_id < MAX_BATCHES and Vec was pre-allocated to exactly MAX_BATCHES.
         let batch = unsafe { record_batch_vec.get_unchecked_mut(batch_id) };
+        // SAFETY: Caller's precondition (1) guarantees this batch has been initialized.
         let batch = unsafe { batch.assume_init_ref() };
         batch
     }
@@ -135,8 +146,12 @@ impl<T> MappingTable<T> {
         batch_id: usize,
         _lock: &mut MutexGuard<'_, States>,
     ) -> &mut RecordBatch<T> {
+        // SAFETY: Mutex lock is held (enforced by `_lock` parameter), preventing
+        // concurrent mutable access to the UnsafeCell contents.
         let record_batch_vec = unsafe { &mut *self.batches.get() };
+        // SAFETY: batch_id < MAX_BATCHES per caller precondition (2).
         let batch = unsafe { record_batch_vec.get_unchecked_mut(batch_id) };
+        // SAFETY: Caller precondition (1) guarantees this batch is initialized.
         let batch = unsafe { batch.assume_init_mut() };
         batch
     }
@@ -161,7 +176,11 @@ impl<T> MappingTable<T> {
         let batch_id = self.get_batch_id(id);
         let record_id = self.get_record_id(id);
 
+        // SAFETY: id was returned by `insert`, so batch_id <= current_initialized_batch
+        // and the batch is initialized. batch_id < MAX_BATCHES by construction.
         let batch = unsafe { self.get_batch(batch_id) };
+        // SAFETY: record_id < record_per_batch and the record at this id was written
+        // during `insert`, so it is initialized.
         let record = unsafe { batch.get_record(record_id) };
         record
     }
@@ -174,8 +193,11 @@ impl<T> MappingTable<T> {
             if batch_id >= MAX_BATCHES {
                 panic!("Reached max batches!");
             }
+            // SAFETY: Mutex is held (via `states`), so no concurrent UnsafeCell access.
             let batches = unsafe { &mut *self.batches.get() };
+            // SAFETY: batch_id < MAX_BATCHES (checked above), within pre-allocated capacity.
             let batch = unsafe { batches.get_unchecked_mut(batch_id) };
+            // SAFETY: Writing into an uninit slot; no previous value needs dropping.
             unsafe {
                 batch
                     .as_mut_ptr()
@@ -184,8 +206,13 @@ impl<T> MappingTable<T> {
             states.current_initialized_batch = batch_id;
         }
 
+        // SAFETY: batch_id is initialized (either batch 0 from `new`, or just
+        // initialized above). Mutex is held via `states`.
         let batch = unsafe { self.get_batch_mut(batch_id, states) };
+        // SAFETY: record_id < record_per_batch by modular arithmetic.
         let record = unsafe { batch.data.get_unchecked_mut(record_id) };
+        // SAFETY: Writing a new value into a MaybeUninit slot. Each id is written
+        // exactly once (next_id is monotonically incremented), so no double-init.
         unsafe {
             record.as_mut_ptr().write(val);
         }

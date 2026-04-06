@@ -20,6 +20,8 @@ pub(crate) struct HistogramRecorder {
 
 impl HistogramRecorder {
     pub(crate) fn hit(&mut self, event: Histogram, key: u64) {
+        // SAFETY: Histogram is #[repr(u8)] with variants 0..VARIANT_COUNT-1. The `event as usize`
+        // cast is always < VARIANT_COUNT which equals self.histograms.len(), so the index is in bounds.
         let hist = unsafe { self.histograms.get_unchecked_mut(event as usize) };
         if let Some(v) = hist.get_mut(&(key as u16)) {
             *v += 1;
@@ -36,6 +38,8 @@ impl Serialize for HistogramRecorder {
     {
         let mut state = serializer.serialize_struct("histograms", self.histograms.len())?;
         for (i, h) in self.histograms.iter().enumerate() {
+            // SAFETY: i iterates over 0..self.histograms.len() == Histogram::VARIANT_COUNT.
+            // Histogram is #[repr(u8)] with contiguous discriminants, so i as u8 is always valid.
             let variant: Histogram = unsafe { std::mem::transmute(i as u8) };
             match variant {
                 Histogram::EvictNodeSize => state.serialize_field("evict_node_size", h)?,

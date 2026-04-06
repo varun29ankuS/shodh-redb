@@ -190,7 +190,7 @@ impl BfTreeDatabase {
     /// Take a durability snapshot. All data is guaranteed recoverable after crash.
     ///
     /// Serialized with concurrent commit operations via the snapshot lock.
-    pub fn snapshot(&self) -> std::path::PathBuf {
+    pub fn snapshot(&self) -> Result<std::path::PathBuf, bf_tree::BfTreeError> {
         let _guard = self.snapshot_lock.lock();
         self.adapter.snapshot()
     }
@@ -245,7 +245,7 @@ fn recover_next_txn_id(adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
         let prefix_end = table_prefix_end(CDC_LOG_TABLE_NAME, TableKind::Regular);
         let prefix_len = prefix.len();
         let mut iter = adapter.scan_range(&prefix, &prefix_end)?;
-        while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+        while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
             if key_len > prefix_len + CdcKey::SERIALIZED_SIZE {
                 continue;
             }
@@ -268,7 +268,7 @@ fn recover_next_txn_id(adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
         let prefix_end = table_prefix_end(CDC_CURSOR_TABLE_NAME, TableKind::Regular);
         let prefix_len = prefix.len();
         let mut iter = adapter.scan_range(&prefix, &prefix_end)?;
-        while let Some((key_len, val_len)) = iter.next(&mut buf) {
+        while let Ok(Some((key_len, val_len))) = iter.next(&mut buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -618,7 +618,7 @@ impl BfTreeDatabaseWriteTxn {
             // return before the WAL is persisted, violating the durability
             // contract.
             if !self.adapter.inner().config().is_memory_backend() {
-                self.adapter.snapshot();
+                self.adapter.snapshot()?;
             }
         }
         self.committed.store(true, Ordering::SeqCst);
@@ -638,7 +638,7 @@ impl BfTreeDatabaseWriteTxn {
             let commit_id = self.stage_cdc_into_buffer(&mut buffer)?;
             self.stage_txn_id_into_buffer(&mut buffer, commit_id)?;
             buffer.flush(&self.adapter)?;
-            self.adapter.snapshot()
+            self.adapter.snapshot()?
         };
         self.committed.store(true, Ordering::SeqCst);
         self.prune_cdc_retention();
@@ -794,7 +794,7 @@ impl BfTreeDatabaseWriteTxn {
             let mut buf = vec![0u8; max_record * 2];
             let mut groups: Vec<(u64, Vec<Vec<u8>>)> = Vec::new();
             if let Ok(mut iter) = self.adapter.scan_range(&prefix, &cutoff_encoded) {
-                while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+                while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
                     if key_len <= prefix_len {
                         continue;
                     }
@@ -998,7 +998,7 @@ impl BfTreeDatabaseReadTxn {
         let mut buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&prefix, &prefix_end)?;
         let mut max_txn_id: Option<u64> = None;
-        while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+        while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
             if key_len > prefix_len {
                 let key_bytes = &buf[prefix_len..key_len];
                 if key_bytes.len() >= CdcKey::SERIALIZED_SIZE {
@@ -1039,7 +1039,7 @@ impl BfTreeDatabaseReadTxn {
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
         let mut results = Vec::new();
 
-        while let Some((key_len, val_len)) = iter.next(&mut buf) {
+        while let Ok(Some((key_len, val_len))) = iter.next(&mut buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -1074,7 +1074,7 @@ impl BfTreeTableScan<'_> {
     /// Returns `None` when no more entries exist.
     pub fn next<'buf>(&mut self, buf: &'buf mut [u8]) -> Option<(&'buf [u8], &'buf [u8])> {
         loop {
-            let (key_len, val_len) = self.iter.next(buf)?;
+            let (key_len, val_len) = self.iter.next(buf).ok().flatten()?;
             // Strip the table prefix from the key.
             if key_len > self.prefix_len {
                 let key = &buf[self.prefix_len..key_len];

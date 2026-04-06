@@ -29,5 +29,8 @@ pub trait RecorderImpl: Serialize + AddAssign + Sized {
 }
 
 pub fn get_tls_recorder() -> &'static mut TlsRecorder {
+    // SAFETY: The UnsafeCell is thread-local, so only one thread can access it at a time.
+    // The returned &'static mut is valid for the thread's lifetime. No other references to
+    // the inner TlsRecorder exist since this is the only accessor.
     LOCAL_RECORDER.with(|id| unsafe { &mut *id.get() })
 }

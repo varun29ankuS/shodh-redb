@@ -13,6 +13,9 @@ mod platform {
     use core::sync::atomic::AtomicU32;
     #[inline]
     pub fn wait(a: &AtomicU32, expected: u32) {
+        // SAFETY: a is a valid reference to an AtomicU32, providing a valid address for the
+        // futex syscall. FUTEX_WAIT with FUTEX_PRIVATE_FLAG is a well-defined Linux syscall.
+        // A null timespec pointer means wait indefinitely. Spurious wakeups are handled by callers.
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
@@ -26,6 +29,8 @@ mod platform {
 
     #[inline]
     pub fn wake_one(ptr: *const AtomicU32) {
+        // SAFETY: The futex syscall tolerates dangling/null pointers for FUTEX_WAKE (it simply
+        // finds no waiters). When valid, ptr points to an AtomicU32 used as the futex word.
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
@@ -38,6 +43,8 @@ mod platform {
 
     #[inline]
     pub fn wake_all(ptr: *const AtomicU32) {
+        // SAFETY: Same as wake_one; FUTEX_WAKE with i32::MAX wakes all waiting threads.
+        // The futex syscall is safe with dangling/null pointers (no waiters found).
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
@@ -103,16 +110,22 @@ mod platform {
     pub fn wait(a: &AtomicU32, expected: u32) {
         let ptr: *const AtomicU32 = a;
         let expected_ptr: *const u32 = &expected;
+        // SAFETY: ptr is derived from a valid &AtomicU32 reference, so it is non-null and
+        // aligned. expected_ptr points to a local stack variable. Size 4 matches sizeof(u32).
+        // WaitOnAddress is a well-defined Windows API; spurious wakeups are handled by callers.
         unsafe { WaitOnAddress(ptr.cast(), expected_ptr.cast(), 4, INFINITE) };
     }
 
     #[inline]
     pub fn wake_one(ptr: *const AtomicU32) {
+        // SAFETY: WakeByAddressSingle tolerates any pointer (wakes matching waiters or is a no-op).
+        // When valid, ptr points to an AtomicU32 used as the wait address.
         unsafe { WakeByAddressSingle(ptr.cast()) };
     }
 
     #[inline]
     pub fn wake_all(ptr: *const AtomicU32) {
+        // SAFETY: Same as WakeByAddressSingle; wakes all threads waiting on this address.
         unsafe { WakeByAddressAll(ptr.cast()) };
     }
 }

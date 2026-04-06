@@ -744,7 +744,7 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
                     .adapter
                     .scan_range(&prefix, &prefix_end)
                     .map_err(crate::StorageError::from)?;
-                while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+                while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
                     keys.push(buf[..key_len].to_vec());
                 }
                 keys
@@ -1143,5 +1143,82 @@ mod tests {
 
         drop(table);
         wtxn.commit().unwrap();
+    }
+
+    #[test]
+    fn merge_increments_existing_value() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+        let op = crate::merge::NumericAdd;
+
+        // Insert initial value.
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(ITEMS).unwrap();
+        table.insert(&"counter", &10u64).unwrap();
+        drop(table);
+        wtxn.commit().unwrap();
+
+        // Merge: add 5 to existing.
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(ITEMS).unwrap();
+        table.merge(&"counter", &5u64.to_le_bytes(), &op).unwrap();
+        drop(table);
+        wtxn.commit().unwrap();
+
+        // Verify result is 15.
+        let rtxn = db.begin_read();
+        let ro_table = rtxn.open_table(ITEMS).unwrap();
+        let val = ro_table.get(&"counter").unwrap().unwrap();
+        let result = u64::from_le_bytes(val.as_slice().try_into().unwrap());
+        assert_eq!(result, 15);
+    }
+
+    #[test]
+    fn merge_on_nonexistent_key_uses_operand() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+        let op = crate::merge::NumericAdd;
+
+        // Merge on key that doesn't exist.
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(ITEMS).unwrap();
+        table.merge(&"fresh", &42u64.to_le_bytes(), &op).unwrap();
+        drop(table);
+        wtxn.commit().unwrap();
+
+        // Verify it was set to the operand value.
+        let rtxn = db.begin_read();
+        let ro_table = rtxn.open_table(ITEMS).unwrap();
+        let val = ro_table.get(&"fresh").unwrap().unwrap();
+        let result = u64::from_le_bytes(val.as_slice().try_into().unwrap());
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn merge_returning_none_deletes_key() {
+        use alloc::vec::Vec;
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        // Operator that always returns None (= delete).
+        let delete_op = crate::merge::merge_fn(
+            |_key: &[u8], _existing: Option<&[u8]>, _operand: &[u8]| -> Option<Vec<u8>> { None },
+        );
+
+        // Insert initial value.
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(ITEMS).unwrap();
+        table.insert(&"doomed", &99u64).unwrap();
+        drop(table);
+        wtxn.commit().unwrap();
+
+        // Merge with delete-op.
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(ITEMS).unwrap();
+        table.merge(&"doomed", &[0u8], &delete_op).unwrap();
+        drop(table);
+        wtxn.commit().unwrap();
+
+        // Key should be gone.
+        let rtxn = db.begin_read();
+        let ro_table = rtxn.open_table(ITEMS).unwrap();
+        assert!(ro_table.get(&"doomed").unwrap().is_none());
     }
 }

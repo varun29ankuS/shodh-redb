@@ -23,13 +23,15 @@ pub(crate) use memory_vfs::MemoryVfs;
 #[cfg(feature = "std")]
 pub(crate) use std_vfs::StdVfs;
 
+use crate::error::IoErrorKind;
 use crate::nodes::DISK_PAGE_SIZE;
 
-/// Similar to `std::io::Write` and `std::io::Read`, but without &mut self, i.e., no locking
+/// Similar to `std::io::Write` and `std::io::Read`, but without &mut self, i.e., no locking.
+/// All I/O methods return `Result` so callers can propagate errors instead of panicking.
 pub(crate) trait VfsImpl: Send + Sync {
-    fn read(&self, offset: usize, buf: &mut [u8]);
+    fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), IoErrorKind>;
 
-    fn write(&self, offset: usize, buf: &[u8]);
+    fn write(&self, offset: usize, buf: &[u8]) -> Result<(), IoErrorKind>;
 
     /// Allocate a new page returns the physical offset of the page.
     /// The size of the page is a multiple of DISK_PAGE_SIZE
@@ -39,7 +41,7 @@ pub(crate) trait VfsImpl: Send + Sync {
     fn dealloc_offset(&self, offset: usize);
 
     /// Flush the data to disk, similar to fsync on Linux.
-    fn flush(&self);
+    fn flush(&self) -> Result<(), IoErrorKind>;
 }
 
 pub(crate) fn buffer_alloc(layout: alloc::alloc::Layout) -> *mut u8 {

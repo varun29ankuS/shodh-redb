@@ -173,7 +173,7 @@ fn scan_range_buffered(
     let mut combined: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
 
     if let Ok(mut iter) = adapter.scan_range(start, end) {
-        while let Some((key_len, val_len)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, val_len))) = iter.next(&mut scan_buf) {
             // Validate that key + value fits within the scan buffer.
             if key_len + val_len > scan_buf.len() {
                 continue;
@@ -844,7 +844,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
 
         if let Ok(mut iter) = self.adapter.scan_range(&prefix, &prefix_end) {
-            while let Some((key_len, val_len)) = iter.next(&mut scan_buf) {
+            while let Ok(Some((key_len, val_len))) = iter.next(&mut scan_buf) {
                 if key_len + val_len > scan_buf.len() {
                     continue;
                 }
@@ -897,7 +897,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
 
         if let Ok(mut iter) = self.adapter.scan_range(&prefix, &prefix_end) {
-            while let Some((key_len, val_len)) = iter.next(&mut scan_buf) {
+            while let Ok(Some((key_len, val_len))) = iter.next(&mut scan_buf) {
                 if key_len + val_len > scan_buf.len() {
                     continue;
                 }
@@ -955,7 +955,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
 
         // Scan committed BfTree entries.
         if let Ok(mut iter) = self.adapter.scan_range(&start_encoded, &end_encoded) {
-            while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+            while let Ok(Some((key_len, _))) = iter.next(&mut scan_buf) {
                 keys_to_delete.push(scan_buf[..key_len].to_vec());
             }
         }
@@ -993,7 +993,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
 
         // Scan committed BfTree entries.
         if let Ok(mut iter) = self.adapter.scan_range(&prefix, &prefix_end) {
-            while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+            while let Ok(Some((key_len, _))) = iter.next(&mut scan_buf) {
                 if key_len <= prefix_len {
                     continue;
                 }
@@ -1443,7 +1443,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
         let mut results = Vec::new();
 
-        while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, _))) = iter.next(&mut scan_buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -1469,7 +1469,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
         let mut results = Vec::new();
 
-        while let Some((key_len, val_len)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, val_len))) = iter.next(&mut scan_buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -1498,7 +1498,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let mut scan_buf = vec![0u8; max_record * 2];
         let mut iter = self.adapter.scan_range(&start_key, &end_key)?;
 
-        while let Some((key_len, val_len)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, val_len))) = iter.next(&mut scan_buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -1537,7 +1537,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
         let mut results = Vec::new();
 
-        while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, _))) = iter.next(&mut scan_buf) {
             if key_len <= prefix_len {
                 continue;
             }
@@ -1571,7 +1571,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
         let mut iter = self.adapter.scan_range(&start_encoded, &end_encoded)?;
         let mut results = Vec::new();
 
-        while let Some((key_len, _)) = iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, _))) = iter.next(&mut scan_buf) {
             if key_len <= prefix_len {
                 continue;
             }

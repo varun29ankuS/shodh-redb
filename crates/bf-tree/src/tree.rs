@@ -27,7 +27,7 @@ use crate::{
     check_parent,
     circular_buffer::{CircularBufferMetrics, TombstoneHandle},
     counter,
-    error::{ConfigError, TreeError},
+    error::{BfTreeError, TreeError},
     histogram, info,
     mini_page_op::{upgrade_to_full_page, LeafEntryXLocked, LeafOperations, ReadResult},
     nodes::{
@@ -87,8 +87,12 @@ pub struct BfTree {
     pub metrics_recorder: Option<Arc<ThreadLocal<UnsafeCell<TlsRecorder>>>>, // Per-tree metrics recorder under "metrics-rt-debug" feature
 }
 
+// SAFETY: BfTree is Sync because all mutable state is behind atomic operations (root_page_id),
+// Mutex-protected (WAL), or uses internal locking (storage, circular buffer).
 unsafe impl Sync for BfTree {}
 
+// SAFETY: BfTree is Send because it owns all its data and does not use thread-local
+// raw pointers; inner node pointers are heap-allocated and valid across threads.
 unsafe impl Send for BfTree {}
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -104,6 +108,8 @@ pub enum ScanIterError {
     InvalidEndKey,
     InvalidCount,
     InvalidKeyRange,
+    /// An I/O error occurred during scan positioning or iteration.
+    IoError(crate::error::IoErrorKind),
 }
 
 impl Drop for BfTree {
@@ -121,6 +127,8 @@ impl Drop for BfTree {
                     leaf.dealloc_self(&self.storage, self.cache_only);
                 }
                 NodeInfo::Inner { ptr, .. } => {
+                    // SAFETY: ptr is a valid InnerNode pointer obtained from BfsVisitor,
+                    // which only yields live inner nodes owned by this tree.
                     if unsafe { &*ptr }.is_valid_disk_offset() {
                         let disk_offset = unsafe { &*ptr }.disk_offset;
                         if self.config.storage_backend == StorageBackend::Memory {
@@ -325,7 +333,7 @@ impl BfTree {
     /// let tree = BfTree::new(":memory:", 8192).unwrap();
     /// ```
     #[cfg(feature = "std")]
-    pub fn new(file_path: impl AsRef<Path>, cache_size_byte: usize) -> Result<Self, ConfigError> {
+    pub fn new(file_path: impl AsRef<Path>, cache_size_byte: usize) -> Result<Self, BfTreeError> {
         let config = Config::new(file_path, cache_size_byte);
         Self::with_config(config, None)
     }
@@ -333,21 +341,21 @@ impl BfTree {
     /// Create a new bf-tree instance with customized configuration based on
     /// a config file
     #[cfg(feature = "std")]
-    pub fn new_with_config_file<P: AsRef<Path>>(config_file_path: P) -> Result<Self, ConfigError> {
+    pub fn new_with_config_file<P: AsRef<Path>>(config_file_path: P) -> Result<Self, BfTreeError> {
         let config = Config::new_with_config_file(config_file_path);
         Self::with_config(config, None)
     }
 
     /// Initialize the bf-tree with provided config. For advanced user only.
     /// An optional pre-allocated buffer pointer can be provided to use as the buffer pool memory.
-    pub fn with_config(config: Config, buffer_ptr: Option<*mut u8>) -> Result<Self, ConfigError> {
+    pub fn with_config(config: Config, buffer_ptr: Option<*mut u8>) -> Result<Self, BfTreeError> {
         // Validate the config first
-        config.validate()?;
+        config.validate().map_err(BfTreeError::Config)?;
 
         #[cfg(feature = "std")]
         let wal = match config.write_ahead_log.as_ref() {
             Some(wal_config) => {
-                let wal = WriteAheadLog::new(wal_config.clone());
+                let wal = WriteAheadLog::new(wal_config.clone()).map_err(BfTreeError::Io)?;
                 Some(wal)
             }
             None => None,
@@ -357,7 +365,8 @@ impl BfTree {
 
         // In cache-only mode, the initial root page is a full mini-page
         if config.cache_only {
-            let leaf_storage = LeafStorage::new(config.clone(), buffer_ptr);
+            let leaf_storage =
+                LeafStorage::new(config.clone(), buffer_ptr).map_err(BfTreeError::Io)?;
 
             // Assuming CB can accommodate at least 2 leaf pages at the same time
             let mini_page_guard = (leaf_storage)
@@ -401,7 +410,7 @@ impl BfTree {
             });
         }
 
-        let leaf_storage = LeafStorage::new(config.clone(), buffer_ptr);
+        let leaf_storage = LeafStorage::new(config.clone(), buffer_ptr).map_err(BfTreeError::Io)?;
         let (root_id, root_lock) = leaf_storage.mapping_table().alloc_base_page_mapping();
         drop(root_lock);
         assert_eq!(root_id.as_id(), 0);
@@ -525,6 +534,8 @@ impl BfTree {
                     match cur_page_loc {
                         PageLocation::Mini(ptr) => {
                             let cur_mini_page = cur_page.load_cache_page_mut(ptr);
+                            // SAFETY: new_mini_ptr was just allocated via alloc_mini_page and is
+                            // exclusively owned; no other reference to this allocation exists yet.
                             let sibling_page = unsafe { &mut *new_mini_ptr };
                             let split_key = cur_mini_page.split(sibling_page, true);
 
@@ -1053,7 +1064,7 @@ impl BfTree {
             return Err(ScanIterError::InvalidCount);
         }
 
-        Ok(ScanIter::new_with_scan_count(self, key, cnt, return_field))
+        ScanIter::new_with_scan_count(self, key, cnt, return_field)
     }
 
     pub fn scan_with_end_key<'a>(
@@ -1093,12 +1104,7 @@ impl BfTree {
             return Err(ScanIterError::InvalidKeyRange);
         }
 
-        Ok(ScanIter::new_with_end_key(
-            self,
-            start_key,
-            end_key,
-            return_field,
-        ))
+        ScanIter::new_with_end_key(self, start_key, end_key, return_field)
     }
 
     #[doc(hidden)]
@@ -1123,12 +1129,7 @@ impl BfTree {
             return Err(ScanIterError::InvalidCount);
         }
 
-        Ok(ScanIterMut::new_with_scan_count(
-            self,
-            key,
-            cnt,
-            return_field,
-        ))
+        ScanIterMut::new_with_scan_count(self, key, cnt, return_field)
     }
 
     #[doc(hidden)]
@@ -1153,12 +1154,7 @@ impl BfTree {
             return Err(ScanIterError::InvalidEndKey);
         }
 
-        Ok(ScanIterMut::new_with_end_key(
-            self,
-            start_key,
-            end_key,
-            return_field,
-        ))
+        ScanIterMut::new_with_end_key(self, start_key, end_key, return_field)
     }
 
     fn read_inner(
@@ -1311,6 +1307,8 @@ impl BfTree {
 
                     // Only collect timer metrics for now
                     for r in recorders {
+                        // SAFETY: Arc::try_unwrap succeeded, so we have exclusive ownership of
+                        // the ThreadLocal. Each UnsafeCell is accessed only from this single thread.
                         let t = unsafe { &*r.get() };
 
                         timer_accumulated += t.timers.clone();
@@ -1346,6 +1344,8 @@ pub(crate) fn eviction_callback(
     tree: &BfTree,
 ) -> Result<(), TreeError> {
     let mini_page = mini_page_handle.ptr as *mut LeafNode;
+    // SAFETY: mini_page_handle.ptr points to a live mini page in the circular buffer.
+    // The TombstoneHandle guarantees the page has not been deallocated.
     let key_to_this_page = if tree.cache_only {
         unsafe { &*mini_page }.try_get_key_to_reach_this_node()?
     } else {
@@ -1361,6 +1361,7 @@ pub(crate) fn eviction_callback(
 
     let mut leaf_entry = tree.mapping_table().get_mut(&pid);
 
+    // SAFETY: mini_page ptr is still valid (TombstoneHandle keeps the page alive).
     histogram!(EvictNodeSize, unsafe { &*mini_page }.meta.node_size as u64);
 
     match leaf_entry.get_page_location() {
@@ -1412,7 +1413,7 @@ pub(crate) fn eviction_callback(
 
 #[cfg(all(test, feature = "std", not(feature = "shuttle")))]
 mod tests {
-    use crate::error::ConfigError;
+    use crate::error::{BfTreeError, ConfigError};
     use crate::BfTree;
 
     #[test]
@@ -1445,7 +1446,7 @@ mod tests {
 
         if let Err(e) = BfTree::with_config(config.clone(), None) {
             match e {
-                ConfigError::MinimumRecordSize(_) => {}
+                BfTreeError::Config(ConfigError::MinimumRecordSize(_)) => {}
                 _ => panic!("Expected InvalidMinimumRecordSize error"),
             }
         } else {
@@ -1458,7 +1459,7 @@ mod tests {
 
         if let Err(e) = BfTree::with_config(config.clone(), None) {
             match e {
-                ConfigError::MaximumRecordSize(_) => {}
+                BfTreeError::Config(ConfigError::MaximumRecordSize(_)) => {}
                 _ => panic!("Expected InvalidMaximumRecordSize error"),
             }
         } else {
@@ -1471,7 +1472,7 @@ mod tests {
 
         if let Err(e) = BfTree::with_config(config.clone(), None) {
             match e {
-                ConfigError::LeafPageSize(_) => {}
+                BfTreeError::Config(ConfigError::LeafPageSize(_)) => {}
                 _ => panic!("Expected InvalidLeafPageSize error"),
             }
         } else {
@@ -1485,7 +1486,7 @@ mod tests {
 
         if let Err(e) = BfTree::with_config(config.clone(), None) {
             match e {
-                ConfigError::CircularBufferSize(_) => {}
+                BfTreeError::Config(ConfigError::CircularBufferSize(_)) => {}
                 _ => panic!("Expected InvalidCircularBufferSize error"),
             }
         } else {
@@ -1497,7 +1498,7 @@ mod tests {
         config.cb_size_byte(20 * 1024);
         if let Err(e) = BfTree::with_config(config.clone(), None) {
             match e {
-                ConfigError::CircularBufferSize(_) => {}
+                BfTreeError::Config(ConfigError::CircularBufferSize(_)) => {}
                 _ => panic!("Expected InvalidCircularBufferSize error"),
             }
         } else {
@@ -1511,7 +1512,7 @@ mod tests {
 
         if let Err(e) = BfTree::with_config(config.clone(), None) {
             match e {
-                ConfigError::CircularBufferSize(_) => {}
+                BfTreeError::Config(ConfigError::CircularBufferSize(_)) => {}
                 _ => panic!("Expected InvalidCircularBufferSize error"),
             }
         } else {

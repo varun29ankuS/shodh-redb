@@ -330,7 +330,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTtlTable<'txn, K, V> {
             let mut buf = vec![0u8; max_record_size * 2];
             let mut result = Vec::new();
             let mut iter = self.adapter.scan_range(&prefix, &prefix_end)?;
-            while let Some((key_len, _val_len)) = iter.next(&mut buf) {
+            while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
                 result.push(buf[..key_len].to_vec());
             }
             result

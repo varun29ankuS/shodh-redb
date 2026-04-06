@@ -12,6 +12,7 @@ use std::os::unix::fs::FileExt;
 use std::os::windows::fs::FileExt;
 
 use crate::counter;
+use crate::error::IoErrorKind;
 
 use super::{OffsetAlloc, VfsImpl};
 
@@ -22,9 +23,9 @@ pub(crate) struct StdVfs {
 }
 
 impl StdVfs {
-    pub(crate) fn open(path: impl AsRef<std::path::Path>) -> Self {
+    pub(crate) fn open(path: impl AsRef<std::path::Path>) -> Result<Self, IoErrorKind> {
         let path = path.as_ref().to_path_buf();
-        let parent = path.parent().unwrap();
+        let parent = path.parent().ok_or(IoErrorKind::VfsRead { offset: 0 })?;
         _ = std::fs::create_dir_all(parent);
 
         let file = OpenOptions::new()
@@ -33,13 +34,16 @@ impl StdVfs {
             .create(true)
             .truncate(false)
             .open(&path)
-            .unwrap();
-        let offset = file.metadata().unwrap().len();
-        Self {
+            .map_err(|_| IoErrorKind::VfsRead { offset: 0 })?;
+        let offset = file
+            .metadata()
+            .map_err(|_| IoErrorKind::VfsRead { offset: 0 })?
+            .len();
+        Ok(Self {
             file,
             offset_alloc: OffsetAlloc::new_with(offset as usize),
             _path: path.to_path_buf(),
-        }
+        })
     }
 }
 
@@ -53,30 +57,42 @@ impl VfsImpl for StdVfs {
     }
 
     #[cfg(unix)]
-    fn read(&self, offset: usize, buf: &mut [u8]) {
+    fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), IoErrorKind> {
         counter!(IOReadRequest);
-        self.file.read_at(buf, offset as u64).unwrap();
+        self.file
+            .read_at(buf, offset as u64)
+            .map_err(|_| IoErrorKind::VfsRead { offset })?;
+        Ok(())
     }
 
     #[cfg(windows)]
-    fn read(&self, offset: usize, buf: &mut [u8]) {
+    fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), IoErrorKind> {
         counter!(IOReadRequest);
-        self.file.seek_read(buf, offset as u64).unwrap();
+        self.file
+            .seek_read(buf, offset as u64)
+            .map_err(|_| IoErrorKind::VfsRead { offset })?;
+        Ok(())
     }
 
-    fn flush(&self) {
-        self.file.sync_all().unwrap();
+    fn flush(&self) -> Result<(), IoErrorKind> {
+        self.file.sync_all().map_err(|_| IoErrorKind::VfsFlush)
     }
 
     #[cfg(unix)]
-    fn write(&self, offset: usize, buf: &[u8]) {
+    fn write(&self, offset: usize, buf: &[u8]) -> Result<(), IoErrorKind> {
         counter!(IOWriteRequest);
-        self.file.write_at(buf, offset as u64).unwrap();
+        self.file
+            .write_at(buf, offset as u64)
+            .map_err(|_| IoErrorKind::VfsWrite { offset })?;
+        Ok(())
     }
 
     #[cfg(windows)]
-    fn write(&self, offset: usize, buf: &[u8]) {
+    fn write(&self, offset: usize, buf: &[u8]) -> Result<(), IoErrorKind> {
         counter!(IOWriteRequest);
-        self.file.seek_write(buf, offset as u64).unwrap();
+        self.file
+            .seek_write(buf, offset as u64)
+            .map_err(|_| IoErrorKind::VfsWrite { offset })?;
+        Ok(())
     }
 }

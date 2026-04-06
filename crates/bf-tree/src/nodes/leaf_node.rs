@@ -2115,7 +2115,10 @@ mod tests {
         #[case] mini_page_values: Vec<usize>,
         #[case] splitting_key: usize,
     ) {
+        // SAFETY: make_base_page returns a valid, aligned, heap-allocated LeafNode pointer.
+        // No other references to this allocation exist, so creating a mutable reference is sound.
         let base = unsafe { &mut *LeafNode::make_base_page(4096) };
+        // SAFETY: Same as above; separate allocation used as a substitute mini page.
         let mini = unsafe { &mut *LeafNode::make_base_page(4096) }; // Using base page as substitute
 
         // Insert values to base page and mini page accordingly
@@ -2158,7 +2161,10 @@ mod tests {
     #[case(vec![1], 2)]
     #[case(vec![2], 2)]
     fn test_split_with_key(#[case] base_page_values: Vec<usize>, #[case] splitting_key: usize) {
+        // SAFETY: make_base_page returns a valid, aligned, heap-allocated LeafNode pointer.
+        // No other references to this allocation exist, so creating a mutable reference is sound.
         let base = unsafe { &mut *LeafNode::make_base_page(4096) };
+        // SAFETY: Same as above; separate allocation for the sibling node.
         let sibling = unsafe { &mut *LeafNode::make_base_page(4096) };
 
         // Insert values to base page
@@ -2173,6 +2179,7 @@ mod tests {
         }
 
         let splitting_key_ptr = &splitting_key;
+        // SAFETY: splitting_key_ptr is a valid reference to a usize; we read exactly 1 element.
         let splitting_key_slice =
             unsafe { core::slice::from_raw_parts(splitting_key_ptr as *const usize, 1) };
         let splitting_key_byte_arrary = cast_slice::<usize, u8>(splitting_key_slice).to_vec();

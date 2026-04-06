@@ -68,7 +68,7 @@ impl GroupCommit {
             batch(&wtxn)?;
         }
         wtxn.commit()?;
-        let path = self.db.snapshot();
+        let path = self.db.snapshot()?;
         Ok((count, path))
     }
 }

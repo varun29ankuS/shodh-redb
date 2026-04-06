@@ -43,6 +43,8 @@ impl Drop for SectorAlignedVector {
         let layout =
             std::alloc::Layout::from_size_align(self.inner.capacity(), SECTOR_SIZE).unwrap();
         let ptr = self.inner.as_mut_ptr();
+        // SAFETY: ptr was allocated via alloc_zeroed with the same layout in new_zeroed(),
+        // and ManuallyDrop ensures Vec's drop does not also deallocate.
         unsafe {
             std::alloc::dealloc(ptr, layout);
         }
@@ -52,8 +54,11 @@ impl Drop for SectorAlignedVector {
 impl SectorAlignedVector {
     fn new_zeroed(capacity: usize) -> Self {
         let layout = std::alloc::Layout::from_size_align(capacity, SECTOR_SIZE).unwrap();
+        // SAFETY: layout has non-zero size and SECTOR_SIZE alignment (a power of 2).
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
 
+        // SAFETY: ptr was just allocated with the given capacity and is fully initialized
+        // (zeroed). The Vec takes ownership; ManuallyDrop prevents double-free in Drop.
         let inner = unsafe { Vec::from_raw_parts(ptr, capacity, capacity) };
         Self {
             inner: ManuallyDrop::new(inner),
@@ -121,8 +126,7 @@ impl BfTree {
     ) -> Result<Self, BfTreeError> {
         if !bf_tree_config.file_path.exists() {
             // if not already exist, we just create a new empty file at the location.
-            return BfTree::with_config(bf_tree_config.clone(), buffer_ptr)
-                .map_err(BfTreeError::Config);
+            return BfTree::with_config(bf_tree_config.clone(), buffer_ptr);
         }
 
         // Validate the config first
@@ -158,12 +162,13 @@ impl BfTree {
 
         let config = Arc::new(bf_tree_config);
 
-        let wal = config
-            .write_ahead_log
-            .as_ref()
-            .map(|s| WriteAheadLog::new(s.clone()));
+        let wal = match config.write_ahead_log.as_ref() {
+            Some(s) => Some(WriteAheadLog::new(s.clone()).map_err(BfTreeError::Io)?),
+            None => None,
+        };
 
-        let vfs = make_vfs(&config.storage_backend, &config.file_path);
+        let vfs =
+            make_vfs(&config.storage_backend, &config.file_path).map_err(|e| BfTreeError::Io(e))?;
 
         let mut page_buffer = SectorAlignedVector::new_zeroed(INNER_NODE_SIZE);
 
@@ -171,14 +176,17 @@ impl BfTree {
         let mut root_page_id = bf_meta.root_id;
         if root_page_id.is_inner_node_pointer() {
             let inner_mapping: Vec<(*const InnerNode, usize)> =
-                read_vec_from_offset(bf_meta.inner_offset, bf_meta.inner_size, &vfs);
+                read_vec_from_offset(bf_meta.inner_offset, bf_meta.inner_size, &vfs)?;
             let mut inner_map = HashMap::new();
 
             for m in inner_mapping {
                 inner_map.insert(m.0, m.1);
             }
-            let offset = inner_map.get(&root_page_id.as_inner_node()).unwrap();
-            vfs.read(*offset, &mut page_buffer);
+            let offset = inner_map
+                .get(&root_page_id.as_inner_node())
+                .ok_or(BfTreeError::Io(IoErrorKind::Corruption))?;
+            vfs.read(*offset, &mut page_buffer)
+                .map_err(|e| BfTreeError::Io(e))?;
             let root_page = InnerNodeBuilder::new().build_from_slice(&page_buffer);
             root_page_id = PageID::from_pointer(root_page);
 
@@ -190,8 +198,11 @@ impl BfTree {
                     continue;
                 }
                 for (idx, c) in inner.as_ref().get_child_iter().enumerate() {
-                    let offset = inner_map.get(&c.as_inner_node()).unwrap();
-                    vfs.read(*offset, &mut page_buffer);
+                    let offset = inner_map
+                        .get(&c.as_inner_node())
+                        .ok_or(BfTreeError::Io(IoErrorKind::Corruption))?;
+                    vfs.read(*offset, &mut page_buffer)
+                        .map_err(|e| BfTreeError::Io(e))?;
                     let inner_page = InnerNodeBuilder::new().build_from_slice(&page_buffer);
                     let inner_id = PageID::from_pointer(inner_page);
                     inner.as_mut().update_at_pos(idx, inner_id);
@@ -202,7 +213,7 @@ impl BfTree {
 
         // Step 2: reconstruct leaf mappings.
         let leaf_mapping: Vec<(PageID, usize)> =
-            read_vec_from_offset(bf_meta.leaf_offset, bf_meta.leaf_size, &vfs);
+            read_vec_from_offset(bf_meta.leaf_offset, bf_meta.leaf_size, &vfs)?;
         let leaf_mapping = leaf_mapping.into_iter().map(|(pid, offset)| {
             let loc = PageLocation::Base(offset);
             (pid, loc)
@@ -250,7 +261,7 @@ impl BfTree {
     /// Stop the world and take a snapshot of the current state.
     ///
     /// Returns the snapshot file path
-    pub fn snapshot(&self) -> PathBuf {
+    pub fn snapshot(&self) -> Result<PathBuf, BfTreeError> {
         let callback = |h| -> Result<TombstoneHandle, TombstoneHandle> {
             match eviction_callback(&h, self) {
                 Ok(_) => Ok(h),
@@ -268,7 +279,10 @@ impl BfTree {
                     let inner = ReadGuard::try_read(ptr).unwrap();
                     if inner.as_ref().is_valid_disk_offset() {
                         let offset = inner.as_ref().disk_offset as usize;
-                        self.storage.vfs.write(offset, inner.as_ref().as_slice());
+                        self.storage
+                            .vfs
+                            .write(offset, inner.as_ref().as_slice())
+                            .map_err(|e| BfTreeError::Io(e))?;
                         inner_mapping.push((ptr, offset));
                     }
                 }
@@ -281,7 +295,7 @@ impl BfTree {
                 }
             }
         }
-        let (inner_offset, inner_size) = serialize_vec_to_disk(&inner_mapping, &self.storage.vfs);
+        let (inner_offset, inner_size) = serialize_vec_to_disk(&inner_mapping, &self.storage.vfs)?;
 
         let mut leaf_mapping = Vec::new();
         let page_table_iter = self.storage.page_table.iter();
@@ -296,7 +310,7 @@ impl BfTree {
             }
         }
 
-        let (leaf_offset, leaf_size) = serialize_vec_to_disk(&leaf_mapping, &self.storage.vfs);
+        let (leaf_offset, leaf_size) = serialize_vec_to_disk(&leaf_mapping, &self.storage.vfs)?;
 
         let file_size = (leaf_offset + align_to_sector_size(leaf_size)) as u64;
 
@@ -313,9 +327,10 @@ impl BfTree {
 
         self.storage
             .vfs
-            .write(META_DATA_PAGE_OFFSET, metadata.as_slice());
-        self.storage.vfs.flush();
-        self.config.file_path.clone()
+            .write(META_DATA_PAGE_OFFSET, metadata.as_slice())
+            .map_err(|e| BfTreeError::Io(e))?;
+        self.storage.vfs.flush().map_err(|e| BfTreeError::Io(e))?;
+        Ok(self.config.file_path.clone())
     }
 
     /// Snapshot an in-memory Bf-Tree to a file on disk.
@@ -331,7 +346,10 @@ impl BfTree {
     ///
     /// # Panics
     /// Panics if `snapshot_path` already exists.
-    pub fn snapshot_memory_to_disk(&self, snapshot_path: impl AsRef<Path>) -> PathBuf {
+    pub fn snapshot_memory_to_disk(
+        &self,
+        snapshot_path: impl AsRef<Path>,
+    ) -> Result<PathBuf, BfTreeError> {
         let snapshot_path = snapshot_path.as_ref();
         assert!(
             !snapshot_path.exists(),
@@ -345,15 +363,11 @@ impl BfTree {
         disk_config.cache_only(false);
         disk_config.file_path(snapshot_path);
 
-        let disk_tree = BfTree::with_config(disk_config, None)
-            .expect("Failed to create disk-backed BfTree for snapshot");
+        let disk_tree = BfTree::with_config(disk_config, None)?;
 
         if self.cache_only {
-            // cache_only mode does not support scan, so throw an error.
             panic!("snapshot_memory_to_disk does not support cache_only trees");
         } else {
-            // Use the scan operator to stream records directly into the disk tree
-            // without buffering the entire dataset in memory.
             Self::copy_records_via_scan(self, &disk_tree);
         }
 
@@ -375,7 +389,7 @@ impl BfTree {
                 Err(_) => return, // empty tree or other issue
             };
 
-        while let Some((key_len, value_len)) = scan_iter.next(&mut scan_buf) {
+        while let Ok(Some((key_len, value_len))) = scan_iter.next(&mut scan_buf) {
             let key = &scan_buf[..key_len];
             let value = &scan_buf[key_len..key_len + value_len];
             dst.insert(key, value);
@@ -421,7 +435,7 @@ impl BfTree {
         mem_config.storage_backend(StorageBackend::Memory);
         mem_config.cache_only(false);
 
-        let mem_tree = BfTree::with_config(mem_config, None).map_err(BfTreeError::Config)?;
+        let mem_tree = BfTree::with_config(mem_config, None)?;
 
         // Step 3: Stream records from the disk tree into the memory tree via scan.
         // The disk tree is never cache_only, so scan is always available.
@@ -451,6 +465,8 @@ impl BfTreeMeta {
     fn as_slice(&self) -> &[u8] {
         let ptr = self as *const Self as *const u8;
         let size = std::mem::size_of::<Self>();
+        // SAFETY: self is a valid reference so ptr is valid for size bytes,
+        // and BfTreeMeta is #[repr(C)] with only primitive fields (no padding concerns).
         unsafe { std::slice::from_raw_parts(ptr, size) }
     }
 
@@ -461,42 +477,63 @@ impl BfTreeMeta {
 }
 
 /// Returns starting offset and total size written to disk.
-fn serialize_vec_to_disk<T>(v: &[T], vfs: &Arc<dyn VfsImpl>) -> (usize, usize) {
+fn serialize_vec_to_disk<T>(
+    v: &[T],
+    vfs: &Arc<dyn VfsImpl>,
+) -> Result<(usize, usize), BfTreeError> {
     if v.is_empty() {
-        return (0, 0);
+        return Ok((0, 0));
     }
     let unaligned_ptr = v.as_ptr() as *const u8;
     let unaligned_size = std::mem::size_of_val(v);
 
     let aligned_size = align_to_sector_size(unaligned_size);
     let layout = std::alloc::Layout::from_size_align(aligned_size, SECTOR_SIZE).unwrap();
+    // SAFETY: layout is non-zero-sized and properly aligned (SECTOR_SIZE is a power of 2).
     unsafe {
         let aligned_ptr = std::alloc::alloc_zeroed(layout);
+        // SAFETY: unaligned_ptr is valid for unaligned_size bytes (it comes from v),
+        // and aligned_ptr was allocated with aligned_size >= unaligned_size.
         std::ptr::copy_nonoverlapping(unaligned_ptr, aligned_ptr, unaligned_size);
+        // SAFETY: aligned_ptr is valid for aligned_size bytes (just allocated above).
         let slice = std::slice::from_raw_parts(aligned_ptr, aligned_size);
-        let offset = serialize_u8_slice_to_disk(slice, vfs);
+        let offset = serialize_u8_slice_to_disk(slice, vfs)?;
+        // SAFETY: aligned_ptr was allocated with the same layout via alloc_zeroed.
         std::alloc::dealloc(aligned_ptr, layout);
-        (offset, unaligned_size)
+        Ok((offset, unaligned_size))
     }
 }
 
-fn read_vec_from_offset<T: Clone>(offset: usize, size: usize, vfs: &Arc<dyn VfsImpl>) -> Vec<T> {
-    assert!(size > 0);
-    let slice = read_u8_slice_from_disk(offset, size, vfs);
+fn read_vec_from_offset<T: Clone>(
+    offset: usize,
+    size: usize,
+    vfs: &Arc<dyn VfsImpl>,
+) -> Result<Vec<T>, BfTreeError> {
+    if size == 0 {
+        return Err(BfTreeError::Io(IoErrorKind::Corruption));
+    }
+    let slice = read_u8_slice_from_disk(offset, size, vfs)?;
     let ptr = slice.as_ptr() as *const T;
-    let size = size / std::mem::size_of::<T>();
-    let slice = unsafe { std::slice::from_raw_parts(ptr, size) };
-    slice.to_vec()
+    let count = size / std::mem::size_of::<T>();
+    // SAFETY: ptr is aligned to T (serialized via serialize_vec_to_disk with the same T layout),
+    // and count * size_of::<T>() <= slice.len() by construction.
+    let items = unsafe { std::slice::from_raw_parts(ptr, count) };
+    Ok(items.to_vec())
 }
 
-fn read_u8_slice_from_disk(offset: usize, size: usize, vfs: &Arc<dyn VfsImpl>) -> Vec<u8> {
+fn read_u8_slice_from_disk(
+    offset: usize,
+    size: usize,
+    vfs: &Arc<dyn VfsImpl>,
+) -> Result<Vec<u8>, BfTreeError> {
     let mut res = Vec::new();
     let mut buffer = vec![0; DISK_PAGE_SIZE];
     for i in (0..size).step_by(DISK_PAGE_SIZE) {
-        vfs.read(offset + i, &mut buffer); // Read one disk page at a time
+        vfs.read(offset + i, &mut buffer)
+            .map_err(|e| BfTreeError::Io(e))?;
         res.extend_from_slice(&buffer);
     }
-    res
+    Ok(res)
 }
 
 const SECTOR_SIZE: usize = 512;
@@ -505,19 +542,17 @@ fn align_to_sector_size(n: usize) -> usize {
     (n + SECTOR_SIZE - 1) & !(SECTOR_SIZE - 1)
 }
 
-/// Write a slice to disk and return the start offset and page count.
-/// TODO: we should not just return offset and count, because the offset is not necessarily continuos.
-///     We should return a Vec of offsets. But let's keep it simple for fast prototype.
-fn serialize_u8_slice_to_disk(slice: &[u8], vfs: &Arc<dyn VfsImpl>) -> usize {
+/// Write a slice to disk and return the start offset.
+fn serialize_u8_slice_to_disk(slice: &[u8], vfs: &Arc<dyn VfsImpl>) -> Result<usize, BfTreeError> {
     let mut start_offset = None;
     for chunk in slice.chunks(DISK_PAGE_SIZE) {
-        let offset = vfs.alloc_offset(DISK_PAGE_SIZE); // Write one disk page at a time
+        let offset = vfs.alloc_offset(DISK_PAGE_SIZE);
         if start_offset.is_none() {
             start_offset = Some(offset);
         }
-        vfs.write(offset, chunk);
+        vfs.write(offset, chunk).map_err(|e| BfTreeError::Io(e))?;
     }
-    start_offset.unwrap()
+    start_offset.ok_or(BfTreeError::Io(IoErrorKind::SnapshotWrite))
 }
 
 #[cfg(all(test, not(feature = "shuttle")))]
@@ -557,7 +592,7 @@ mod tests {
             let key = install_value_to_buffer(&mut key_buffer, r);
             bftree.insert(key, key);
         }
-        bftree.snapshot();
+        bftree.snapshot().unwrap();
         drop(bftree);
 
         let bftree = BfTree::new_from_snapshot(config.clone(), None).unwrap();
@@ -609,7 +644,7 @@ mod tests {
         }
 
         // Snapshot the in-memory tree to disk
-        let path = bftree.snapshot_memory_to_disk(&snapshot_path);
+        let path = bftree.snapshot_memory_to_disk(&snapshot_path).unwrap();
         assert_eq!(path, snapshot_path);
         assert!(snapshot_path.exists());
         drop(bftree);
@@ -668,7 +703,7 @@ mod tests {
                 let key = install_value_to_buffer(&mut key_buffer, r);
                 tree.insert(key, key);
             }
-            tree.snapshot();
+            tree.snapshot().unwrap();
         }
 
         // Step 2: Load the snapshot into an in-memory (cache_only) tree.
@@ -699,6 +734,205 @@ mod tests {
             }
         }
 
+        std::fs::remove_file(snapshot_path).unwrap();
+    }
+
+    /// Snapshot recovery preserves data written before the snapshot, even if
+    /// the tree is dropped (simulating a crash) and reopened via
+    /// `new_from_snapshot`.
+    #[test]
+    fn snapshot_recovery_preserves_pre_snapshot_data() {
+        let snapshot_path =
+            std::path::PathBuf::from_str("target/test_recovery_pre_snapshot.bftree").unwrap();
+        let _ = std::fs::remove_file(&snapshot_path);
+
+        let min_record_size: usize = 64;
+        let max_record_size: usize = 2048;
+        let leaf_page_size: usize = 8192;
+        let record_cnt: usize = 1000;
+
+        let make_config = || {
+            let mut config = Config::new(&snapshot_path, leaf_page_size * 16);
+            config.storage_backend(crate::StorageBackend::Std);
+            config.cb_min_record_size = min_record_size;
+            config.cb_max_record_size = max_record_size;
+            config.leaf_page_size = leaf_page_size;
+            config.max_fence_len = max_record_size;
+            config
+        };
+
+        let key_len: usize = min_record_size / 2;
+        let mut key_buffer = vec![0usize; key_len / 8];
+
+        // Phase 1: Insert records and snapshot.
+        {
+            let tree = BfTree::with_config(make_config(), None).unwrap();
+            for r in 0..record_cnt {
+                let key = install_value_to_buffer(&mut key_buffer, r);
+                tree.insert(key, key);
+            }
+            tree.snapshot().unwrap();
+            // Drop without graceful shutdown simulates crash.
+        }
+
+        // Phase 2: Recover from snapshot and verify every key via point reads.
+        let tree = BfTree::new_from_snapshot(make_config(), None).unwrap();
+        let mut out_buffer = vec![0u8; key_len];
+        let mut found = 0usize;
+        for r in 0..record_cnt {
+            let key = install_value_to_buffer(&mut key_buffer, r);
+            match tree.read(key, &mut out_buffer) {
+                LeafReadResult::Found(v) => {
+                    assert_eq!(v as usize, key_len);
+                    assert_eq!(&out_buffer[..key_len], key);
+                    found += 1;
+                }
+                other => panic!("key {r} not found after recovery: {other:?}"),
+            }
+        }
+        assert_eq!(found, record_cnt, "not all keys recovered");
+
+        // Phase 3: Verify scan produces sorted order.
+        {
+            let scan = tree
+                .scan_with_count(
+                    &[0u8],
+                    record_cnt + 10,
+                    crate::range_scan::ScanReturnField::Key,
+                )
+                .unwrap();
+            let mut scan_buf = vec![0u8; key_len + max_record_size];
+            let mut prev: Option<Vec<u8>> = None;
+            let mut scan_count = 0;
+            let mut scan_ref = scan;
+            while let Ok(Some((kl, _vl))) = scan_ref.next(&mut scan_buf) {
+                let key = scan_buf[..kl].to_vec();
+                if let Some(ref p) = prev {
+                    assert!(key > *p, "scan order violated at entry {scan_count}");
+                }
+                prev = Some(key);
+                scan_count += 1;
+            }
+            assert_eq!(
+                scan_count, record_cnt,
+                "scan returned wrong number of entries"
+            );
+        }
+
+        drop(tree);
+        std::fs::remove_file(snapshot_path).unwrap();
+    }
+
+    /// Recovery after splits: insert enough data to trigger many page splits,
+    /// snapshot, drop (crash), and verify the recovered tree is consistent.
+    #[test]
+    fn recovery_after_splits_produces_correct_tree() {
+        let snapshot_path =
+            std::path::PathBuf::from_str("target/test_recovery_splits.bftree").unwrap();
+        let _ = std::fs::remove_file(&snapshot_path);
+
+        let min_record_size: usize = 64;
+        let max_record_size: usize = 2048;
+        let leaf_page_size: usize = 8192;
+        // Many records with standard page size to force many splits.
+        let record_cnt: usize = 2000;
+
+        let make_config = || {
+            let mut config = Config::new(&snapshot_path, leaf_page_size * 16);
+            config.storage_backend(crate::StorageBackend::Std);
+            config.cb_min_record_size = min_record_size;
+            config.cb_max_record_size = max_record_size;
+            config.leaf_page_size = leaf_page_size;
+            config.max_fence_len = max_record_size;
+            config
+        };
+
+        let key_len: usize = min_record_size / 2;
+        let mut key_buffer = vec![0usize; key_len / 8];
+
+        // Insert and snapshot.
+        {
+            let tree = BfTree::with_config(make_config(), None).unwrap();
+            for r in 0..record_cnt {
+                let key = install_value_to_buffer(&mut key_buffer, r);
+                tree.insert(key, key);
+            }
+            tree.snapshot().unwrap();
+        }
+
+        // Recover and verify all keys.
+        let tree = BfTree::new_from_snapshot(make_config(), None).unwrap();
+        let mut out_buffer = vec![0u8; key_len];
+        let mut missing = 0usize;
+        for r in 0..record_cnt {
+            let key = install_value_to_buffer(&mut key_buffer, r);
+            match tree.read(key, &mut out_buffer) {
+                LeafReadResult::Found(v) => {
+                    assert_eq!(v as usize, key_len);
+                }
+                _ => missing += 1,
+            }
+        }
+        assert_eq!(
+            missing, 0,
+            "{missing} keys missing after recovery with splits"
+        );
+
+        drop(tree);
+        std::fs::remove_file(snapshot_path).unwrap();
+    }
+
+    /// Checksums are validated on reads from a recovered tree when
+    /// `verify_checksums` is enabled.
+    #[test]
+    fn recovery_with_checksums_enabled() {
+        let snapshot_path =
+            std::path::PathBuf::from_str("target/test_recovery_checksums.bftree").unwrap();
+        let _ = std::fs::remove_file(&snapshot_path);
+
+        let min_record_size: usize = 64;
+        let max_record_size: usize = 2048;
+        let leaf_page_size: usize = 8192;
+        let record_cnt: usize = 500;
+
+        let make_config = || {
+            let mut config = Config::new(&snapshot_path, leaf_page_size * 16);
+            config.storage_backend(crate::StorageBackend::Std);
+            config.cb_min_record_size = min_record_size;
+            config.cb_max_record_size = max_record_size;
+            config.leaf_page_size = leaf_page_size;
+            config.max_fence_len = max_record_size;
+            config.verify_checksums = true;
+            config
+        };
+
+        let key_len: usize = min_record_size / 2;
+        let mut key_buffer = vec![0usize; key_len / 8];
+
+        // Create, populate, snapshot with checksums on.
+        {
+            let tree = BfTree::with_config(make_config(), None).unwrap();
+            for r in 0..record_cnt {
+                let key = install_value_to_buffer(&mut key_buffer, r);
+                tree.insert(key, key);
+            }
+            tree.snapshot().unwrap();
+        }
+
+        // Recover with checksums still enabled.
+        let tree = BfTree::new_from_snapshot(make_config(), None).unwrap();
+        let mut out_buffer = vec![0u8; key_len];
+        for r in 0..record_cnt {
+            let key = install_value_to_buffer(&mut key_buffer, r);
+            match tree.read(key, &mut out_buffer) {
+                LeafReadResult::Found(v) => {
+                    assert_eq!(v as usize, key_len);
+                }
+                other => panic!("checksum-verified read failed for key {r}: {other:?}"),
+            }
+        }
+
+        drop(tree);
         std::fs::remove_file(snapshot_path).unwrap();
     }
 }

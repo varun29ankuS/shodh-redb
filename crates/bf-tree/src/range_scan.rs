@@ -11,6 +11,7 @@ use crate::{
     },
     nodes::leaf_node::{GetScanRecordByPosResult, MiniPageNextLevel},
     storage::PageLocation,
+    tree::ScanIterError,
     utils::{inner_lock::ReadGuard, Backoff},
     BfTree,
 };
@@ -94,7 +95,7 @@ impl<'b> ScanIterMut<'_, 'b> {
         start_key: &'b [u8],
         scan_cnt: usize,
         return_field: ScanReturnField,
-    ) -> Self {
+    ) -> Result<Self, ScanIterError> {
         let backoff = Backoff::new();
         let mut aggressive_split = false;
 
@@ -117,18 +118,18 @@ impl<'b> ScanIterMut<'_, 'b> {
                     continue;
                 }
                 Err(TreeError::IoError(e)) => {
-                    panic!("I/O error during scan cursor positioning: {e}");
+                    return Err(ScanIterError::IoError(e));
                 }
             };
 
-            return Self {
+            return Ok(Self {
                 tree,
                 scan_cnt,
                 scan_position: scan_pos,
                 leaf_lock: lock,
                 return_field,
                 end_key: None,
-            };
+            });
         }
     }
 
@@ -137,15 +138,15 @@ impl<'b> ScanIterMut<'_, 'b> {
         start_key: &'b [u8],
         end_key: &[u8],
         return_field: ScanReturnField,
-    ) -> Self {
-        let mut si = Self::new_with_scan_count(tree, start_key, usize::MAX, return_field);
+    ) -> Result<Self, ScanIterError> {
+        let mut si = Self::new_with_scan_count(tree, start_key, usize::MAX, return_field)?;
         si.end_key = Some(end_key.to_vec());
-        si
+        Ok(si)
     }
 
-    pub fn next(&mut self, out_buffer: &mut [u8]) -> Option<(usize, usize)> {
+    pub fn next(&mut self, out_buffer: &mut [u8]) -> Result<Option<(usize, usize)>, ScanIterError> {
         if self.scan_cnt == 0 && self.end_key.is_none() {
-            return None;
+            return Ok(None);
         }
 
         match self.leaf_lock.scan_record_by_pos_with_bound(
@@ -175,7 +176,7 @@ impl<'b> ScanIterMut<'_, 'b> {
                     }
                     PageLocation::Null => panic!("range_scan next on Null page"),
                 }
-                Some((key_len as usize, value_len as usize))
+                Ok(Some((key_len as usize, value_len as usize)))
             }
             GetScanRecordByPosResult::EndOfLeaf => {
                 // we need to load next leaf.
@@ -183,7 +184,7 @@ impl<'b> ScanIterMut<'_, 'b> {
 
                 if right_sibling.is_empty() {
                     self.scan_cnt = 0;
-                    return None;
+                    return Ok(None);
                 }
 
                 let backoff = Backoff::new();
@@ -201,9 +202,6 @@ impl<'b> ScanIterMut<'_, 'b> {
                             continue;
                         }
                         Err(TreeError::CircularBufferFull) => {
-                            // We can't call eviction here because we are holding a lock, which may happened to be evicted!
-                            // It is safe bc circular buffer full is caused by promoting to full page, which is a performance concern not correctness.
-                            //
                             aggressive_split = true;
                             continue;
                         }
@@ -213,7 +211,7 @@ impl<'b> ScanIterMut<'_, 'b> {
                             continue;
                         }
                         Err(TreeError::IoError(e)) => {
-                            panic!("I/O error during scan next-leaf positioning: {e}");
+                            return Err(ScanIterError::IoError(e));
                         }
                     };
                     self.scan_position = pos;
@@ -224,7 +222,7 @@ impl<'b> ScanIterMut<'_, 'b> {
             }
             GetScanRecordByPosResult::BoundKeyExceeded => {
                 self.scan_cnt = 0;
-                None
+                Ok(None)
             }
         }
     }
@@ -250,7 +248,7 @@ impl<'b> ScanIter<'_, 'b> {
         start_key: &[u8],
         scan_cnt: usize,
         return_field: ScanReturnField,
-    ) -> Self {
+    ) -> Result<Self, ScanIterError> {
         let backoff = Backoff::new();
         let mut aggressive_split = false;
 
@@ -272,18 +270,18 @@ impl<'b> ScanIter<'_, 'b> {
                     continue;
                 }
                 Err(TreeError::IoError(e)) => {
-                    panic!("I/O error during scan cursor positioning: {e}");
+                    return Err(ScanIterError::IoError(e));
                 }
             };
 
-            return Self {
+            return Ok(Self {
                 tree,
                 scan_cnt,
                 scan_position: scan_pos,
                 leaf_lock: lock,
                 return_field,
                 end_key: None,
-            };
+            });
         }
     }
 
@@ -292,19 +290,18 @@ impl<'b> ScanIter<'_, 'b> {
         start_key: &[u8],
         end_key: &[u8],
         return_field: ScanReturnField,
-    ) -> Self {
-        let mut si = Self::new_with_scan_count(tree, start_key, usize::MAX, return_field);
+    ) -> Result<Self, ScanIterError> {
+        let mut si = Self::new_with_scan_count(tree, start_key, usize::MAX, return_field)?;
         si.end_key = Some(end_key.to_vec());
-        si
+        Ok(si)
     }
 
-    // Here we need to busy loop? Is that safe?
     /// Scan next value into `out_buffer`.
     /// next() terminates if 1) reached the last key. 2) scanned `scan_cnt` records, if set. 3) reached end_key, if set.
     /// Returns the length of the record fields copied into `out_buffer` or None if there is no more value.
-    pub fn next(&mut self, out_buffer: &mut [u8]) -> Option<(usize, usize)> {
+    pub fn next(&mut self, out_buffer: &mut [u8]) -> Result<Option<(usize, usize)>, ScanIterError> {
         if self.scan_cnt == 0 && self.end_key.is_none() {
-            return None;
+            return Ok(None);
         }
 
         match self.leaf_lock.get_record_by_pos_with_bound(
@@ -320,7 +317,7 @@ impl<'b> ScanIter<'_, 'b> {
             GetScanRecordByPosResult::Found(key_len, value_len) => {
                 self.scan_position.move_to_next();
                 self.scan_cnt -= 1;
-                Some((key_len as usize, value_len as usize))
+                Ok(Some((key_len as usize, value_len as usize)))
             }
             GetScanRecordByPosResult::EndOfLeaf => {
                 // we need to load next leaf.
@@ -329,7 +326,7 @@ impl<'b> ScanIter<'_, 'b> {
 
                 if right_sibling.is_empty() {
                     self.scan_cnt = 0;
-                    return None;
+                    return Ok(None);
                 }
 
                 let backoff = Backoff::new();
@@ -344,11 +341,6 @@ impl<'b> ScanIter<'_, 'b> {
                                 continue;
                             }
                             Err(TreeError::CircularBufferFull) => {
-                                // We can't call eviction here becuase we are holding a lock, which may happened to be evicted!
-                                // It is safe bc circular buffer full is caused by promoting to full page, which is a performance concern not correctness.
-                                //
-                                // Should we consider making the below function to be unsafe? To arise the awareness?
-                                // _ = self.tree.evict_from_circular_buffer();
                                 aggressive_split = true;
                                 continue;
                             }
@@ -358,7 +350,7 @@ impl<'b> ScanIter<'_, 'b> {
                                 continue;
                             }
                             Err(TreeError::IoError(e)) => {
-                                panic!("I/O error during scan next-leaf positioning: {e}");
+                                return Err(ScanIterError::IoError(e));
                             }
                         };
                     self.scan_position = pos;
@@ -369,7 +361,7 @@ impl<'b> ScanIter<'_, 'b> {
             }
             GetScanRecordByPosResult::BoundKeyExceeded => {
                 self.scan_cnt = 0;
-                None
+                Ok(None)
             }
         }
     }
@@ -390,7 +382,7 @@ fn promote_or_merge_mini_page<'a>(
             counter!(ScanPromoteBaseToFull);
             // upgrade this page to full page.
             let next_level = MiniPageNextLevel::new(*offset);
-            let base_page_ref = leaf.load_base_page_from_buffer();
+            let base_page_ref = leaf.load_base_page(*offset);
             let pos = base_page_ref.lower_bound(key);
 
             // Upgrade only if not empty
@@ -417,13 +409,17 @@ fn promote_or_merge_mini_page<'a>(
                     // (1) keep using the merged base page
                     // (2) upgrade this page to full page, so that future scans don't need to load base page.
                     //      this is done with probability to avoid polluting the cache.
+                    // Capture the base page disk offset before changing page location,
+                    // because try_merge_mini_page may return early (no actual merge
+                    // needed) without populating tmp_buffer.
+                    let base_disk_offset = mini_page.next_level.as_offset();
                     if tree.should_promote_scan_page() {
                         // upgrade to full page
                         let base_offset = mini_page.next_level;
                         leaf.change_to_base_loc();
                         tree.storage.finish_dealloc_mini_page(h);
 
-                        let base_page_ref = leaf.load_base_page_from_buffer();
+                        let base_page_ref = leaf.load_base_page(base_disk_offset);
                         let pos = base_page_ref.lower_bound(key);
                         if base_page_ref.meta.meta_count_without_fence() > 0 {
                             let full_page_loc =
@@ -437,7 +433,7 @@ fn promote_or_merge_mini_page<'a>(
                     } else {
                         leaf.change_to_base_loc();
                         tree.storage.finish_dealloc_mini_page(h);
-                        let base_ref = leaf.load_base_page_from_buffer();
+                        let base_ref = leaf.load_base_page(base_disk_offset);
                         let pos = base_ref.lower_bound(key);
                         Ok(ScanPosition::Base(pos as u32))
                     }
@@ -571,7 +567,7 @@ mod tests {
                 .expect("Scan failed");
 
             let mut cnt = 0;
-            while let Some((kl, vl)) = scan_iter.next(&mut output_buffer) {
+            while let Ok(Some((kl, vl))) = scan_iter.next(&mut output_buffer) {
                 let scanned_key = &output_buffer[0..kl];
                 assert!(kl == key_len);
 
@@ -598,7 +594,7 @@ mod tests {
             .expect("Scan failed");
         let mut cnt = 0;
 
-        while let Some((kl, vl)) = scan_iter.next(&mut output_buffer) {
+        while let Ok(Some((kl, vl))) = scan_iter.next(&mut output_buffer) {
             let scanned_key = &output_buffer[0..kl];
             assert!(kl == key_len);
 
@@ -682,7 +678,7 @@ mod tests {
         let mut prev_key = vec![0u8; key_len];
         let mut cnt = 0;
 
-        while let Some((kl, vl)) = scan_iter.next(&mut output_buffer) {
+        while let Ok(Some((kl, vl))) = scan_iter.next(&mut output_buffer) {
             let scanned_key = &output_buffer[0..kl];
             assert!(kl == key_len);
 

@@ -862,14 +862,14 @@ mod tests {
         assert_eq!(keys, vec!["visible"]);
     }
 
-    /// Exercises the compensating rollback path in WriteBuffer::flush().
+    /// Exercises the compensating rollback path in `WriteBuffer::flush()`.
     ///
     /// Strategy: buffer two entries where the first (sorted by key) succeeds
-    /// but the second fails on BfTree's combined key+value size check. The
-    /// pre-validation in flush() checks key and value lengths independently,
-    /// but BfTree rejects records where key.len() + value.len() exceeds
-    /// cb_max_record_size. After the second insert fails, the first insert
-    /// must be rolled back (deleted from BfTree).
+    /// but the second fails on `BfTree`'s combined key+value size check. The
+    /// pre-validation in `flush()` checks key and value lengths independently,
+    /// but `BfTree` rejects records where `key.len() + value.len()` exceeds
+    /// `cb_max_record_size`. After the second insert fails, the first insert
+    /// must be rolled back (deleted from `BfTree`).
     #[test]
     fn flush_rollback_undoes_partial_writes() {
         let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();

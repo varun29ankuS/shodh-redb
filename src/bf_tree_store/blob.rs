@@ -1960,7 +1960,7 @@ mod tests {
 
     /// Dedup pipeline: two identical blobs share chunk data.
     ///
-    /// Stores two blobs with identical content (>= DEDUP_MIN_SIZE). The second
+    /// Stores two blobs with identical content (>= `DEDUP_MIN_SIZE`). The second
     /// blob should be deduped: it shares the first blob's chunk data instead of
     /// writing its own. Both blobs remain independently readable.
     #[test]

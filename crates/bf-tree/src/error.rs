@@ -27,6 +27,7 @@ pub enum IoErrorKind {
     ConfigRead,
     ConfigParse,
     Corruption,
+    ChecksumMismatch { offset: usize },
 }
 
 impl fmt::Display for IoErrorKind {
@@ -42,6 +43,9 @@ impl fmt::Display for IoErrorKind {
             IoErrorKind::ConfigRead => write!(f, "config file read failed"),
             IoErrorKind::ConfigParse => write!(f, "config file parse failed"),
             IoErrorKind::Corruption => write!(f, "data corruption detected"),
+            IoErrorKind::ChecksumMismatch { offset } => {
+                write!(f, "CRC-32 checksum mismatch at disk page offset {}", offset)
+            }
         }
     }
 }

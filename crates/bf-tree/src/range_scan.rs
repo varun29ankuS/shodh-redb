@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::{
     check_parent, counter,
-    error::TreeError,
+    error::{IoErrorKind, TreeError},
     mini_page_op::{
         upgrade_to_full_page, LeafEntrySLocked, LeafEntryXLocked, LeafOperations, MergeResult,
     },
@@ -18,6 +18,15 @@ use crate::{
 
 pub(crate) enum ScanError {
     NeedMergeMiniPage,
+    Io(IoErrorKind),
+}
+
+/// Convert a `TreeError` into a `ScanIterError` for scan-path error propagation.
+fn tree_err_to_scan(e: TreeError) -> ScanIterError {
+    match e {
+        TreeError::IoError(io) => ScanIterError::IoError(io),
+        _ => ScanIterError::IoError(IoErrorKind::Corruption),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +77,7 @@ impl ScanLock<'_> {
         }
     }
 
-    fn get_right_sibling(&mut self) -> Vec<u8> {
+    fn get_right_sibling(&mut self) -> Result<Vec<u8>, TreeError> {
         match self {
             ScanLock::S(leaf) => leaf.get_right_sibling(),
             ScanLock::X(leaf) => leaf.get_right_sibling(),
@@ -166,7 +175,9 @@ impl<'b> ScanIterMut<'_, 'b> {
                 // since we are mut, we need to mark as dirty.
                 match self.leaf_lock.get_page_location() {
                     PageLocation::Base(_offset) => {
-                        self.leaf_lock.load_base_page_mut();
+                        self.leaf_lock
+                            .load_base_page_mut()
+                            .map_err(tree_err_to_scan)?;
                     }
                     PageLocation::Full(_) => {
                         // do nothing.
@@ -174,13 +185,18 @@ impl<'b> ScanIterMut<'_, 'b> {
                     PageLocation::Mini(_) => {
                         unreachable!()
                     }
-                    PageLocation::Null => panic!("range_scan next on Null page"),
+                    PageLocation::Null => {
+                        return Err(ScanIterError::IoError(IoErrorKind::Corruption));
+                    }
                 }
                 Ok(Some((key_len as usize, value_len as usize)))
             }
             GetScanRecordByPosResult::EndOfLeaf => {
                 // we need to load next leaf.
-                let right_sibling = self.leaf_lock.get_right_sibling();
+                let right_sibling = self
+                    .leaf_lock
+                    .get_right_sibling()
+                    .map_err(tree_err_to_scan)?;
 
                 if right_sibling.is_empty() {
                     self.scan_cnt = 0;
@@ -322,7 +338,10 @@ impl<'b> ScanIter<'_, 'b> {
             GetScanRecordByPosResult::EndOfLeaf => {
                 // we need to load next leaf.
                 counter!(ScanGoNextLeaf);
-                let right_sibling = self.leaf_lock.get_right_sibling();
+                let right_sibling = self
+                    .leaf_lock
+                    .get_right_sibling()
+                    .map_err(tree_err_to_scan)?;
 
                 if right_sibling.is_empty() {
                     self.scan_cnt = 0;
@@ -382,7 +401,7 @@ fn promote_or_merge_mini_page<'a>(
             counter!(ScanPromoteBaseToFull);
             // upgrade this page to full page.
             let next_level = MiniPageNextLevel::new(*offset);
-            let base_page_ref = leaf.load_base_page(*offset);
+            let base_page_ref = leaf.load_base_page(*offset)?;
             let pos = base_page_ref.lower_bound(key);
 
             // Upgrade only if not empty
@@ -419,7 +438,7 @@ fn promote_or_merge_mini_page<'a>(
                         leaf.change_to_base_loc();
                         tree.storage.finish_dealloc_mini_page(h);
 
-                        let base_page_ref = leaf.load_base_page(base_disk_offset);
+                        let base_page_ref = leaf.load_base_page(base_disk_offset)?;
                         let pos = base_page_ref.lower_bound(key);
                         if base_page_ref.meta.meta_count_without_fence() > 0 {
                             let full_page_loc =
@@ -433,7 +452,7 @@ fn promote_or_merge_mini_page<'a>(
                     } else {
                         leaf.change_to_base_loc();
                         tree.storage.finish_dealloc_mini_page(h);
-                        let base_ref = leaf.load_base_page(base_disk_offset);
+                        let base_ref = leaf.load_base_page(base_disk_offset)?;
                         let pos = base_ref.lower_bound(key);
                         Ok(ScanPosition::Base(pos as u32))
                     }
@@ -465,8 +484,8 @@ fn move_cursor_to_leaf_mut<'a>(
 
     check_parent!(tree, pid, parent);
 
-    if let Ok(pos) = leaf.get_scan_position(key) {
-        match pos {
+    match leaf.get_scan_position(key) {
+        Ok(pos) => match pos {
             ScanPosition::Base(_) => {
                 if !tree.should_promote_scan_page() {
                     return Ok((pos, leaf));
@@ -476,7 +495,9 @@ fn move_cursor_to_leaf_mut<'a>(
             ScanPosition::Full(_) => {
                 return Ok((pos, leaf));
             }
-        }
+        },
+        Err(ScanError::NeedMergeMiniPage) => {}
+        Err(ScanError::Io(io)) => return Err(TreeError::IoError(io)),
     }
 
     // we need to merge mini page.
@@ -496,8 +517,8 @@ fn move_cursor_to_leaf<'a>(
 
     check_parent!(tree, pid, parent);
 
-    if let Ok(pos) = leaf.get_scan_position(key) {
-        match pos {
+    match leaf.get_scan_position(key) {
+        Ok(pos) => match pos {
             ScanPosition::Base(_) => {
                 counter!(ScanBasePage);
                 if parent.is_none() || !tree.should_promote_scan_page() {
@@ -509,7 +530,9 @@ fn move_cursor_to_leaf<'a>(
                 counter!(ScanFullPage);
                 return Ok((pos, ScanLock::S(leaf)));
             }
-        }
+        },
+        Err(ScanError::NeedMergeMiniPage) => {}
+        Err(ScanError::Io(io)) => return Err(TreeError::IoError(io)),
     }
 
     // we need to merge mini page.

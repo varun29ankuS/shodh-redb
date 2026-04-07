@@ -61,14 +61,30 @@ impl<const N: usize> Value for FixedVec<N> {
             data.len(),
         );
         let mut result = [0.0f32; N];
-        for (i, val) in result.iter_mut().enumerate() {
-            let start = i * 4;
-            *val = f32::from_le_bytes([
-                data[start],
-                data[start + 1],
-                data[start + 2],
-                data[start + 3],
-            ]);
+        #[cfg(target_endian = "little")]
+        {
+            // SAFETY: On little-endian targets, f32 byte representation matches
+            // memory layout. Source has >= N*4 bytes (asserted above), dest is
+            // [f32; N] with size N*4. Both pointers are valid and non-overlapping.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    result.as_mut_ptr().cast::<u8>(),
+                    N * 4,
+                );
+            }
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            for (i, val) in result.iter_mut().enumerate() {
+                let start = i * 4;
+                *val = f32::from_le_bytes([
+                    data[start],
+                    data[start + 1],
+                    data[start + 2],
+                    data[start + 3],
+                ]);
+            }
         }
         result
     }
@@ -77,11 +93,22 @@ impl<const N: usize> Value for FixedVec<N> {
     where
         Self: 'b,
     {
-        let mut result = Vec::with_capacity(N * core::mem::size_of::<f32>());
-        for val in value {
-            result.extend_from_slice(&val.to_le_bytes());
+        #[cfg(target_endian = "little")]
+        {
+            // SAFETY: On little-endian targets, the f32 slice memory is already
+            // in LE byte order. We create a byte view and copy to a Vec.
+            let byte_slice =
+                unsafe { core::slice::from_raw_parts(value.as_ptr().cast::<u8>(), N * 4) };
+            byte_slice.to_vec()
         }
-        result
+        #[cfg(not(target_endian = "little"))]
+        {
+            let mut result = Vec::with_capacity(N * core::mem::size_of::<f32>());
+            for val in value {
+                result.extend_from_slice(&val.to_le_bytes());
+            }
+            result
+        }
     }
 
     fn type_name() -> TypeName {
@@ -153,29 +180,57 @@ impl Value for DynVec {
         // Truncate to a multiple of 4 bytes to avoid partial reads
         let usable = data.len() - (data.len() % 4);
         let dim = usable / 4;
-        let mut result = Vec::with_capacity(dim);
-        for i in 0..dim {
-            let start = i * 4;
-            let bytes: [u8; 4] = [
-                data[start],
-                data[start + 1],
-                data[start + 2],
-                data[start + 3],
-            ];
-            result.push(f32::from_le_bytes(bytes));
+        #[cfg(target_endian = "little")]
+        {
+            let mut result = alloc::vec![0.0f32; dim];
+            // SAFETY: On LE targets, f32 byte representation matches memory layout.
+            // Source has `usable` bytes (dim * 4), dest has dim f32s (dim * 4 bytes).
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    result.as_mut_ptr().cast::<u8>(),
+                    dim * 4,
+                );
+            }
+            result
         }
-        result
+        #[cfg(not(target_endian = "little"))]
+        {
+            let mut result = Vec::with_capacity(dim);
+            for i in 0..dim {
+                let start = i * 4;
+                let bytes: [u8; 4] = [
+                    data[start],
+                    data[start + 1],
+                    data[start + 2],
+                    data[start + 3],
+                ];
+                result.push(f32::from_le_bytes(bytes));
+            }
+            result
+        }
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Vec<f32>) -> Vec<u8>
     where
         Self: 'b,
     {
-        let mut result = Vec::with_capacity(value.len() * core::mem::size_of::<f32>());
-        for val in value {
-            result.extend_from_slice(&val.to_le_bytes());
+        #[cfg(target_endian = "little")]
+        {
+            // SAFETY: On LE targets, the f32 slice memory is already in LE byte order.
+            let byte_slice = unsafe {
+                core::slice::from_raw_parts(value.as_ptr().cast::<u8>(), value.len() * 4)
+            };
+            byte_slice.to_vec()
         }
-        result
+        #[cfg(not(target_endian = "little"))]
+        {
+            let mut result = Vec::with_capacity(value.len() * core::mem::size_of::<f32>());
+            for val in value {
+                result.extend_from_slice(&val.to_le_bytes());
+            }
+            result
+        }
     }
 
     fn type_name() -> TypeName {

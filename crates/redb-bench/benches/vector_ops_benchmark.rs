@@ -33,9 +33,9 @@ fn make_u8_vecs(dim: usize) -> (Vec<u8>, Vec<u8>) {
 const RUNS: usize = 3;
 
 struct BenchResult {
-    ns_per_op: f64,
-    ops_per_sec: f64,
-    gb_per_sec: f64,
+    _ns_per_op: f64,
+    _ops_per_sec: f64,
+    _gb_per_sec: f64,
 }
 
 fn bench_single<F: FnMut() -> T, T>(iters: u64, mut f: F) -> Duration {
@@ -73,9 +73,9 @@ fn bench_fn_avg<F: FnMut() -> T + Clone, T>(
     );
 
     BenchResult {
-        ns_per_op,
-        ops_per_sec,
-        gb_per_sec,
+        _ns_per_op: ns_per_op,
+        _ops_per_sec: ops_per_sec,
+        _gb_per_sec: gb_per_sec,
     }
 }
 

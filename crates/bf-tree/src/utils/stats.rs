@@ -48,7 +48,10 @@ impl BfTree {
             match node_info {
                 NodeInfo::Leaf { level, page_id } => {
                     let mut leaf = self.mapping_table().get_mut(&page_id);
-                    let stats = leaf.get_stats();
+                    let stats = match leaf.get_stats() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
                     let node_cnt = stats.keys.len();
                     total_cnt += node_cnt;
                     nodes.push(PerNodeStats {

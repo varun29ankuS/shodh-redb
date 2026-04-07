@@ -151,7 +151,7 @@ impl From<u8> for LogEntryTagVal {
         match val {
             0 => LogEntryTagVal::Write,
             1 => LogEntryTagVal::Split,
-            _ => unreachable!(),
+            _ => panic!("corrupted WAL: invalid log entry tag byte {val:#04x}"),
         }
     }
 }

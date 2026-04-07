@@ -27,7 +27,7 @@ use crate::{
     check_parent,
     circular_buffer::{CircularBufferMetrics, TombstoneHandle},
     counter,
-    error::{BfTreeError, TreeError},
+    error::{BfTreeError, IoErrorKind, TreeError},
     histogram, info,
     mini_page_op::{upgrade_to_full_page, LeafEntryXLocked, LeafOperations, ReadResult},
     nodes::{
@@ -495,7 +495,7 @@ impl BfTree {
 
         check_parent!(self, cur_page_id, parent);
 
-        let should_split = cur_page.get_split_flag();
+        let should_split = cur_page.get_split_flag()?;
         if !should_split {
             return Ok(false);
         }
@@ -569,9 +569,9 @@ impl BfTree {
 
                 info!(sibling = sibling_id.raw(), "Splitting root node!");
 
-                let sibling = sibling_entry.load_base_page_mut();
+                let sibling = sibling_entry.load_base_page_mut()?;
 
-                let leaf_node = x_page.load_base_page_mut();
+                let leaf_node = x_page.load_base_page_mut()?;
                 let split_key = leaf_node.split(sibling, false);
 
                 #[cfg(feature = "std")]
@@ -796,8 +796,9 @@ impl BfTree {
                         OpType::Delete => WalWriteOp::make_delete(write_op.key),
                         _ => WalWriteOp::make_insert(write_op.key, write_op.value),
                     };
-                    let lsn = wal.append_and_wait(&wal_op, leaf_entry.get_disk_offset())?;
-                    leaf_entry.update_lsn(lsn);
+                    let log_entry = WalLogEntry::Write(wal_op);
+                    let lsn = wal.append_and_wait(&log_entry, leaf_entry.get_disk_offset())?;
+                    leaf_entry.update_lsn(lsn)?;
                 }
             }
         }
@@ -1174,7 +1175,7 @@ impl BfTree {
             out_buffer,
             self.config.mini_page_binary_search,
             self.cache_only,
-        );
+        )?;
         match out {
             ReadResult::Mini(r) | ReadResult::Full(r) => {
                 if leaf.cache_page_about_to_evict(&self.storage) {
@@ -1283,13 +1284,13 @@ impl BfTree {
             }
             PageLocation::Full(_ptr) => Ok(x_leaf),
             PageLocation::Base(offset) => {
-                let base_page_ref = x_leaf.load_base_page(offset);
+                let base_page_ref = x_leaf.load_base_page(offset)?;
                 let next_level = MiniPageNextLevel::new(offset);
                 let full_page_loc = upgrade_to_full_page(&self.storage, base_page_ref, next_level)?;
                 x_leaf.create_cache_page_loc(full_page_loc);
                 Ok(x_leaf)
             }
-            PageLocation::Null => panic!("upgrade_to_full_page on Null page"),
+            PageLocation::Null => Err(TreeError::IoError(IoErrorKind::Corruption)),
         }
     }
 

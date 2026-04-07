@@ -6,7 +6,7 @@ use crate::nodes::PageID;
 use crate::{
     circular_buffer::TombstoneHandle,
     counter,
-    error::TreeError,
+    error::{IoErrorKind, TreeError},
     fs::{buffer_alloc, buffer_dealloc, VfsImpl},
     histogram, info,
     nodes::{
@@ -18,6 +18,7 @@ use crate::{
     },
     range_scan::{ScanError, ScanPosition, ScanReturnField},
     storage::{LeafStorage, PageLocation},
+    sync::atomic::AtomicUsize,
     tree::key_value_physical_size,
     utils::stats::LeafStats,
     utils::{
@@ -98,12 +99,17 @@ impl Drop for TmpBuffer {
 }
 
 pub(crate) trait LeafOperations {
-    /// Panic if the page is not in the base page.
+    /// Returns the base page from the already-populated temporary buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `tmp_buffer` has not been populated by a prior `load_base_page` call.
+    /// Callers must ensure the buffer is loaded before invoking this method.
     fn load_base_page_from_buffer(&self) -> &LeafNode;
 
     fn get_page_location(&self) -> &PageLocation;
 
-    fn load_base_page(&mut self, offset: usize) -> &LeafNode;
+    fn load_base_page(&mut self, offset: usize) -> Result<&LeafNode, TreeError>;
 
     fn load_cache_page(&self, ptr: *mut LeafNode) -> &LeafNode {
         // SAFETY: `ptr` comes from a PageLocation::Mini or PageLocation::Full entry,
@@ -136,24 +142,24 @@ pub(crate) trait LeafOperations {
         }
     }
 
-    fn get_right_sibling(&mut self) -> Vec<u8> {
+    fn get_right_sibling(&mut self) -> Result<Vec<u8>, TreeError> {
         let page_loc = self.get_page_location();
         match page_loc {
             PageLocation::Base(offset) => {
-                let base_ref = self.load_base_page(*offset);
-                base_ref.get_high_fence_key()
+                let base_ref = self.load_base_page(*offset)?;
+                Ok(base_ref.get_high_fence_key())
             }
             PageLocation::Full(ptr) => {
                 let page_ref = self.load_cache_page(*ptr);
-                page_ref.get_high_fence_key()
+                Ok(page_ref.get_high_fence_key())
             }
             PageLocation::Mini(ptr) => {
                 let mini = self.load_cache_page(*ptr);
                 let offset = mini.next_level.as_offset();
-                let base_ref = self.load_base_page(offset);
-                base_ref.get_high_fence_key()
+                let base_ref = self.load_base_page(offset)?;
+                Ok(base_ref.get_high_fence_key())
             }
-            PageLocation::Null => panic!("get_right_sibling on Null page"),
+            PageLocation::Null => Err(TreeError::IoError(IoErrorKind::Corruption)),
         }
     }
 
@@ -174,21 +180,21 @@ pub(crate) trait LeafOperations {
         out_buffer: &mut [u8],
         mini_page_binary_search: bool,
         cache_only: bool,
-    ) -> ReadResult {
+    ) -> Result<ReadResult, TreeError> {
         let page_loc = self.get_page_location();
 
         let next_level = match page_loc {
             PageLocation::Base(offset) => {
-                let base_ref = self.load_base_page(*offset);
+                let base_ref = self.load_base_page(*offset)?;
                 let out = base_ref.read_by_key(key, out_buffer);
-                return ReadResult::Base(out);
+                return Ok(ReadResult::Base(out));
             }
             PageLocation::Full(ptr) => {
                 counter!(FullPageRead);
                 let base_ref = self.load_cache_page(*ptr);
                 let out = base_ref.read_by_key(key, out_buffer);
                 histogram!(HitMiniPage, base_ref.meta.node_size as u64);
-                return ReadResult::Full(out);
+                return Ok(ReadResult::Full(out));
             }
             PageLocation::Mini(ptr) => {
                 counter!(MiniPageRead);
@@ -197,12 +203,12 @@ pub(crate) trait LeafOperations {
                 histogram!(HitMiniPage, mini_page.meta.node_size as u64);
                 match out {
                     LeafResult::Found(_) | LeafResult::Deleted | LeafResult::InvalidKey => {
-                        return ReadResult::Mini(out);
+                        return Ok(ReadResult::Mini(out));
                     }
                     LeafResult::NotFound => {
                         // In cache only mode, we return not found
                         if cache_only {
-                            return ReadResult::None;
+                            return Ok(ReadResult::None);
                         }
 
                         // fall through
@@ -212,14 +218,14 @@ pub(crate) trait LeafOperations {
                 }
             }
             PageLocation::Null => {
-                return ReadResult::None;
+                return Ok(ReadResult::None);
             }
         };
 
-        let base_ref = self.load_base_page(next_level.as_offset());
+        let base_ref = self.load_base_page(next_level.as_offset())?;
 
         let out = base_ref.read_by_key(key, out_buffer);
-        ReadResult::Base(out)
+        Ok(ReadResult::Base(out))
     }
 
     /// Returns the pos of the key when scanning, i.e., the keys[pos] >= key.
@@ -230,7 +236,10 @@ pub(crate) trait LeafOperations {
 
         match page_loc {
             PageLocation::Base(offset) => {
-                let base_ref = self.load_base_page(*offset);
+                let base_ref = self.load_base_page(*offset).map_err(|e| match e {
+                    TreeError::IoError(io) => ScanError::Io(io),
+                    _ => ScanError::Io(IoErrorKind::Corruption),
+                })?;
                 let pos = base_ref.lower_bound(key);
                 Ok(ScanPosition::Base(pos as u32))
             }
@@ -240,7 +249,7 @@ pub(crate) trait LeafOperations {
                 Ok(ScanPosition::Full(pos as u32))
             }
             PageLocation::Mini(_ptr) => Err(ScanError::NeedMergeMiniPage),
-            PageLocation::Null => panic!("get_scan_position on Null page"),
+            PageLocation::Null => Err(ScanError::Io(IoErrorKind::Corruption)),
         }
     }
 }
@@ -257,11 +266,16 @@ pub(crate) struct LeafEntrySLocked<'a> {
     tmp_buffer_size: usize,
     tmp_buffer: Option<TmpBuffer>,
     verify_checksums: bool,
+    cow_boundary: &'a AtomicUsize,
 }
 
 impl LeafOperations for LeafEntrySLocked<'_> {
     fn load_base_page_from_buffer(&self) -> &LeafNode {
-        let l = self.tmp_buffer.as_ref().unwrap().as_leaf_node();
+        let l = self
+            .tmp_buffer
+            .as_ref()
+            .expect("load_base_page_from_buffer called before load_base_page populated the buffer")
+            .as_leaf_node();
         debug_assert!(l.is_base_page());
         l
     }
@@ -270,15 +284,15 @@ impl LeafOperations for LeafEntrySLocked<'_> {
         self.raw_guard.deref()
     }
 
-    fn load_base_page(&mut self, offset: usize) -> &LeafNode {
+    fn load_base_page(&mut self, offset: usize) -> Result<&LeafNode, TreeError> {
         match self.tmp_buffer {
-            Some(ref buffer) => buffer.as_leaf_node(),
+            Some(ref buffer) => Ok(buffer.as_leaf_node()),
             None => {
                 let mut buffer = TmpBuffer::new(self.tmp_buffer_size);
                 let slice = buffer.as_u8_slice_mut();
-                if let Err(e) = self.file_handle.read(offset, slice) {
-                    panic!("fatal VFS read at offset {offset}: {e}");
-                }
+                self.file_handle
+                    .read(offset, slice)
+                    .map_err(|_| TreeError::IoError(IoErrorKind::VfsRead { offset }))?;
 
                 if self.verify_checksums && slice.len() >= CRC32_SIZE {
                     let data_end = slice.len() - CRC32_SIZE;
@@ -289,11 +303,11 @@ impl LeafOperations for LeafEntrySLocked<'_> {
                     // were enabled (alloc_zeroed produces trailing zeros).
                     if stored != 0 {
                         let computed = crate::utils::crc32::crc32(&slice[..data_end]);
-                        assert_eq!(
-                            stored, computed,
-                            "CRC-32 mismatch on disk page at offset {offset}: \
-                             stored=0x{stored:08X}, computed=0x{computed:08X}"
-                        );
+                        if stored != computed {
+                            return Err(TreeError::IoError(IoErrorKind::ChecksumMismatch {
+                                offset,
+                            }));
+                        }
                     }
                 }
 
@@ -311,6 +325,7 @@ impl<'a> LeafEntrySLocked<'a> {
         file_handle: &'a dyn VfsImpl,
         leaf_page_size: usize,
         verify_checksums: bool,
+        cow_boundary: &'a AtomicUsize,
     ) -> Self {
         Self {
             raw_guard: guard,
@@ -320,6 +335,7 @@ impl<'a> LeafEntrySLocked<'a> {
             tmp_buffer_size: leaf_page_size,
             tmp_buffer: None,
             verify_checksums,
+            cow_boundary,
         }
     }
 
@@ -335,6 +351,7 @@ impl<'a> LeafEntrySLocked<'a> {
                     tmp_buffer_size: self.tmp_buffer_size,
                     tmp_buffer: self.tmp_buffer.take(),
                     verify_checksums: self.verify_checksums,
+                    cow_boundary: self.cow_boundary,
                 };
                 // here we don't need to explicitly forget self.
                 return Ok(x);
@@ -363,6 +380,9 @@ pub(crate) struct LeafEntryXLocked<'a> {
     tmp_buffer_size: usize,
     tmp_buffer: Option<TmpBuffer>,
     verify_checksums: bool,
+    /// COW boundary: offsets below this value belong to a snapshot and must
+    /// not be overwritten. The Drop impl redirects such writes to new offsets.
+    cow_boundary: &'a AtomicUsize,
 }
 
 impl Drop for LeafEntryXLocked<'_> {
@@ -377,11 +397,39 @@ impl Drop for LeafEntryXLocked<'_> {
             return;
         }
 
-        let offset = match self.raw_guard.deref() {
-            PageLocation::Base(offset) => *offset,
+        let boundary = self
+            .cow_boundary
+            .load(core::sync::atomic::Ordering::Acquire);
+
+        let write_offset = match self.raw_guard.deref() {
+            PageLocation::Base(offset) => {
+                let offset = *offset;
+                if boundary > 0 && offset < boundary {
+                    // COW: base page offset is in the snapshot region.
+                    // Allocate a new offset and update the page table entry.
+                    let new_offset = self.file_handle.alloc_offset(self.tmp_buffer_size);
+                    *self.raw_guard.deref_mut() = PageLocation::Base(new_offset);
+                    new_offset
+                } else {
+                    offset
+                }
+            }
             PageLocation::Mini(ptr) | PageLocation::Full(ptr) => {
-                let mini_page = self.load_cache_page_mut(*ptr);
-                mini_page.next_level.as_offset()
+                let ptr = *ptr;
+                let mini_page = self.load_cache_page_mut(ptr);
+                let offset = mini_page.next_level.as_offset();
+                if boundary > 0 && offset < boundary {
+                    // COW: the mini/full page's base offset is in the snapshot
+                    // region. Allocate a new offset and update next_level.
+                    // We must NOT change the PageLocation variant (Mini/Full)
+                    // because the circular buffer owns that entry.
+                    let new_offset = self.file_handle.alloc_offset(self.tmp_buffer_size);
+                    mini_page.next_level =
+                        crate::nodes::leaf_node::MiniPageNextLevel::new(new_offset);
+                    new_offset
+                } else {
+                    offset
+                }
             }
             PageLocation::Null => panic!("Dropping a tmp buffer of a Null page"),
         };
@@ -398,9 +446,9 @@ impl Drop for LeafEntryXLocked<'_> {
             }
 
             let slice = b.as_u8_slice();
-            if let Err(_e) = self.file_handle.write(offset, slice) {
+            if let Err(_e) = self.file_handle.write(write_offset, slice) {
                 #[cfg(feature = "std")]
-                eprintln!("bf-tree: VFS write failed at offset {offset}: {_e}");
+                eprintln!("bf-tree: VFS write failed at offset {write_offset}: {_e}");
             }
         }
     }
@@ -408,7 +456,11 @@ impl Drop for LeafEntryXLocked<'_> {
 
 impl LeafOperations for LeafEntryXLocked<'_> {
     fn load_base_page_from_buffer(&self) -> &LeafNode {
-        let l = self.tmp_buffer.as_ref().unwrap().as_leaf_node();
+        let l = self
+            .tmp_buffer
+            .as_ref()
+            .expect("load_base_page_from_buffer called before load_base_page populated the buffer")
+            .as_leaf_node();
         debug_assert!(l.is_base_page());
         l
     }
@@ -417,15 +469,15 @@ impl LeafOperations for LeafEntryXLocked<'_> {
         self.raw_guard.deref()
     }
 
-    fn load_base_page(&mut self, offset: usize) -> &LeafNode {
+    fn load_base_page(&mut self, offset: usize) -> Result<&LeafNode, TreeError> {
         match self.tmp_buffer {
-            Some(ref mut buffer) => return buffer.as_leaf_node(),
+            Some(ref mut buffer) => return Ok(buffer.as_leaf_node()),
             None => {
                 let mut buffer = TmpBuffer::new(self.tmp_buffer_size);
                 let slice = buffer.as_u8_slice_mut();
-                if let Err(e) = self.file_handle.read(offset, slice) {
-                    panic!("fatal VFS read at offset {offset}: {e}");
-                }
+                self.file_handle
+                    .read(offset, slice)
+                    .map_err(|_| TreeError::IoError(IoErrorKind::VfsRead { offset }))?;
 
                 if self.verify_checksums && slice.len() >= CRC32_SIZE {
                     let data_end = slice.len() - CRC32_SIZE;
@@ -434,18 +486,18 @@ impl LeafOperations for LeafEntryXLocked<'_> {
                     );
                     if stored != 0 {
                         let computed = crate::utils::crc32::crc32(&slice[..data_end]);
-                        assert_eq!(
-                            stored, computed,
-                            "CRC-32 mismatch on disk page at offset {offset}: \
-                             stored=0x{stored:08X}, computed=0x{computed:08X}"
-                        );
+                        if stored != computed {
+                            return Err(TreeError::IoError(IoErrorKind::ChecksumMismatch {
+                                offset,
+                            }));
+                        }
                     }
                 }
 
                 self.tmp_buffer = Some(buffer);
 
                 if let Some(ref b) = self.tmp_buffer {
-                    return b.as_leaf_node();
+                    return Ok(b.as_leaf_node());
                 }
             }
         };
@@ -461,6 +513,7 @@ impl<'a> LeafEntryXLocked<'a> {
         file_handle: &'a dyn VfsImpl,
         tmp_buffer_size: usize,
         verify_checksums: bool,
+        cow_boundary: &'a AtomicUsize,
     ) -> Self {
         Self {
             raw_guard,
@@ -470,6 +523,7 @@ impl<'a> LeafEntryXLocked<'a> {
             tmp_buffer_size,
             tmp_buffer: None,
             verify_checksums,
+            cow_boundary,
         }
     }
 
@@ -480,6 +534,7 @@ impl<'a> LeafEntryXLocked<'a> {
         tmp_buffer_size: usize,
         leaf_buffer: *mut LeafNode,
         verify_checksums: bool,
+        cow_boundary: &'a AtomicUsize,
     ) -> Self {
         Self {
             raw_guard,
@@ -489,6 +544,7 @@ impl<'a> LeafEntryXLocked<'a> {
             tmp_buffer_size,
             tmp_buffer: Some(TmpBuffer::from_leaf_node(leaf_buffer, tmp_buffer_size)),
             verify_checksums,
+            cow_boundary,
         }
     }
 
@@ -507,7 +563,9 @@ impl<'a> LeafEntryXLocked<'a> {
         let page_loc = self.raw_guard.deref().clone();
         match page_loc {
             PageLocation::Base(offset) => {
-                assert!(self.load_base_page(offset).next_level.is_null());
+                if let Ok(page) = self.load_base_page(offset) {
+                    debug_assert!(page.next_level.is_null());
+                }
                 self.file_handle.dealloc_offset(offset);
             }
             PageLocation::Mini(ptr) | PageLocation::Full(ptr) => {
@@ -549,14 +607,14 @@ impl<'a> LeafEntryXLocked<'a> {
 
                 // Root leaf node does not have a corresponding mini-page
                 if parent.is_none() {
-                    let success = self.load_base_page_mut().insert(
+                    let success = self.load_base_page_mut()?.insert(
                         key,
                         value,
                         op_type,
                         storage.config.max_fence_len,
                     );
                     if !success {
-                        self.load_base_page_mut().set_split_flag();
+                        self.load_base_page_mut()?.set_split_flag();
                         return Err(TreeError::NeedRestart);
                     } else {
                         return Ok(());
@@ -831,7 +889,7 @@ impl<'a> LeafEntryXLocked<'a> {
                             info!(pid = self.pid.raw(), "old mini page deallocated");
                             if *write_load_full_page {
                                 // now we merged the mini page, we need to create a full page cache because it seems that this page is very hot.
-                                let base_page_ref = self.load_base_page(base_offset.as_offset());
+                                let base_page_ref = self.load_base_page(base_offset.as_offset())?;
 
                                 // Avoid bringing back empty full page
                                 if base_page_ref.meta.meta_count_without_fence() != 0 {
@@ -865,27 +923,27 @@ impl<'a> LeafEntryXLocked<'a> {
         unsafe { &mut *ptr }
     }
 
-    pub(crate) fn get_split_flag(&mut self) -> bool {
+    pub(crate) fn get_split_flag(&mut self) -> Result<bool, TreeError> {
         let page_loc = self.raw_guard.deref();
         match page_loc {
             PageLocation::Base(offset) => {
-                let base_ref = self.load_base_page(*offset);
-                base_ref.get_split_flag()
+                let base_ref = self.load_base_page(*offset)?;
+                Ok(base_ref.get_split_flag())
             }
             PageLocation::Full(ptr) | PageLocation::Mini(ptr) => {
                 let base_ref = self.load_cache_page_mut(*ptr);
-                base_ref.get_split_flag()
+                Ok(base_ref.get_split_flag())
             }
-            PageLocation::Null => false, // This happens in the rare case in cache-only mode where the leaf node to insert a page in is evicted.
+            PageLocation::Null => Ok(false), // This happens in the rare case in cache-only mode where the leaf node to insert a page in is evicted.
         }
     }
 
     /// Calling this function will set base page to be dirty
-    pub(crate) fn load_base_page_mut(&mut self) -> &mut LeafNode {
+    pub(crate) fn load_base_page_mut(&mut self) -> Result<&mut LeafNode, TreeError> {
         let page_loc = self.raw_guard.deref().clone();
 
         match self.tmp_buffer {
-            Some(ref mut buffer) => return buffer.as_leaf_node_mut(),
+            Some(ref mut buffer) => return Ok(buffer.as_leaf_node_mut()),
             None => {
                 let offset = match page_loc {
                     PageLocation::Mini(ptr) | PageLocation::Full(ptr) => {
@@ -893,19 +951,21 @@ impl<'a> LeafEntryXLocked<'a> {
                         page.next_level.as_offset()
                     }
                     PageLocation::Base(offset) => offset,
-                    PageLocation::Null => panic!("load_base_page_mut on Null page"),
+                    PageLocation::Null => {
+                        return Err(TreeError::IoError(IoErrorKind::Corruption));
+                    }
                 };
 
                 let mut buffer = TmpBuffer::new(self.tmp_buffer_size);
                 let slice = buffer.as_u8_slice_mut();
-                if let Err(e) = self.file_handle.read(offset, slice) {
-                    panic!("fatal VFS read at offset {offset}: {e}");
-                }
+                self.file_handle
+                    .read(offset, slice)
+                    .map_err(|_| TreeError::IoError(IoErrorKind::VfsRead { offset }))?;
 
                 self.tmp_buffer = Some(buffer);
 
                 if let Some(ref mut b) = self.tmp_buffer {
-                    return b.as_leaf_node_mut();
+                    return Ok(b.as_leaf_node_mut());
                 }
             }
         };
@@ -1040,7 +1100,7 @@ impl<'a> LeafEntryXLocked<'a> {
             return Ok(MergeResult::NoSplit);
         }
 
-        let base_ref = self.load_base_page_mut();
+        let base_ref = self.load_base_page_mut()?;
 
         // If base page has only one record, consolidate it first
         if base_ref.meta.meta_count_without_fence() == 1 {
@@ -1062,7 +1122,7 @@ impl<'a> LeafEntryXLocked<'a> {
 
         if x_parent.as_ref().have_space_for(&merge_split_key) {
             let (sibling_node_id, mut sibling_node) = storage.alloc_base_page_and_lock();
-            let sibling_node_ref = sibling_node.load_base_page_mut();
+            let sibling_node_ref = sibling_node.load_base_page_mut()?;
             base_ref.split_with_key(sibling_node_ref, &merge_split_key, false);
             x_parent.as_mut().insert(&merge_split_key, sibling_node_id);
             {
@@ -1128,7 +1188,7 @@ impl<'a> LeafEntryXLocked<'a> {
         }
     }
 
-    pub(crate) fn get_stats(&mut self) -> LeafStats {
+    pub(crate) fn get_stats(&mut self) -> Result<LeafStats, TreeError> {
         let page_loc = self.raw_guard.deref();
         match page_loc {
             PageLocation::Mini(ptr) => {
@@ -1136,25 +1196,25 @@ impl<'a> LeafEntryXLocked<'a> {
                 let mut mini_stats = mini_page.get_stats();
                 let next_level = mini_page.next_level;
 
-                let base_ref = self.load_base_page(next_level.as_offset());
+                let base_ref = self.load_base_page(next_level.as_offset())?;
                 let stats = base_ref.get_stats();
                 mini_stats.base_node = Some(Box::new(stats));
-                mini_stats
+                Ok(mini_stats)
             }
             PageLocation::Full(ptr) => {
                 let base_ref = self.load_cache_page_mut(*ptr);
-                base_ref.get_stats()
+                Ok(base_ref.get_stats())
             }
             PageLocation::Base(offset) => {
                 let mut buffer = TmpBuffer::new(self.tmp_buffer_size);
                 let slice = buffer.as_u8_slice_mut();
-                if let Err(e) = self.file_handle.read(*offset, slice) {
-                    panic!("fatal VFS read at offset {offset}: {e}");
-                }
+                self.file_handle
+                    .read(*offset, slice)
+                    .map_err(|_| TreeError::IoError(IoErrorKind::VfsRead { offset: *offset }))?;
                 let base_ref = buffer.as_leaf_node();
-                base_ref.get_stats()
+                Ok(base_ref.get_stats())
             }
-            PageLocation::Null => panic!("get_stats on Null page"),
+            PageLocation::Null => Err(TreeError::IoError(IoErrorKind::Corruption)),
         }
     }
 
@@ -1199,19 +1259,20 @@ impl<'a> LeafEntryXLocked<'a> {
         }
     }
 
-    pub(crate) fn update_lsn(&mut self, lsn: u64) {
+    pub(crate) fn update_lsn(&mut self, lsn: u64) -> Result<(), TreeError> {
         let page_loc = self.raw_guard.deref();
         match page_loc {
             PageLocation::Base(_offset) => {
-                let base_ref = self.load_base_page_mut();
+                let base_ref = self.load_base_page_mut()?;
                 base_ref.lsn = lsn;
             }
             PageLocation::Full(ptr) | PageLocation::Mini(ptr) => {
                 let page_ref = self.load_cache_page_mut(*ptr);
                 page_ref.lsn = lsn;
             }
-            PageLocation::Null => panic!("update_lsn on Null page"),
+            PageLocation::Null => return Err(TreeError::IoError(IoErrorKind::Corruption)),
         }
+        Ok(())
     }
 }
 

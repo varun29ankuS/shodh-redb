@@ -17,7 +17,7 @@ use crate::{
     fs::{MemoryVfs, VfsImpl},
     mini_page_op::{LeafEntrySLocked, LeafEntryXLocked},
     nodes::{LeafNode, PageID},
-    sync::Arc,
+    sync::{atomic::AtomicUsize, Arc},
     utils::{rw_lock::RwLock, MappingTable},
     Config, StorageBackend,
 };
@@ -81,6 +81,10 @@ pub(crate) struct PageTable {
     table: MappingTable<RwLock<PageLocation>>,
     vfs: Arc<dyn VfsImpl>,
     pub(crate) config: Arc<Config>,
+    /// Copy-on-write boundary set after snapshot. Pages with disk offsets
+    /// below this value must not be overwritten; eviction redirects them
+    /// to freshly allocated offsets beyond the boundary.
+    cow_boundary: AtomicUsize,
 }
 
 impl PageTable {
@@ -90,6 +94,7 @@ impl PageTable {
             table: mapping,
             vfs: file_handle,
             config,
+            cow_boundary: AtomicUsize::new(0),
         }
     }
 
@@ -103,7 +108,21 @@ impl PageTable {
             table: MappingTable::new_from_iter(mapping),
             vfs,
             config,
+            cow_boundary: AtomicUsize::new(0),
         }
+    }
+
+    /// Set the COW boundary. Evictions writing to offsets below this value
+    /// will allocate a new offset instead of overwriting snapshot data.
+    pub(crate) fn set_cow_boundary(&self, boundary: usize) {
+        self.cow_boundary
+            .store(boundary, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Read the current COW boundary.
+    pub(crate) fn cow_boundary(&self) -> usize {
+        self.cow_boundary
+            .load(core::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn get(&self, pid: &PageID) -> LeafEntrySLocked<'_> {
@@ -117,6 +136,7 @@ impl PageTable {
             self.vfs.as_ref(),
             self.config.leaf_page_size,
             self.config.verify_checksums,
+            &self.cow_boundary,
         )
     }
 
@@ -131,6 +151,7 @@ impl PageTable {
             self.vfs.as_ref(),
             self.config.leaf_page_size,
             self.config.verify_checksums,
+            &self.cow_boundary,
         )
     }
 
@@ -152,6 +173,7 @@ impl PageTable {
             self.config.leaf_page_size,
             base_ptr,
             self.config.verify_checksums,
+            &self.cow_boundary,
         );
         LeafNode::free_base_page(base_ptr);
 
@@ -185,6 +207,7 @@ impl PageTable {
             self.vfs.as_ref(),
             self.config.leaf_page_size,
             self.config.verify_checksums,
+            &self.cow_boundary,
         );
 
         (pid, x_locked)
@@ -434,7 +457,7 @@ pub(crate) fn make_vfs(
 
 #[cfg(all(test, feature = "std", not(feature = "shuttle")))]
 mod tests {
-    use crate::sync::Arc;
+    use crate::sync::{atomic::AtomicUsize, Arc};
 
     use super::{PageLocation, PageTable};
     use crate::{
@@ -452,6 +475,7 @@ mod tests {
             table: MappingTable::new(1024),
             vfs: vfs.clone(),
             config: config.clone(),
+            cow_boundary: AtomicUsize::new(0),
         };
 
         let mut allocated = Vec::new();

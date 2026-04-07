@@ -647,8 +647,8 @@ fn serialize_u8_slice_to_disk(slice: &[u8], vfs: &Arc<dyn VfsImpl>) -> Result<us
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use crate::{
-        BfTree, Config, nodes::leaf_node::LeafReadResult, range_scan::ScanReturnField,
-        utils::test_util::install_value_to_buffer,
+        nodes::leaf_node::LeafReadResult, range_scan::ScanReturnField,
+        utils::test_util::install_value_to_buffer, BfTree, Config,
     };
     use rstest::rstest;
     use std::str::FromStr;

@@ -625,7 +625,8 @@ fn serialize_u8_slice_to_disk(slice: &[u8], vfs: &Arc<dyn VfsImpl>) -> Result<us
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use crate::{
-        nodes::leaf_node::LeafReadResult, utils::test_util::install_value_to_buffer, BfTree, Config,
+        nodes::leaf_node::LeafReadResult, range_scan::ScanReturnField,
+        utils::test_util::install_value_to_buffer, BfTree, Config,
     };
     use rstest::rstest;
     use std::str::FromStr;
@@ -1254,5 +1255,183 @@ mod tests {
 
         drop(tree);
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    /// Scan with `ScanReturnField::Value` and `KeyAndValue` on a recovered tree.
+    /// Existing tests only exercise `Key` — this catches regressions in the
+    /// value-copy path after snapshot/recovery.
+    #[test]
+    fn scan_return_field_variants_after_recovery() {
+        let snapshot_path =
+            std::path::PathBuf::from_str("target/test_scan_return_fields.bftree").unwrap();
+        let _ = std::fs::remove_file(&snapshot_path);
+
+        let min_record_size: usize = 64;
+        let max_record_size: usize = 2048;
+        let leaf_page_size: usize = 8192;
+        let record_cnt: usize = 200;
+
+        let make_config = || {
+            let mut config = Config::new(&snapshot_path, leaf_page_size * 16);
+            config.storage_backend(crate::StorageBackend::Std);
+            config.cb_min_record_size = min_record_size;
+            config.cb_max_record_size = max_record_size;
+            config.leaf_page_size = leaf_page_size;
+            config.max_fence_len = max_record_size;
+            config
+        };
+
+        let key_len: usize = min_record_size / 2;
+        let mut key_buffer = vec![0usize; key_len / 8];
+
+        // Create, populate, snapshot.
+        {
+            let tree = BfTree::with_config(make_config(), None).unwrap();
+            for r in 0..record_cnt {
+                let key = install_value_to_buffer(&mut key_buffer, r);
+                tree.insert(key, key);
+            }
+            tree.snapshot().unwrap();
+        }
+
+        // Recover and test all three scan return fields.
+        let tree = BfTree::new_from_snapshot(make_config(), None).unwrap();
+        let buf_size = key_len + max_record_size;
+
+        // ScanReturnField::Value
+        {
+            let scan = tree
+                .scan_with_count(&[0u8], record_cnt + 10, ScanReturnField::Value)
+                .unwrap();
+            let mut scan_buf = vec![0u8; buf_size];
+            let mut count = 0;
+            let mut scan_ref = scan;
+            while let Ok(Some((_kl, vl))) = scan_ref.next(&mut scan_buf) {
+                assert_eq!(vl as usize, key_len, "value size mismatch at entry {count}");
+                count += 1;
+            }
+            assert_eq!(count, record_cnt, "Value scan returned wrong count");
+        }
+
+        // ScanReturnField::KeyAndValue
+        {
+            let scan = tree
+                .scan_with_count(&[0u8], record_cnt + 10, ScanReturnField::KeyAndValue)
+                .unwrap();
+            let mut scan_buf = vec![0u8; buf_size];
+            let mut prev: Option<Vec<u8>> = None;
+            let mut count = 0;
+            let mut scan_ref = scan;
+            while let Ok(Some((kl, vl))) = scan_ref.next(&mut scan_buf) {
+                assert_eq!(kl as usize, key_len, "key size mismatch at entry {count}");
+                assert_eq!(vl as usize, key_len, "value size mismatch at entry {count}");
+                // Key == Value for our test data.
+                assert_eq!(
+                    &scan_buf[..kl as usize],
+                    &scan_buf[kl as usize..kl as usize + vl as usize],
+                    "key != value at entry {count}"
+                );
+                let key = scan_buf[..kl as usize].to_vec();
+                if let Some(ref p) = prev {
+                    assert!(key > *p, "KeyAndValue scan order violated at entry {count}");
+                }
+                prev = Some(key);
+                count += 1;
+            }
+            assert_eq!(count, record_cnt, "KeyAndValue scan returned wrong count");
+        }
+
+        std::fs::remove_file(snapshot_path).unwrap();
+    }
+
+    /// Scan with `end_key` bounds on a recovered tree.
+    /// Exercises the `scan_with_end_key` / `new_with_end_key` code path.
+    #[test]
+    fn scan_with_end_key_after_recovery() {
+        let snapshot_path =
+            std::path::PathBuf::from_str("target/test_scan_end_key.bftree").unwrap();
+        let _ = std::fs::remove_file(&snapshot_path);
+
+        let min_record_size: usize = 64;
+        let max_record_size: usize = 2048;
+        let leaf_page_size: usize = 8192;
+        let record_cnt: usize = 500;
+
+        let make_config = || {
+            let mut config = Config::new(&snapshot_path, leaf_page_size * 16);
+            config.storage_backend(crate::StorageBackend::Std);
+            config.cb_min_record_size = min_record_size;
+            config.cb_max_record_size = max_record_size;
+            config.leaf_page_size = leaf_page_size;
+            config.max_fence_len = max_record_size;
+            config
+        };
+
+        let key_len: usize = min_record_size / 2;
+        let mut key_buffer = vec![0usize; key_len / 8];
+
+        // Collect sorted keys for range selection.
+        let mut all_keys: Vec<Vec<u8>> = (0..record_cnt)
+            .map(|r| {
+                let key = install_value_to_buffer(&mut key_buffer, r);
+                key.to_vec()
+            })
+            .collect();
+        all_keys.sort();
+
+        // Create, populate, snapshot.
+        {
+            let tree = BfTree::with_config(make_config(), None).unwrap();
+            for r in 0..record_cnt {
+                let key = install_value_to_buffer(&mut key_buffer, r);
+                tree.insert(key, key);
+            }
+            tree.snapshot().unwrap();
+        }
+
+        let tree = BfTree::new_from_snapshot(make_config(), None).unwrap();
+        let buf_size = key_len + max_record_size;
+
+        // Pick a range from the middle ~25%-75% of sorted keys.
+        let start_idx = record_cnt / 4;
+        let end_idx = (record_cnt * 3) / 4;
+        let start_key = &all_keys[start_idx];
+        let end_key = &all_keys[end_idx];
+
+        // scan_with_end_key uses inclusive upper bound: [start_key, end_key].
+        let expected = all_keys
+            .iter()
+            .filter(|k| k.as_slice() >= start_key.as_slice() && k.as_slice() <= end_key.as_slice())
+            .count();
+
+        let scan = tree
+            .scan_with_end_key(start_key, end_key, ScanReturnField::Key)
+            .unwrap();
+        let mut scan_buf = vec![0u8; buf_size];
+        let mut prev: Option<Vec<u8>> = None;
+        let mut count = 0;
+        let mut scan_ref = scan;
+        while let Ok(Some((kl, _vl))) = scan_ref.next(&mut scan_buf) {
+            let key = scan_buf[..kl as usize].to_vec();
+            assert!(
+                key.as_slice() >= start_key.as_slice(),
+                "scan returned key below start_key at entry {count}"
+            );
+            assert!(
+                key.as_slice() <= end_key.as_slice(),
+                "scan returned key > end_key at entry {count}"
+            );
+            if let Some(ref p) = prev {
+                assert!(key > *p, "end_key scan order violated at entry {count}");
+            }
+            prev = Some(key);
+            count += 1;
+        }
+        assert_eq!(
+            count, expected,
+            "end_key scan returned {count} entries, expected {expected}"
+        );
+
+        std::fs::remove_file(snapshot_path).unwrap();
     }
 }

@@ -231,7 +231,7 @@ impl WriteBuffer {
 
         for (key, value) in &self.entries {
             if let Some(val) = value {
-                if let Err(flush_err) = adapter.insert(key, val) {
+                if let Err(flush_err) = adapter.insert_deferred_wal(key, val) {
                     // Compensate: undo all previously flushed entries.
                     if let Err((rollback_failures, last_rollback_error)) =
                         Self::compensate_rollback(adapter, &flushed_inserts, &flushed_deletes)
@@ -251,10 +251,13 @@ impl WriteBuffer {
                     Ok(len) => Some(delete_read_buf[..len as usize].to_vec()),
                     Err(_) => None,
                 };
-                adapter.delete(key);
+                adapter.delete_deferred_wal(key);
                 flushed_deletes.push((key.clone(), prev));
             }
         }
+
+        // Flush all WAL entries in a single fsync instead of per-entry.
+        adapter.flush_wal().map_err(BfTreeError::from)?;
 
         self.entries.clear();
         Ok(())

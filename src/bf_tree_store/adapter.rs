@@ -89,6 +89,26 @@ impl BfTreeAdapter {
         self.inner.delete(key);
     }
 
+    /// Insert without waiting for WAL fsync. Caller must call `flush_wal()`
+    /// after all deferred operations to ensure durability.
+    pub fn insert_deferred_wal(&self, key: &[u8], value: &[u8]) -> Result<(), BfTreeError> {
+        match self.inner.insert_deferred_wal(key, value) {
+            LeafInsertResult::Success => Ok(()),
+            LeafInsertResult::InvalidKV(msg) => Err(BfTreeError::InvalidKV(msg)),
+        }
+    }
+
+    /// Delete without waiting for WAL fsync. Caller must call `flush_wal()`
+    /// after all deferred operations to ensure durability.
+    pub fn delete_deferred_wal(&self, key: &[u8]) {
+        self.inner.delete_deferred_wal(key);
+    }
+
+    /// Flush the WAL, blocking until all buffered entries are fsync'd.
+    pub fn flush_wal(&self) -> Result<(), bf_tree::BfTreeError> {
+        self.inner.flush_wal()
+    }
+
     /// Check if a key exists (without reading the value).
     ///
     /// Allocates a temporary buffer sized to the configured max record size.

@@ -279,6 +279,7 @@ impl BuddyAllocator {
     }
 
     #[allow(unused_variables)]
+    #[cfg_attr(not(debug_assertions), allow(clippy::unused_self))]
     fn debug_check_consistency(&self) {
         // Don't enable when fuzzing, because this is kind of expensive
         #[cfg(all(debug_assertions, not(fuzzing)))]

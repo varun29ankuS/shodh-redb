@@ -988,6 +988,7 @@ impl TransactionalMemory {
     }
 
     #[cfg_attr(not(debug_assertions), expect(unused_variables))]
+    #[cfg_attr(not(debug_assertions), allow(clippy::unused_self))]
     pub(crate) fn is_allocated(&self, page: PageNumber) -> bool {
         #[cfg(debug_assertions)]
         {

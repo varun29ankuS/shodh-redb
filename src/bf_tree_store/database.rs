@@ -75,20 +75,19 @@ pub struct BfTreeDatabase {
     /// `transaction_id > last_seen` will never permanently miss events from
     /// transactions that were started early but committed late.
     next_commit_id: Arc<AtomicU64>,
-    /// Serializes flush + snapshot operations across concurrent committers.
-    ///
-    /// Without this lock, concurrent `commit_with_snapshot()` (or `commit()` on
-    /// file backends) calls can interleave: Thread A flushes, Thread B flushes,
-    /// Thread A snapshots (capturing Thread B's partial state). The mutex
-    /// ensures each flush + snapshot pair is atomic with respect to other
-    /// committers.
+    /// Serializes snapshot operations across concurrent committers.
     snapshot_lock: Arc<Mutex<()>>,
+    /// Number of commits since last snapshot. Used for amortized checkpointing.
+    commit_count: Arc<AtomicU64>,
+    /// Snapshot every N commits. 0 = disabled (manual snapshots only).
+    snapshot_interval: u64,
 }
 
 impl BfTreeDatabase {
     /// Create a new Bf-Tree database with the given configuration.
     pub fn create(config: BfTreeConfig) -> Result<Self, BfTreeError> {
         let verify_mode = config.verify_mode.clone();
+        let snapshot_interval = config.snapshot_interval;
         let adapter = BfTreeAdapter::open(config)?;
         Ok(Self {
             adapter: Arc::new(adapter),
@@ -97,12 +96,15 @@ impl BfTreeDatabase {
             next_txn_id: AtomicU64::new(1),
             next_commit_id: Arc::new(AtomicU64::new(1)),
             snapshot_lock: Arc::new(Mutex::new(())),
+            commit_count: Arc::new(AtomicU64::new(0)),
+            snapshot_interval,
         })
     }
 
     /// Open an existing Bf-Tree database from a snapshot file.
     pub fn open(config: BfTreeConfig) -> Result<Self, BfTreeError> {
         let verify_mode = config.verify_mode.clone();
+        let snapshot_interval = config.snapshot_interval;
         let adapter = BfTreeAdapter::open_from_snapshot(config)?;
         // Recover the next transaction ID from the latest CDC log entry.
         let next_id = recover_next_txn_id(&adapter).unwrap_or(1);
@@ -113,6 +115,8 @@ impl BfTreeDatabase {
             next_txn_id: AtomicU64::new(next_id),
             next_commit_id: Arc::new(AtomicU64::new(next_id)),
             snapshot_lock: Arc::new(Mutex::new(())),
+            commit_count: Arc::new(AtomicU64::new(0)),
+            snapshot_interval,
         })
     }
 
@@ -122,6 +126,7 @@ impl BfTreeDatabase {
         cdc_config: CdcConfig,
     ) -> Result<Self, BfTreeError> {
         let verify_mode = config.verify_mode.clone();
+        let snapshot_interval = config.snapshot_interval;
         let adapter = BfTreeAdapter::open(config)?;
         Ok(Self {
             adapter: Arc::new(adapter),
@@ -130,12 +135,15 @@ impl BfTreeDatabase {
             next_txn_id: AtomicU64::new(1),
             next_commit_id: Arc::new(AtomicU64::new(1)),
             snapshot_lock: Arc::new(Mutex::new(())),
+            commit_count: Arc::new(AtomicU64::new(0)),
+            snapshot_interval,
         })
     }
 
     /// Open an existing Bf-Tree database with the given CDC settings.
     pub fn open_with_cdc(config: BfTreeConfig, cdc_config: CdcConfig) -> Result<Self, BfTreeError> {
         let verify_mode = config.verify_mode.clone();
+        let snapshot_interval = config.snapshot_interval;
         let adapter = BfTreeAdapter::open_from_snapshot(config)?;
         let next_id = recover_next_txn_id(&adapter).unwrap_or(1);
         Ok(Self {
@@ -145,6 +153,8 @@ impl BfTreeDatabase {
             next_txn_id: AtomicU64::new(next_id),
             next_commit_id: Arc::new(AtomicU64::new(next_id)),
             snapshot_lock: Arc::new(Mutex::new(())),
+            commit_count: Arc::new(AtomicU64::new(0)),
+            snapshot_interval,
         })
     }
 
@@ -169,6 +179,8 @@ impl BfTreeDatabase {
             txn_id,
             next_commit_id: self.next_commit_id.clone(),
             snapshot_lock: self.snapshot_lock.clone(),
+            commit_count: self.commit_count.clone(),
+            snapshot_interval: self.snapshot_interval,
             cdc_log,
             cdc_config: self.cdc_config.clone(),
             verify_mode: self.verify_mode.clone(),
@@ -408,8 +420,12 @@ pub struct BfTreeDatabaseWriteTxn {
     /// order, preventing consumers from permanently missing events when
     /// transactions commit out of creation order.
     next_commit_id: Arc<AtomicU64>,
-    /// Serializes flush + snapshot operations across concurrent committers.
+    /// Serializes snapshot operations across concurrent committers.
     snapshot_lock: Arc<Mutex<()>>,
+    /// Shared commit counter for amortized snapshot scheduling.
+    commit_count: Arc<AtomicU64>,
+    /// Snapshot every N commits. 0 = disabled.
+    snapshot_interval: u64,
     /// Accumulated CDC events. `None` if CDC is disabled.
     pub(crate) cdc_log: Option<Mutex<Vec<CdcEvent>>>,
     /// CDC configuration (retention, etc.).
@@ -591,56 +607,58 @@ impl BfTreeDatabaseWriteTxn {
     /// If CDC is enabled, accumulated events are staged into the write buffer
     /// before flushing, so CDC log entries are atomically committed with data.
     ///
-    /// For file-backed databases, a snapshot is taken after the buffer flush to
-    /// ensure all committed data is durable (fsync'd to disk) before returning.
-    /// Without this, the WAL background flush thread introduces a window where
-    /// a crash after `commit()` returns could lose committed data.
+    /// Durability is provided by the WAL: each `buffer.flush()` entry goes
+    /// through `BfTree::write_inner()` which calls `wal.append_and_wait()`,
+    /// blocking until the WAL entry is fsync'd to disk. By the time `flush()`
+    /// returns, all data is WAL-durable and recoverable via WAL replay.
+    ///
+    /// Snapshots (full checkpoint of the circular buffer + inner nodes) are
+    /// taken periodically every `snapshot_interval` commits to bound WAL
+    /// replay time on crash recovery. They are NOT required for durability.
     pub fn commit(self) -> Result<(), BfTreeError> {
         {
-            // Serialize flush + snapshot under the snapshot lock to prevent
-            // interleaving with concurrent committers (issue #209). Without
-            // this, Thread A's flush followed by Thread B's flush before
-            // Thread A's snapshot causes Thread A to capture B's partial state.
-            let _snap_guard = self.snapshot_lock.lock();
             let mut buffer = self.buffer.lock();
-            // Stage CDC log entries into the write buffer before flushing.
-            // The commit_id is allocated here (not at begin_write time) to
-            // ensure CDC events are ordered by actual commit order.
             let commit_id = self.stage_cdc_into_buffer(&mut buffer)?;
-            // Persist the transaction ID counter so recovery works without CDC.
             self.stage_txn_id_into_buffer(&mut buffer, commit_id)?;
-            // Flush write buffer to BfTree (the atomic commit point).
+            // Flush write buffer to BfTree. Each entry goes through WAL
+            // append_and_wait(), so data is durable when flush returns.
             buffer.flush(&self.adapter)?;
-            // Ensure durability: for non-memory backends, take a snapshot so
-            // that all data written in this transaction is recoverable after a
-            // crash. The bf-tree WAL background thread flushes asynchronously
-            // on a timer; without an explicit snapshot here, commit() could
-            // return before the WAL is persisted, violating the durability
-            // contract.
-            if !self.adapter.inner().config().is_memory_backend() {
+        }
+        self.committed.store(true, Ordering::SeqCst);
+
+        // Amortized snapshot: checkpoint every N commits to bound WAL replay
+        // time on crash recovery. The snapshot_lock serializes concurrent
+        // snapshot attempts so only one thread performs the expensive I/O.
+        if self.snapshot_interval > 0 && !self.adapter.inner().config().is_memory_backend() {
+            let count = self.commit_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if count % self.snapshot_interval == 0 {
+                let _snap_guard = self.snapshot_lock.lock();
                 self.adapter.snapshot()?;
             }
         }
-        self.committed.store(true, Ordering::SeqCst);
+
         // Retention pruning is post-commit and non-critical.
         self.prune_cdc_retention();
         Ok(())
     }
 
-    /// Commit with explicit snapshot for guaranteed crash recovery.
+    /// Commit with explicit snapshot for guaranteed fast crash recovery.
     ///
-    /// The flush and snapshot are serialized under a database-level mutex to
-    /// prevent concurrent callers from interleaving their operations.
+    /// The flush goes through the WAL for durability. The snapshot is taken
+    /// afterwards under the snapshot lock to create a full checkpoint, which
+    /// bounds WAL replay time to zero for this commit point.
     pub fn commit_with_snapshot(self) -> Result<std::path::PathBuf, BfTreeError> {
-        let path = {
-            let _snap_guard = self.snapshot_lock.lock();
+        {
             let mut buffer = self.buffer.lock();
             let commit_id = self.stage_cdc_into_buffer(&mut buffer)?;
             self.stage_txn_id_into_buffer(&mut buffer, commit_id)?;
             buffer.flush(&self.adapter)?;
+        }
+        self.committed.store(true, Ordering::SeqCst);
+        let path = {
+            let _snap_guard = self.snapshot_lock.lock();
             self.adapter.snapshot()?
         };
-        self.committed.store(true, Ordering::SeqCst);
         self.prune_cdc_retention();
         Ok(path)
     }

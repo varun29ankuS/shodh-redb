@@ -75,7 +75,11 @@ impl VfsImpl for StdVfs {
     }
 
     fn flush(&self) -> Result<(), IoErrorKind> {
-        self.file.sync_all().map_err(|_| IoErrorKind::VfsFlush)
+        // sync_data() skips flushing file metadata (size, timestamps) which is
+        // significantly faster on Windows NTFS. For WAL and snapshot durability,
+        // only the data content needs to be persisted -- metadata correctness
+        // is not required for crash recovery.
+        self.file.sync_data().map_err(|_| IoErrorKind::VfsFlush)
     }
 
     #[cfg(unix)]

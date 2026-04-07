@@ -39,6 +39,14 @@ pub struct BfTreeConfig {
     /// FNV-1a checksum on write and verified on read. This adds 4 bytes of
     /// overhead per value and a small CPU cost per read. Default: `None`.
     pub verify_mode: VerifyMode,
+    /// Number of commits between automatic snapshots. Default: 100.
+    ///
+    /// Snapshots are expensive (full circular buffer drain + fsync) but speed
+    /// up crash recovery by bounding WAL replay length. Between snapshots,
+    /// durability is provided by the WAL (`append_and_wait` blocks until
+    /// fsync). Set to 0 to disable automatic snapshots entirely (you must
+    /// call `BfTreeDatabase::snapshot()` manually, or accept longer recovery).
+    pub snapshot_interval: u64,
 }
 
 /// Storage backend for Bf-Tree.
@@ -69,6 +77,7 @@ impl Default for BfTreeConfig {
             wal_flush_interval_ms: 1,
             backend: BfTreeBackend::Memory,
             verify_mode: VerifyMode::None,
+            snapshot_interval: 100,
         }
     }
 }
@@ -123,6 +132,7 @@ impl BfTreeConfig {
             wal_flush_interval_ms: 10, // less frequent flush for embedded
             backend: BfTreeBackend::Std,
             verify_mode: VerifyMode::None,
+            snapshot_interval: 100,
         }
     }
 

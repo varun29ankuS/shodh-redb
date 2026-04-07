@@ -4,11 +4,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
-
 mod operations;
 
 use crate::config::WalConfig;
@@ -46,6 +41,16 @@ impl RawBuffer {
         // SAFETY: self.ptr was allocated with buffer_size bytes in new() and remains
         // valid for the lifetime of RawBuffer. The slice borrows &self preventing mutation.
         unsafe { std::slice::from_raw_parts(self.ptr, self.buffer_size) }
+    }
+
+    /// Return a slice covering only the first `len` bytes of the buffer.
+    ///
+    /// # Safety
+    /// Caller must ensure `len <= self.buffer_size`.
+    unsafe fn as_slice_len(&self, len: usize) -> &[u8] {
+        debug_assert!(len <= self.buffer_size);
+        // SAFETY: self.ptr valid for buffer_size bytes; len <= buffer_size by caller contract.
+        unsafe { std::slice::from_raw_parts(self.ptr, len) }
     }
 
     /// # Safety
@@ -91,9 +96,14 @@ impl WriteAheadLogInner {
         }
 
         self.clear_next_header();
+        // Write only the used portion of the buffer, not the entire segment.
+        // The segment may be up to 1 GiB; writing unused zero-fill is wasteful
+        // and catastrophically slow on Windows.
+        // SAFETY: buffer_cursor <= buffer_size guaranteed by alloc_buffer's debug_assert.
+        let used_slice = unsafe { self.buffer.as_slice_len(self.buffer_cursor) };
         if let Err(_e) = self
             .file_handle
-            .write(self.file_offset, self.buffer.as_slice())
+            .write(self.file_offset, used_slice)
         {
             #[cfg(feature = "std")]
             eprintln!(
@@ -277,6 +287,99 @@ impl WriteAheadLog {
         }
         Ok(lsn)
     }
+
+    /// Append a log entry to the WAL buffer without waiting for fsync.
+    ///
+    /// Returns the assigned LSN. The caller must call `wait_for_lsn` later
+    /// to ensure durability. This enables batch-append patterns where many
+    /// entries are buffered before a single fsync.
+    #[must_use = "The returned LSN must be passed to wait_for_lsn for durability"]
+    pub(crate) fn append_no_wait<'a>(
+        &self,
+        log_entry: &impl LogEntryImpl<'a>,
+        page_offset: u64,
+    ) -> Result<u64, TreeError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| TreeError::IoError(IoErrorKind::WalAppend))?;
+
+        let required_bytes = std::mem::size_of::<LogHeader>() + log_entry.log_size();
+        let remaining = inner.buffer.buffer_size - inner.buffer_cursor;
+        if required_bytes > remaining {
+            inner.need_flush = true;
+            self.need_flush_cond.notify_all();
+            inner = self
+                .flushed_cond
+                .wait_while(inner, |inner| !inner.need_flush)
+                .map_err(|_| TreeError::IoError(IoErrorKind::WalAppend))?;
+            drop(inner);
+            return self.append_no_wait(log_entry, page_offset);
+        }
+
+        let lsn = inner.alloc_lsn();
+        let header = LogHeader::new(lsn, page_offset, required_bytes);
+        // SAFETY: `alloc_buffer` returns a mutable slice within the pre-allocated WAL buffer.
+        // The debug_assert inside guarantees `buffer_cursor + required_bytes <= buffer_size`.
+        let buffer = unsafe { inner.alloc_buffer(required_bytes) };
+        buffer[0..LogHeader::size()].copy_from_slice(header.as_slice());
+        log_entry.write_to_buffer(&mut buffer[LogHeader::size()..]);
+
+        Ok(lsn)
+    }
+
+    /// Flush all buffered WAL entries and block until fsync completes.
+    ///
+    /// Returns the flushed LSN. No-op if the buffer is empty.
+    pub(crate) fn flush_and_wait(&self) -> Result<u64, TreeError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| TreeError::IoError(IoErrorKind::WalFlush))?;
+
+        let target_lsn = inner.next_lsn.saturating_sub(1);
+        if target_lsn == 0 || inner.flushed_lsn >= target_lsn {
+            return Ok(inner.flushed_lsn);
+        }
+
+        inner.need_flush = true;
+        self.need_flush_cond.notify_all();
+
+        while inner.flushed_lsn < target_lsn {
+            inner = self
+                .flushed_cond
+                .wait(inner)
+                .map_err(|_| TreeError::IoError(IoErrorKind::WalFlush))?;
+        }
+        Ok(inner.flushed_lsn)
+    }
+
+    /// Block until the given LSN has been durably flushed to disk.
+    ///
+    /// Triggers an immediate flush if one is not already in progress,
+    /// then waits for the background thread to complete fsync.
+    pub(crate) fn wait_for_lsn(&self, lsn: u64) -> Result<(), TreeError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| TreeError::IoError(IoErrorKind::WalFlush))?;
+
+        if inner.flushed_lsn >= lsn {
+            return Ok(());
+        }
+
+        // Signal the background thread to flush now.
+        inner.need_flush = true;
+        self.need_flush_cond.notify_all();
+
+        while inner.flushed_lsn < lsn {
+            inner = self
+                .flushed_cond
+                .wait(inner)
+                .map_err(|_| TreeError::IoError(IoErrorKind::WalFlush))?;
+        }
+        Ok(())
+    }
 }
 
 /// Read the write-ahead-log file produced by Bf-Tree.
@@ -351,13 +454,19 @@ impl Iterator for WalSegmentIter<'_> {
 
         let mut buffer = vec![0u8; self.reader.segment_size];
         let page_offset = self.cursor;
+        // The last segment may be shorter than segment_size because the WAL
+        // writer only flushes the used portion of the buffer (buffer_cursor
+        // bytes) to avoid writing megabytes of unused zero-fill on every fsync.
+        let remaining = self.reader.file_size - page_offset as usize;
+        let read_len = remaining.min(self.reader.segment_size);
 
         #[cfg(unix)]
         {
+            use std::os::unix::fs::FileExt;
             if self
                 .reader
                 .log_file
-                .read_exact_at(&mut buffer, page_offset)
+                .read_exact_at(&mut buffer[..read_len], page_offset)
                 .is_err()
             {
                 return Some(Err(crate::error::IoErrorKind::SnapshotRead));
@@ -365,9 +474,9 @@ impl Iterator for WalSegmentIter<'_> {
         }
         #[cfg(windows)]
         {
-            let bytes_to_read = buffer.len();
-            match self.reader.log_file.seek_read(&mut buffer, page_offset) {
-                Ok(bytes_read) if bytes_read == bytes_to_read => {}
+            use std::os::windows::fs::FileExt;
+            match self.reader.log_file.seek_read(&mut buffer[..read_len], page_offset) {
+                Ok(bytes_read) if bytes_read == read_len => {}
                 _ => return Some(Err(crate::error::IoErrorKind::SnapshotRead)),
             }
         }

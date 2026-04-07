@@ -262,9 +262,11 @@ impl BfTreeHistory {
         let hwm_key = encode_table_key(HISTORY_META_TABLE, TableKind::Regular, HISTORY_HWM_KEY);
         self.db
             .adapter()
-            .insert(&hwm_key, &snapshot_id.to_le_bytes())?;
+            .insert_deferred_wal(&hwm_key, &snapshot_id.to_le_bytes())?;
 
         // Phase 1: Take the BfTree snapshot to determine the file path.
+        // flush_wal first so the HWM is durable before we snapshot.
+        self.db.adapter().flush_wal().map_err(BfTreeError::from)?;
         let snapshot_path = self.db.snapshot()?;
         let snapshot_path_str = snapshot_path.to_string_lossy().to_string();
         let timestamp = now_ns();
@@ -280,7 +282,7 @@ impl BfTreeHistory {
         };
         self.db
             .adapter()
-            .insert(&key, &pending_entry.to_le_bytes()?)?;
+            .insert_deferred_wal(&key, &pending_entry.to_le_bytes()?)?;
 
         // Phase 3: Update the metadata entry to "complete".
         let complete_entry = HistoryEntry {
@@ -291,7 +293,8 @@ impl BfTreeHistory {
         };
         self.db
             .adapter()
-            .insert(&key, &complete_entry.to_le_bytes()?)?;
+            .insert_deferred_wal(&key, &complete_entry.to_le_bytes()?)?;
+        self.db.adapter().flush_wal().map_err(BfTreeError::from)?;
 
         Ok((snapshot_id, snapshot_path))
     }

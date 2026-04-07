@@ -729,6 +729,18 @@ impl BfTree {
     }
 
     fn write_inner(&self, write_op: WriteOp, aggressive_split: bool) -> Result<(), TreeError> {
+        self.write_inner_impl(write_op, aggressive_split, true)
+    }
+
+    /// Core write path. When `wal_wait` is false, WAL entries are appended
+    /// without blocking on fsync. The caller must call `flush_wal()` to
+    /// ensure durability before considering the write committed.
+    fn write_inner_impl(
+        &self,
+        write_op: WriteOp,
+        aggressive_split: bool,
+        wal_wait: bool,
+    ) -> Result<(), TreeError> {
         let (pid, parent) = self.traverse_to_leaf(write_op.key, aggressive_split)?;
 
         let mut leaf_entry = self.mapping_table().get_mut(&pid);
@@ -797,7 +809,11 @@ impl BfTree {
                         _ => WalWriteOp::make_insert(write_op.key, write_op.value),
                     };
                     let log_entry = WalLogEntry::Write(wal_op);
-                    let lsn = wal.append_and_wait(&log_entry, leaf_entry.get_disk_offset())?;
+                    let lsn = if wal_wait {
+                        wal.append_and_wait(&log_entry, leaf_entry.get_disk_offset())?
+                    } else {
+                        wal.append_no_wait(&log_entry, leaf_entry.get_disk_offset())?
+                    };
                     leaf_entry.update_lsn(lsn)?;
                 }
             }
@@ -912,6 +928,128 @@ impl BfTree {
                 }
             }
         }
+    }
+
+    /// Insert a key-value pair without waiting for WAL fsync.
+    ///
+    /// The entry is written to the in-memory tree and appended to the WAL
+    /// buffer, but this method returns immediately without blocking on fsync.
+    /// The caller MUST call `flush_wal()` before considering the data durable.
+    ///
+    /// This enables batch inserts with a single fsync at the end, which is
+    /// dramatically faster than per-entry fsync on Windows NTFS.
+    pub fn insert_deferred_wal(&self, key: &[u8], value: &[u8]) -> LeafInsertResult {
+        if key.len() > self.config.max_fence_len / 2 || key.len() > MAX_KEY_LEN {
+            return LeafInsertResult::InvalidKV(format!("Key too large {}", key.len()));
+        }
+        if key.is_empty() {
+            return LeafInsertResult::InvalidKV(format!(
+                "Key too small {}, at least one byte",
+                key.len()
+            ));
+        }
+        if value.len() > MAX_VALUE_LEN || key.len() + value.len() > self.config.cb_max_record_size {
+            return LeafInsertResult::InvalidKV(format!(
+                "Record too large {}, {}, please adjust cb_max_record_size in config",
+                key.len(),
+                value.len()
+            ));
+        }
+        if key.len() + value.len() < self.config.cb_min_record_size {
+            return LeafInsertResult::InvalidKV(format!(
+                "Record too small {}, {}, please adjust cb_min_record_size in config",
+                key.len(),
+                value.len()
+            ));
+        }
+
+        let backoff = Backoff::new();
+        let mut aggressive_split = false;
+        counter!(Insert);
+
+        loop {
+            let result =
+                self.write_inner_impl(WriteOp::make_insert(key, value), aggressive_split, false);
+            match result {
+                Ok(_) => return LeafInsertResult::Success,
+                Err(TreeError::NeedRestart) => {
+                    #[cfg(all(feature = "shuttle", test))]
+                    {
+                        shuttle::thread::yield_now();
+                    }
+                    counter!(InsertNeedRestart);
+                    aggressive_split = true;
+                }
+                Err(TreeError::CircularBufferFull) => {
+                    aggressive_split = true;
+                    counter!(InsertCircularBufferFull);
+                    _ = self.evict_from_circular_buffer();
+                    continue;
+                }
+                Err(TreeError::Locked) => {
+                    counter!(InsertLocked);
+                    backoff.snooze();
+                }
+                Err(TreeError::IoError(e)) => {
+                    panic!("I/O error during insert: {e}");
+                }
+            }
+        }
+    }
+
+    /// Delete a key without waiting for WAL fsync.
+    ///
+    /// Same as `delete` but does not block on WAL fsync. The caller MUST call
+    /// `flush_wal()` before considering the delete durable.
+    pub fn delete_deferred_wal(&self, key: &[u8]) {
+        if key.len() > self.config.max_fence_len / 2 || key.len() > MAX_KEY_LEN {
+            return;
+        }
+        if key.is_empty() {
+            return;
+        }
+
+        let backoff = Backoff::new();
+        let mut aggressive_split = false;
+
+        loop {
+            let result =
+                self.write_inner_impl(WriteOp::make_delete(key), aggressive_split, false);
+            match result {
+                Ok(_) => return,
+                Err(TreeError::NeedRestart) => {
+                    #[cfg(all(feature = "shuttle", test))]
+                    {
+                        shuttle::thread::yield_now();
+                    }
+                    aggressive_split = true;
+                }
+                Err(TreeError::CircularBufferFull) => {
+                    aggressive_split = true;
+                    _ = self.evict_from_circular_buffer();
+                    continue;
+                }
+                Err(TreeError::Locked) => {
+                    backoff.snooze();
+                }
+                Err(TreeError::IoError(e)) => {
+                    panic!("I/O error during delete: {e}");
+                }
+            }
+        }
+    }
+
+    /// Flush the WAL, blocking until all buffered entries are fsync'd.
+    ///
+    /// Must be called after `insert_deferred_wal` / `delete_deferred_wal`
+    /// to ensure durability. No-op if WAL is not enabled.
+    #[cfg(feature = "std")]
+    pub fn flush_wal(&self) -> Result<(), crate::BfTreeError> {
+        if let Some(wal) = &self.wal {
+            wal.flush_and_wait()
+                .map_err(|_| crate::BfTreeError::Io(crate::error::IoErrorKind::WalFlush))?;
+        }
+        Ok(())
     }
 
     /// Read a record from the tree.

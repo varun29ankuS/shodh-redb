@@ -324,28 +324,32 @@ impl BfTree {
 
         let root_id = self.get_root_page();
         let mut inner_mapping: Vec<(*const InnerNode, usize)> = Vec::new();
+
+        // Collect all inner node writes into a batch buffer, then write them
+        // all at once. This avoids per-node pwrite syscalls which are expensive
+        // on Windows NTFS.
         let visitor = BfsVisitor::new_inner_only(self);
+        let mut batched_writes: Vec<(usize, Vec<u8>)> = Vec::new();
         for node in visitor {
             match node {
                 NodeInfo::Inner { ptr, .. } => {
                     let inner = ReadGuard::try_read(ptr).unwrap();
                     if inner.as_ref().is_valid_disk_offset() {
                         let offset = inner.as_ref().disk_offset as usize;
-                        self.storage
-                            .vfs
-                            .write(offset, inner.as_ref().as_slice())
-                            .map_err(|e| BfTreeError::Io(e))?;
+                        batched_writes.push((offset, inner.as_ref().as_slice().to_vec()));
                         inner_mapping.push((ptr, offset));
                     }
                 }
                 NodeInfo::Leaf { level, .. } => {
-                    // corner case: we might still get a leaf node when the root is leaf...
-                    //
-                    // When ROOT is leaf, it is in `FORCE` mode, meaning that all data are write to disk.
-                    // do don't need to do anything here.
                     assert_eq!(level, 0);
                 }
             }
+        }
+        for (offset, data) in &batched_writes {
+            self.storage
+                .vfs
+                .write(*offset, data)
+                .map_err(BfTreeError::Io)?;
         }
         let (inner_offset, inner_size) = serialize_vec_to_disk(&inner_mapping, &self.storage.vfs)?;
 
@@ -386,8 +390,8 @@ impl BfTree {
         self.storage
             .vfs
             .write(META_DATA_PAGE_OFFSET, metadata.as_slice())
-            .map_err(|e| BfTreeError::Io(e))?;
-        self.storage.vfs.flush().map_err(|e| BfTreeError::Io(e))?;
+            .map_err(BfTreeError::Io)?;
+        self.storage.vfs.flush().map_err(BfTreeError::Io)?;
 
         // Activate COW protection: any subsequent page eviction that would
         // write to an offset below file_size will allocate a new offset
@@ -610,16 +614,20 @@ fn align_to_sector_size(n: usize) -> usize {
 }
 
 /// Write a slice to disk and return the start offset.
+///
+/// Allocates a contiguous region via the bump allocator and writes the entire
+/// slice in a single I/O operation. The allocation is rounded up to
+/// `DISK_PAGE_SIZE` alignment so that reads (which use page-sized chunks) can
+/// recover the data without partial-page issues.
 fn serialize_u8_slice_to_disk(slice: &[u8], vfs: &Arc<dyn VfsImpl>) -> Result<usize, BfTreeError> {
-    let mut start_offset = None;
-    for chunk in slice.chunks(DISK_PAGE_SIZE) {
-        let offset = vfs.alloc_offset(DISK_PAGE_SIZE);
-        if start_offset.is_none() {
-            start_offset = Some(offset);
-        }
-        vfs.write(offset, chunk).map_err(|e| BfTreeError::Io(e))?;
+    if slice.is_empty() {
+        return Err(BfTreeError::Io(IoErrorKind::SnapshotWrite));
     }
-    start_offset.ok_or(BfTreeError::Io(IoErrorKind::SnapshotWrite))
+    // Round up to page boundary so the offset allocator stays page-aligned.
+    let alloc_size = (slice.len() + DISK_PAGE_SIZE - 1) & !(DISK_PAGE_SIZE - 1);
+    let start_offset = vfs.alloc_offset(alloc_size);
+    vfs.write(start_offset, slice).map_err(BfTreeError::Io)?;
+    Ok(start_offset)
 }
 
 #[cfg(all(test, not(feature = "shuttle")))]
@@ -1307,7 +1315,7 @@ mod tests {
             let mut count = 0;
             let mut scan_ref = scan;
             while let Ok(Some((_kl, vl))) = scan_ref.next(&mut scan_buf) {
-                assert_eq!(vl as usize, key_len, "value size mismatch at entry {count}");
+                assert_eq!(vl, key_len, "value size mismatch at entry {count}");
                 count += 1;
             }
             assert_eq!(count, record_cnt, "Value scan returned wrong count");
@@ -1323,15 +1331,15 @@ mod tests {
             let mut count = 0;
             let mut scan_ref = scan;
             while let Ok(Some((kl, vl))) = scan_ref.next(&mut scan_buf) {
-                assert_eq!(kl as usize, key_len, "key size mismatch at entry {count}");
-                assert_eq!(vl as usize, key_len, "value size mismatch at entry {count}");
+                assert_eq!(kl, key_len, "key size mismatch at entry {count}");
+                assert_eq!(vl, key_len, "value size mismatch at entry {count}");
                 // Key == Value for our test data.
                 assert_eq!(
-                    &scan_buf[..kl as usize],
-                    &scan_buf[kl as usize..kl as usize + vl as usize],
+                    &scan_buf[..kl],
+                    &scan_buf[kl..kl + vl],
                     "key != value at entry {count}"
                 );
-                let key = scan_buf[..kl as usize].to_vec();
+                let key = scan_buf[..kl].to_vec();
                 if let Some(ref p) = prev {
                     assert!(key > *p, "KeyAndValue scan order violated at entry {count}");
                 }
@@ -1412,7 +1420,7 @@ mod tests {
         let mut count = 0;
         let mut scan_ref = scan;
         while let Ok(Some((kl, _vl))) = scan_ref.next(&mut scan_buf) {
-            let key = scan_buf[..kl as usize].to_vec();
+            let key = scan_buf[..kl].to_vec();
             assert!(
                 key.as_slice() >= start_key.as_slice(),
                 "scan returned key below start_key at entry {count}"

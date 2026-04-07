@@ -15,8 +15,8 @@ use std::{
 use crate::{
     error::ConfigError,
     nodes::{
-        leaf_node::LeafKVMeta, LeafNode, CACHE_LINE_SIZE, DISK_PAGE_SIZE, MAX_KEY_LEN,
-        MAX_LEAF_PAGE_SIZE,
+        CACHE_LINE_SIZE, DISK_PAGE_SIZE, LeafNode, MAX_KEY_LEN, MAX_LEAF_PAGE_SIZE,
+        leaf_node::LeafKVMeta,
     },
 };
 use serde::Deserialize;
@@ -561,7 +561,7 @@ impl WalConfig {
         Self {
             file_path: file_path.as_ref().to_path_buf(),
             flush_interval: Duration::from_millis(1),
-            segment_size: 1024 * 1024 * 1024,
+            segment_size: 64 * 1024 * 1024,
             storage_backend: StorageBackend::Std,
         }
     }
@@ -572,7 +572,12 @@ impl WalConfig {
         self
     }
 
-    /// Default: 1MB
+    /// Default: 64 MiB
+    ///
+    /// Each WAL segment is a contiguous buffer that is flushed to disk. Only the
+    /// used portion is written (not the full allocation), so a larger segment
+    /// reduces the frequency of segment rollovers at the cost of higher virtual
+    /// memory usage.
     pub fn segment_size(&mut self, size: usize) -> &mut Self {
         self.segment_size = size;
         self

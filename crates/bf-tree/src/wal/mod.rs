@@ -57,7 +57,15 @@ impl RawBuffer {
     /// Caller must ensure `offset + size <= buffer_size` and that no other references
     /// overlap the returned slice for the duration of the borrow.
     unsafe fn as_mut_slice_at_exact(&mut self, offset: usize, size: usize) -> &mut [u8] {
+        debug_assert!(
+            offset
+                .checked_add(size)
+                .is_some_and(|end| end <= self.buffer_size),
+            "as_mut_slice_at_exact: offset({offset}) + size({size}) overflows or exceeds buffer_size({})",
+            self.buffer_size,
+        );
         // SAFETY: Precondition guaranteed by caller; ptr is valid for buffer_size bytes.
+        // The debug_assert above catches violations in debug builds.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.add(offset), size) }
     }
 }
@@ -615,7 +623,12 @@ mod tests {
     #[test]
     fn simple_wal() {
         const TEST_SEGMENT_SIZE: usize = 4096;
-        let wal = make_test_wal("wal_simple_test.log", TEST_SEGMENT_SIZE);
+        let pid = std::process::id();
+        let tid = utils::thread_id_to_u64(std::thread::current().id());
+        let wal = make_test_wal(
+            &format!("wal_simple_test_{}_{}.log", pid, tid),
+            TEST_SEGMENT_SIZE,
+        );
         let tmp_file = wal.config.file_path.clone();
 
         let log_entry_cnt = 4096;

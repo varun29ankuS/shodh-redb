@@ -725,6 +725,11 @@ pub fn read_f32_le(src: &[u8]) -> Vec<f32> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::float_cmp,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
 

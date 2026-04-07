@@ -367,11 +367,7 @@ impl BfTree {
         let file_size = (leaf_offset + align_to_sector_size(leaf_size)) as u64;
 
         #[cfg(feature = "std")]
-        let snapshot_lsn = self
-            .wal
-            .as_ref()
-            .map(|w| w.get_flushed_lsn())
-            .unwrap_or(0);
+        let snapshot_lsn = self.wal.as_ref().map(|w| w.get_flushed_lsn()).unwrap_or(0);
         #[cfg(not(feature = "std"))]
         let snapshot_lsn = 0u64;
 
@@ -396,9 +392,7 @@ impl BfTree {
         // Activate COW protection: any subsequent page eviction that would
         // write to an offset below file_size will allocate a new offset
         // instead, preserving the snapshot data for crash recovery.
-        self.storage
-            .page_table
-            .set_cow_boundary(file_size as usize);
+        self.storage.page_table.set_cow_boundary(file_size as usize);
 
         Ok(self.config.file_path.clone())
     }

@@ -22,6 +22,16 @@ flamegraph.svg
 
 # benchmark and test temporary files
 /.tmp*
+**/.tmp*
+**/.storage_benchmark/
+NUL
+
+# proptest regression files (auto-generated)
+**/proptest-regressions/
+
+# nested build artifacts (bf-tree crate)
+crates/*/target/
+
 .vscode/settings.json
 
 **/*.redb

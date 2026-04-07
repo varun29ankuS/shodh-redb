@@ -65,3 +65,7 @@ harness = false
 [[bench]]
 name = "syscall_benchmark"
 harness = false
+
+[[bench]]
+name = "vector_ops_benchmark"
+harness = false

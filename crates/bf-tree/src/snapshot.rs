@@ -1258,7 +1258,7 @@ mod tests {
     }
 
     /// Scan with `ScanReturnField::Value` and `KeyAndValue` on a recovered tree.
-    /// Existing tests only exercise `Key` — this catches regressions in the
+    /// Existing tests only exercise `Key` -- this catches regressions in the
     /// value-copy path after snapshot/recovery.
     #[test]
     fn scan_return_field_variants_after_recovery() {

@@ -1013,8 +1013,7 @@ impl BfTree {
         let mut aggressive_split = false;
 
         loop {
-            let result =
-                self.write_inner_impl(WriteOp::make_delete(key), aggressive_split, false);
+            let result = self.write_inner_impl(WriteOp::make_delete(key), aggressive_split, false);
             match result {
                 Ok(_) => return,
                 Err(TreeError::NeedRestart) => {

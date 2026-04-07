@@ -101,10 +101,7 @@ impl WriteAheadLogInner {
         // and catastrophically slow on Windows.
         // SAFETY: buffer_cursor <= buffer_size guaranteed by alloc_buffer's debug_assert.
         let used_slice = unsafe { self.buffer.as_slice_len(self.buffer_cursor) };
-        if let Err(_e) = self
-            .file_handle
-            .write(self.file_offset, used_slice)
-        {
+        if let Err(_e) = self.file_handle.write(self.file_offset, used_slice) {
             #[cfg(feature = "std")]
             eprintln!(
                 "bf-tree: WAL write failed at offset {}: {_e}",
@@ -475,7 +472,11 @@ impl Iterator for WalSegmentIter<'_> {
         #[cfg(windows)]
         {
             use std::os::windows::fs::FileExt;
-            match self.reader.log_file.seek_read(&mut buffer[..read_len], page_offset) {
+            match self
+                .reader
+                .log_file
+                .seek_read(&mut buffer[..read_len], page_offset)
+            {
                 Ok(bytes_read) if bytes_read == read_len => {}
                 _ => return Some(Err(crate::error::IoErrorKind::SnapshotRead)),
             }

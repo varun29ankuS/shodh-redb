@@ -6,17 +6,17 @@
 
 use std::env::current_dir;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use comfy_table::{Cell, Table};
 use rocksdb::{OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions};
-use shodh_redb::bf_tree_store::{
-    BfTreeConfig, BfTreeDatabase, BfTreeDatabaseWriteTxn, concurrent_group_commit, WriteBatchFn,
-};
 use shodh_redb::TableDefinition;
+use shodh_redb::bf_tree_store::{
+    BfTreeConfig, BfTreeDatabase, BfTreeDatabaseWriteTxn, WriteBatchFn, concurrent_group_commit,
+};
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
@@ -175,9 +175,7 @@ fn rocksdb_opts() -> rocksdb::Options {
     let mut opts = rocksdb::Options::default();
     opts.set_block_based_table_factory(&bb);
     opts.create_if_missing(true);
-    opts.increase_parallelism(
-        std::thread::available_parallelism().map_or(1, |n| n.get()) as i32,
-    );
+    opts.increase_parallelism(std::thread::available_parallelism().map_or(1, |n| n.get()) as i32);
     opts
 }
 
@@ -250,7 +248,8 @@ fn bftree_get(db: &BfTreeDatabase, key: &[u8]) -> Option<Vec<u8>> {
 fn bftree_batch_put(db: &BfTreeDatabase, pairs: &[([u8; KEY_SIZE], Vec<u8>)]) {
     let wtxn = db.begin_write();
     for (k, v) in pairs {
-        wtxn.insert::<&[u8], &[u8]>(&TABLE, &k.as_slice(), &v.as_slice()).unwrap();
+        wtxn.insert::<&[u8], &[u8]>(&TABLE, &k.as_slice(), &v.as_slice())
+            .unwrap();
     }
     wtxn.commit().unwrap();
 }
@@ -493,10 +492,7 @@ fn bench_concurrent_writes() {
                         if batch.len() >= CONCURRENT_BATCH_SIZE || i == ops_per_thread - 1 {
                             let mut wo = WriteOptions::new();
                             wo.set_sync(true);
-                            let txn = db.transaction_opt(
-                                &wo,
-                                &OptimisticTransactionOptions::new(),
-                            );
+                            let txn = db.transaction_opt(&wo, &OptimisticTransactionOptions::new());
                             for (k, v) in &batch {
                                 txn.put(k, v).unwrap();
                             }
@@ -615,12 +611,17 @@ fn bench_mixed() {
     let rk_keys = Arc::new(rk_keys);
 
     // Phase 1: Read-only baseline
-    println!("Phase 1: Read-only baseline ({MIXED_READER_THREADS} readers, {MIXED_DURATION_SECS}s)...");
+    println!(
+        "Phase 1: Read-only baseline ({MIXED_READER_THREADS} readers, {MIXED_DURATION_SECS}s)..."
+    );
     let bf_readonly = run_readers(&bf_db, &bf_keys, MIXED_READER_THREADS, MIXED_DURATION_SECS);
-    let rk_readonly = run_rocksdb_readers(&rk_db, &rk_keys, MIXED_READER_THREADS, MIXED_DURATION_SECS);
+    let rk_readonly =
+        run_rocksdb_readers(&rk_db, &rk_keys, MIXED_READER_THREADS, MIXED_DURATION_SECS);
 
     // Phase 2: Mixed
-    println!("Phase 2: Mixed ({MIXED_READER_THREADS} readers + 1 writer, {MIXED_DURATION_SECS}s)...");
+    println!(
+        "Phase 2: Mixed ({MIXED_READER_THREADS} readers + 1 writer, {MIXED_DURATION_SECS}s)..."
+    );
     let (bf_mixed_reads, bf_writer_ops) =
         run_mixed_bftree(&bf_db, &bf_keys, MIXED_READER_THREADS, MIXED_DURATION_SECS);
     let (rk_mixed_reads, rk_writer_ops) =
@@ -1163,9 +1164,7 @@ fn main() {
         "CPUs: {}",
         std::thread::available_parallelism().map_or(1, |n| n.get())
     );
-    println!(
-        "Key: {KEY_SIZE}B, Value: {VALUE_SIZE}B, Entry: {ENTRY_SIZE}B"
-    );
+    println!("Key: {KEY_SIZE}B, Value: {VALUE_SIZE}B, Entry: {ENTRY_SIZE}B");
     println!();
 
     bench_latency();

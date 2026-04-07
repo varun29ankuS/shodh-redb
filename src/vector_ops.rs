@@ -5,6 +5,9 @@ use core::fmt::{self, Debug};
 
 use crate::vector::SQVec;
 
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+mod simd_x86;
+
 /// Portable `f32::sqrt` that works in `no_std` on wasm32.
 ///
 /// On targets with `std`, delegates to the hardware/libm-backed `f32::sqrt()`.
@@ -118,14 +121,25 @@ impl fmt::Display for DistanceMetric {
 
 /// Computes the dot product of two f32 slices.
 ///
-/// Returns `0.0` if lengths differ (callers that need worst-distance
-/// semantics on mismatch should use [`DistanceMetric::compute`]).
+/// # Panics
+///
+/// Panics if `a.len() != b.len()`. Callers that need graceful mismatch
+/// handling should use [`DistanceMetric::compute`] instead.
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "dot_product: vector dimension mismatch");
-    if a.len() != b.len() {
-        return 0.0;
+    assert_eq!(a.len(), b.len(), "dot_product: dimension mismatch");
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 detected; slices have equal length (asserted above).
+            return unsafe { simd_x86::dot_product_avx2(a, b) };
+        }
     }
+    dot_product_scalar(a, b)
+}
+
+#[inline]
+fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
@@ -135,17 +149,28 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 /// for the actual Euclidean distance, but the squared form is sufficient for
 /// nearest-neighbor comparisons and avoids the sqrt cost.
 ///
-/// If lengths differ, computes over the shorter length.
+/// # Panics
+///
+/// Panics if `a.len() != b.len()`.
 #[inline]
 pub fn euclidean_distance_sq(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(
+    assert_eq!(
         a.len(),
         b.len(),
-        "euclidean_distance_sq: vector dimension mismatch"
+        "euclidean_distance_sq: dimension mismatch"
     );
-    if a.len() != b.len() {
-        return 0.0;
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 detected; slices have equal length (asserted above).
+            return unsafe { simd_x86::euclidean_distance_sq_avx2(a, b) };
+        }
     }
+    euclidean_distance_sq_scalar(a, b)
+}
+
+#[inline]
+fn euclidean_distance_sq_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
@@ -156,21 +181,30 @@ pub fn euclidean_distance_sq(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Returns 0.0 if either vector has zero magnitude.
 ///
-/// If lengths differ, computes over the shorter length.
+/// # Panics
+///
+/// Panics if `a.len() != b.len()`.
 #[inline]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(
-        a.len(),
-        b.len(),
-        "cosine_similarity: vector dimension mismatch"
-    );
-    if a.len() != b.len() {
-        return 0.0;
+    assert_eq!(a.len(), b.len(), "cosine_similarity: dimension mismatch");
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 detected; slices have equal length (asserted above).
+            return unsafe { simd_x86::cosine_similarity_avx2(a, b) };
+        }
     }
+    cosine_similarity_scalar(a, b)
+}
+
+#[inline]
+fn cosine_similarity_scalar(a: &[f32], b: &[f32]) -> f32 {
     let mut dot = 0.0f32;
     let mut norm_a = 0.0f32;
     let mut norm_b = 0.0f32;
-    for (x, y) in a.iter().zip(b.iter()) {
+    for i in 0..a.len() {
+        let x = a[i];
+        let y = b[i];
         dot += x * y;
         norm_a += x * x;
         norm_b += y * y;
@@ -187,11 +221,12 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Defined as `1.0 - cosine_similarity(a, b)`, returning a value in `[0.0, 2.0]`
 /// where 0.0 means identical direction and 2.0 means opposite direction.
-/// This is the standard distance metric used in vector search (lower = more similar).
 ///
 /// Returns 1.0 if either vector has zero magnitude.
 ///
-/// If lengths differ, computes over the shorter length.
+/// # Panics
+///
+/// Panics if `a.len() != b.len()`.
 #[inline]
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     1.0 - cosine_similarity(a, b)
@@ -201,17 +236,24 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Returns the sum of absolute element-wise differences.
 ///
-/// If lengths differ, computes over the shorter length.
+/// # Panics
+///
+/// Panics if `a.len() != b.len()`.
 #[inline]
 pub fn manhattan_distance(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(
-        a.len(),
-        b.len(),
-        "manhattan_distance: vector dimension mismatch"
-    );
-    if a.len() != b.len() {
-        return 0.0;
+    assert_eq!(a.len(), b.len(), "manhattan_distance: dimension mismatch");
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 detected; slices have equal length (asserted above).
+            return unsafe { simd_x86::manhattan_distance_avx2(a, b) };
+        }
     }
+    manhattan_distance_scalar(a, b)
+}
+
+#[inline]
+fn manhattan_distance_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
 }
 
@@ -226,6 +268,18 @@ pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
     let len = a.len().min(b.len());
     let a = &a[..len];
     let b = &b[..len];
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 detected; slices are trimmed to equal length above.
+            return unsafe { simd_x86::hamming_distance_avx2(a, b) };
+        }
+    }
+    hamming_distance_scalar(a, b)
+}
+
+#[inline]
+fn hamming_distance_scalar(a: &[u8], b: &[u8]) -> u32 {
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| (x ^ y).count_ones())
@@ -619,9 +673,25 @@ where
 #[inline]
 pub fn write_f32_le(dest: &mut [u8], values: &[f32]) {
     let count = (dest.len() / 4).min(values.len());
-    for (i, val) in values.iter().enumerate().take(count) {
-        let start = i * 4;
-        dest[start..start + 4].copy_from_slice(&val.to_le_bytes());
+    #[cfg(target_endian = "little")]
+    {
+        let byte_len = count * 4;
+        // SAFETY: On LE targets, f32 memory layout matches LE bytes.
+        // `count` ensures we don't read past `values` or write past `dest`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                values.as_ptr().cast::<u8>(),
+                dest.as_mut_ptr(),
+                byte_len,
+            );
+        }
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        for (i, val) in values.iter().enumerate().take(count) {
+            let start = i * 4;
+            dest[start..start + 4].copy_from_slice(&val.to_le_bytes());
+        }
     }
 }
 
@@ -632,11 +702,204 @@ pub fn write_f32_le(dest: &mut [u8], values: &[f32]) {
 pub fn read_f32_le(src: &[u8]) -> Vec<f32> {
     let usable = src.len() - (src.len() % 4);
     let count = usable / 4;
-    let mut result = Vec::with_capacity(count);
-    for i in 0..count {
-        let start = i * 4;
-        let bytes: [u8; 4] = src[start..start + 4].try_into().unwrap();
-        result.push(f32::from_le_bytes(bytes));
+    #[cfg(target_endian = "little")]
+    {
+        let mut result = vec![0.0f32; count];
+        // SAFETY: On LE targets, f32 byte representation matches memory layout.
+        // `usable` = count * 4, both buffers are valid for that length.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), result.as_mut_ptr().cast::<u8>(), usable);
+        }
+        result
     }
-    result
+    #[cfg(not(target_endian = "little"))]
+    {
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            let start = i * 4;
+            let bytes: [u8; 4] = src[start..start + 4].try_into().unwrap();
+            result.push(f32::from_le_bytes(bytes));
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dimensions that exercise all tail-loop edge cases:
+    /// 1 (pure tail), 7 (tail=7), 8 (exact chunk), 15, 16, 31, 32, 128, 384, 768
+    const DIMS: &[usize] = &[1, 7, 8, 15, 16, 31, 32, 128, 384, 768];
+
+    fn make_vecs(dim: usize) -> (Vec<f32>, Vec<f32>) {
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.1 - 5.0).collect();
+        let b: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.2 + 1.0).collect();
+        (a, b)
+    }
+
+    fn assert_close(actual: f32, expected: f32, tol: f32, label: &str, dim: usize) {
+        let diff = (actual - expected).abs();
+        let scale = expected.abs().max(1.0);
+        assert!(
+            diff < tol * scale,
+            "{label} dim={dim}: expected={expected}, actual={actual}, diff={diff}"
+        );
+    }
+
+    #[test]
+    fn dot_product_matches_scalar() {
+        for &dim in DIMS {
+            let (a, b) = make_vecs(dim);
+            let scalar = dot_product_scalar(&a, &b);
+            let result = dot_product(&a, &b);
+            assert_close(result, scalar, 1e-5, "dot_product", dim);
+        }
+    }
+
+    #[test]
+    fn euclidean_distance_sq_matches_scalar() {
+        for &dim in DIMS {
+            let (a, b) = make_vecs(dim);
+            let scalar = euclidean_distance_sq_scalar(&a, &b);
+            let result = euclidean_distance_sq(&a, &b);
+            assert_close(result, scalar, 1e-5, "euclidean_distance_sq", dim);
+        }
+    }
+
+    #[test]
+    fn cosine_similarity_matches_scalar() {
+        for &dim in DIMS {
+            let (a, b) = make_vecs(dim);
+            let scalar = cosine_similarity_scalar(&a, &b);
+            let result = cosine_similarity(&a, &b);
+            assert_close(result, scalar, 1e-5, "cosine_similarity", dim);
+        }
+    }
+
+    #[test]
+    fn manhattan_distance_matches_scalar() {
+        for &dim in DIMS {
+            let (a, b) = make_vecs(dim);
+            let scalar = manhattan_distance_scalar(&a, &b);
+            let result = manhattan_distance(&a, &b);
+            assert_close(result, scalar, 1e-5, "manhattan_distance", dim);
+        }
+    }
+
+    #[test]
+    fn hamming_distance_matches_scalar() {
+        for dim in [1usize, 7, 8, 15, 16, 31, 32, 64, 128, 256] {
+            let a: Vec<u8> = (0..dim).map(|i| (i * 37 + 13) as u8).collect();
+            let b: Vec<u8> = (0..dim).map(|i| (i * 53 + 7) as u8).collect();
+            let scalar = hamming_distance_scalar(&a, &b);
+            let result = hamming_distance(&a, &b);
+            assert_eq!(
+                result, scalar,
+                "hamming_distance dim={dim}: scalar={scalar}, simd={result}"
+            );
+        }
+    }
+
+    #[test]
+    fn dot_product_zero_vectors() {
+        let a = vec![0.0f32; 128];
+        let b = vec![0.0f32; 128];
+        assert_eq!(dot_product(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn cosine_similarity_zero_vector() {
+        let a = vec![0.0f32; 32];
+        let b = vec![1.0f32; 32];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn cosine_similarity_identical() {
+        let a: Vec<f32> = (0..64).map(|i| (i as f32) * 0.3 + 0.1).collect();
+        let result = cosine_similarity(&a, &a);
+        assert!(
+            (result - 1.0).abs() < 1e-6,
+            "identical vectors: sim={result}"
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_opposite() {
+        let a: Vec<f32> = (0..64).map(|i| (i as f32) * 0.3 + 0.1).collect();
+        let b: Vec<f32> = a.iter().map(|x| -x).collect();
+        let result = cosine_similarity(&a, &b);
+        assert!(
+            (result - (-1.0)).abs() < 1e-6,
+            "opposite vectors: sim={result}"
+        );
+    }
+
+    #[test]
+    fn hamming_distance_known_pattern() {
+        // 0xFF ^ 0x00 = 0xFF -> 8 bits per byte
+        let a = vec![0xFF_u8; 32];
+        let b = vec![0x00_u8; 32];
+        assert_eq!(hamming_distance(&a, &b), 32 * 8);
+    }
+
+    #[test]
+    fn hamming_distance_identical() {
+        let a = vec![0xAB_u8; 64];
+        assert_eq!(hamming_distance(&a, &a), 0);
+    }
+
+    #[test]
+    fn euclidean_distance_sq_identical() {
+        let a: Vec<f32> = (0..128).map(|i| i as f32).collect();
+        assert_eq!(euclidean_distance_sq(&a, &a), 0.0);
+    }
+
+    #[test]
+    fn manhattan_distance_identical() {
+        let a: Vec<f32> = (0..128).map(|i| i as f32).collect();
+        assert_eq!(manhattan_distance(&a, &a), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn dot_product_dimension_mismatch_panics() {
+        let a = vec![1.0f32; 10];
+        let b = vec![1.0f32; 11];
+        dot_product(&a, &b);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn euclidean_dimension_mismatch_panics() {
+        let a = vec![1.0f32; 10];
+        let b = vec![1.0f32; 11];
+        euclidean_distance_sq(&a, &b);
+    }
+
+    #[test]
+    fn distance_metric_nan_returns_max() {
+        let a = [1.0f32, f32::NAN, 3.0];
+        let b = [4.0f32, 5.0, 6.0];
+        let d = DistanceMetric::EuclideanSq.compute(&a, &b);
+        assert_eq!(d, f32::MAX);
+    }
+
+    #[test]
+    fn distance_metric_mismatch_returns_max() {
+        let a = [1.0f32, 2.0];
+        let b = [1.0f32, 2.0, 3.0];
+        let d = DistanceMetric::Cosine.compute(&a, &b);
+        assert_eq!(d, f32::MAX);
+    }
+
+    #[test]
+    fn write_read_f32_le_roundtrip() {
+        let values: Vec<f32> = (0..100).map(|i| (i as f32) * 0.123 - 6.0).collect();
+        let mut buf = vec![0u8; values.len() * 4];
+        write_f32_le(&mut buf, &values);
+        let decoded = read_f32_le(&buf);
+        assert_eq!(decoded, values);
+    }
 }

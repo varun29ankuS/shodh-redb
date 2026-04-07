@@ -187,6 +187,15 @@ impl WriteAheadLog {
         drop(h); // detach the thread
     }
 
+    /// Returns the LSN up to which all entries have been durably flushed.
+    /// Used by snapshot to record the WAL high-water mark.
+    pub(crate) fn get_flushed_lsn(&self) -> u64 {
+        match self.inner.lock() {
+            Ok(inner) => inner.flushed_lsn,
+            Err(_) => 0,
+        }
+    }
+
     pub(crate) fn stop_background_job(&self) {
         self.background_job_running
             .store(false, std::sync::atomic::Ordering::Relaxed);

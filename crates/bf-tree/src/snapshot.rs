@@ -98,12 +98,27 @@ impl BfTree {
         buffer_ptr: Option<*mut u8>,
     ) -> Result<Self, BfTreeError> {
         let bf_tree_config = Config::new_with_config_file(config_file);
+
+        // Read the snapshot metadata to get the LSN high-water mark.
+        // WAL entries with lsn <= snapshot_lsn are already persisted in
+        // the snapshot and must be skipped to avoid re-inserting them
+        // (which causes structural inconsistencies in scan ordering).
+        let snapshot_lsn = Self::read_snapshot_lsn(&bf_tree_config.file_path)?;
+
         let bf_tree = BfTree::new_from_snapshot(bf_tree_config, buffer_ptr)?;
         let wal_reader = WalReader::new(wal_file, wal_segment_size)?;
 
         for seg in wal_reader.segment_iter() {
             let seg = seg.map_err(BfTreeError::Io)?;
             for entry in seg.entry_iter() {
+                let header = &entry.0;
+                // Skip entries already captured by the snapshot.
+                // snapshot_lsn == 0 means no LSN was recorded (old format
+                // or WAL was not enabled when the snapshot was taken), so
+                // replay everything for backward compatibility.
+                if snapshot_lsn > 0 && header.lsn <= snapshot_lsn {
+                    continue;
+                }
                 let log_entry = LogEntry::read_from_buffer(entry.1);
                 match log_entry {
                     LogEntry::Write(op) => {
@@ -113,10 +128,7 @@ impl BfTree {
                         // Split WAL entries are handled implicitly during
                         // insert-based recovery: as Write entries are replayed,
                         // the tree naturally re-splits when pages fill up,
-                        // producing the same logical structure. The split entry
-                        // records the separator key and page IDs for diagnostic
-                        // purposes but does not require explicit replay because
-                        // the insert path is idempotent with respect to splits.
+                        // producing the same logical structure.
                     }
                 }
             }
@@ -124,6 +136,34 @@ impl BfTree {
         // Persist the recovered state so subsequent opens see the replayed data.
         bf_tree.snapshot()?;
         Ok(bf_tree)
+    }
+
+    /// Read the snapshot_lsn from a snapshot file's metadata header.
+    /// Returns 0 if the file doesn't exist or was created before
+    /// snapshot_lsn was added to the metadata (backward compatible).
+    fn read_snapshot_lsn(path: &Path) -> Result<u64, BfTreeError> {
+        if !path.exists() {
+            return Ok(0);
+        }
+        let reader = std::fs::File::open(path).map_err(|_| IoErrorKind::SnapshotRead)?;
+        let mut buf = SectorAlignedVector::new_zeroed(4096);
+        #[cfg(unix)]
+        {
+            reader
+                .read_at(&mut buf, 0)
+                .map_err(|_| IoErrorKind::SnapshotRead)?;
+        }
+        #[cfg(windows)]
+        {
+            reader
+                .seek_read(&mut buf, 0)
+                .map_err(|_| IoErrorKind::SnapshotRead)?;
+        }
+        // SAFETY: BfTreeMeta is #[repr(C, align(512))] with only primitive fields.
+        // The buffer is 4096 bytes (>= size_of::<BfTreeMeta>()) and was just read.
+        let meta = unsafe { (buf.as_ptr() as *const BfTreeMeta).read() };
+        meta.check_magic();
+        Ok(meta.snapshot_lsn)
     }
 
     /// Instead of creating a new Bf-Tree instance,
@@ -326,6 +366,15 @@ impl BfTree {
 
         let file_size = (leaf_offset + align_to_sector_size(leaf_size)) as u64;
 
+        #[cfg(feature = "std")]
+        let snapshot_lsn = self
+            .wal
+            .as_ref()
+            .map(|w| w.get_flushed_lsn())
+            .unwrap_or(0);
+        #[cfg(not(feature = "std"))]
+        let snapshot_lsn = 0u64;
+
         let metadata = BfTreeMeta {
             magic_begin: *BF_TREE_MAGIC_BEGIN,
             root_id: root_id.0,
@@ -334,6 +383,7 @@ impl BfTree {
             leaf_offset,
             leaf_size,
             file_size,
+            snapshot_lsn,
             magic_end: *BF_TREE_MAGIC_END,
         };
 
@@ -342,6 +392,14 @@ impl BfTree {
             .write(META_DATA_PAGE_OFFSET, metadata.as_slice())
             .map_err(|e| BfTreeError::Io(e))?;
         self.storage.vfs.flush().map_err(|e| BfTreeError::Io(e))?;
+
+        // Activate COW protection: any subsequent page eviction that would
+        // write to an offset below file_size will allocate a new offset
+        // instead, preserving the snapshot data for crash recovery.
+        self.storage
+            .page_table
+            .set_cow_boundary(file_size as usize);
+
         Ok(self.config.file_path.clone())
     }
 
@@ -469,6 +527,9 @@ struct BfTreeMeta {
     leaf_offset: usize,
     leaf_size: usize,
     file_size: u64,
+    /// WAL flushed LSN at snapshot time. Recovery skips entries with lsn <= this.
+    /// Zero when WAL is not enabled or for snapshots created before this field existed.
+    snapshot_lsn: u64,
     magic_end: [u8; 14],
 }
 const _: () = assert!(std::mem::size_of::<BfTreeMeta>() <= DISK_PAGE_SIZE);
@@ -1002,6 +1063,15 @@ mod tests {
             }
             tree.snapshot().unwrap();
 
+            // Verify live tree has all keys right after snapshot.
+            let mut snap_buf = vec![0u8; key_len];
+            for r in 0..pre_count {
+                let key = install_value_to_buffer(&mut key_buffer, r);
+                match tree.read(key, &mut snap_buf) {
+                    LeafReadResult::Found(_) => {}
+                    other => panic!("live tree missing key {r} right after snapshot: {other:?}"),
+                }
+            }
             // These entries are NOT snapshotted -- only in the WAL.
             for r in pre_count..total_count {
                 let key = install_value_to_buffer(&mut key_buffer, r);
@@ -1026,6 +1096,29 @@ mod tests {
             snapshot_path.to_string_lossy().replace('\\', "\\\\"),
         );
         std::fs::write(&config_path, &config_toml).unwrap();
+
+        // Phase 2.5: Verify snapshot alone contains all pre-snapshot entries.
+        {
+            let snap_tree =
+                BfTree::new_from_snapshot(Config::new_with_config_file(&config_path), None)
+                    .expect("snapshot load failed");
+            let mut snap_buf = vec![0u8; key_len];
+            let mut missing_keys = Vec::new();
+            for r in 0..pre_count {
+                let key = install_value_to_buffer(&mut key_buffer, r);
+                match snap_tree.read(key, &mut snap_buf) {
+                    LeafReadResult::Found(_) => {}
+                    _ => missing_keys.push(r),
+                }
+            }
+            if !missing_keys.is_empty() {
+                panic!(
+                    "snapshot alone is missing {} pre-snapshot keys (first 10: {:?})",
+                    missing_keys.len(),
+                    &missing_keys[..missing_keys.len().min(10)]
+                );
+            }
+        }
 
         // Phase 3: Recover from snapshot + WAL replay.
         let tree = BfTree::recovery(&config_path, &wal_path, wal_segment_size, None)
@@ -1136,12 +1229,34 @@ mod tests {
             }
         }
 
-        // NOTE: scan order verification is intentionally omitted here.
-        // Naive WAL replay re-inserts pre-snapshot entries, which can cause
-        // structural inconsistencies that affect scan ordering. Fixing this
-        // requires storing the snapshot LSN in metadata and skipping entries
-        // with LSN <= snapshot_lsn during recovery. Point reads above confirm
-        // all data is intact regardless.
+        // Verify scan produces sorted order. This works because recovery
+        // now skips WAL entries with lsn <= snapshot_lsn, avoiding
+        // re-insertion of pre-snapshot entries that caused structural issues.
+        {
+            let scan = tree
+                .scan_with_count(
+                    &[0u8],
+                    total_count + 10,
+                    crate::range_scan::ScanReturnField::Key,
+                )
+                .unwrap();
+            let mut scan_buf = vec![0u8; key_len + max_record_size];
+            let mut prev: Option<Vec<u8>> = None;
+            let mut scan_count = 0;
+            let mut scan_ref = scan;
+            while let Ok(Some((kl, _vl))) = scan_ref.next(&mut scan_buf) {
+                let key = scan_buf[..kl].to_vec();
+                if let Some(ref p) = prev {
+                    assert!(key > *p, "scan order violated at entry {scan_count}");
+                }
+                prev = Some(key);
+                scan_count += 1;
+            }
+            assert_eq!(
+                scan_count, total_count,
+                "scan returned wrong count after WAL+split recovery"
+            );
+        }
 
         drop(tree);
         let _ = std::fs::remove_dir_all(&test_dir);

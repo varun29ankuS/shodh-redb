@@ -93,6 +93,13 @@ pub enum StorageBackend {
     Memory,
     #[cfg(feature = "std")]
     Std,
+    /// Write-through mode: every write is durable without explicit fsync.
+    ///
+    /// Uses `FILE_FLAG_WRITE_THROUGH` on Windows and `O_DSYNC` on Linux.
+    /// Ideal for WAL files where per-write durability is required and the
+    /// cost of `FlushFileBuffers()`/`fdatasync()` dominates latency.
+    #[cfg(feature = "std")]
+    StdWriteThrough,
     #[cfg(all(feature = "std", target_os = "linux"))]
     StdDirect,
     #[cfg(all(feature = "std", target_os = "linux"))]

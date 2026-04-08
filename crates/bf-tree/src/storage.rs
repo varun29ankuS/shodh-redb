@@ -443,6 +443,9 @@ pub(crate) fn make_vfs(
     match storage_backend {
         StorageBackend::Memory => Ok(Arc::new(MemoryVfs::new())),
         StorageBackend::Std => Ok(Arc::new(StdVfs::open(path.as_ref())?)),
+        StorageBackend::StdWriteThrough => {
+            Ok(Arc::new(crate::fs::WriteThroughVfs::open(path.as_ref())?))
+        }
 
         #[cfg(target_os = "linux")]
         StorageBackend::IoUringPolling => Ok(Arc::new(IoUringVfs::open(path.as_ref())?)),

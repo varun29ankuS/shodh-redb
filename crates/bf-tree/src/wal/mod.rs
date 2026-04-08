@@ -122,10 +122,11 @@ impl WriteAheadLogInner {
             eprintln!("bf-tree: WAL flush failed: {_e}");
         }
 
-        if !self.should_inplace_flush() {
-            self.file_offset += self.buffer.buffer_size;
-            self.buffer_cursor = 0;
-        }
+        // Always advance — append-only WAL. Old in-place rewrite caused
+        // degenerate read-modify-write cycles on NTFS when rewriting the same
+        // file offset repeatedly for small flushes.
+        self.file_offset += self.buffer_cursor;
+        self.buffer_cursor = 0;
 
         self.flushed_lsn = self.next_lsn - 1;
         self.need_flush = false;
@@ -149,12 +150,6 @@ impl WriteAheadLogInner {
         // SAFETY: debug_assert above verifies cursor + size <= buffer_size. The &mut self
         // borrow ensures no other references to the buffer exist concurrently.
         unsafe { self.buffer.as_mut_slice_at_exact(cursor, size) }
-    }
-
-    /// if buffer is less than half full, we should not create a new buffer,
-    /// instead inplace flush the buffer
-    fn should_inplace_flush(&self) -> bool {
-        self.buffer_cursor < (self.buffer.buffer_size / 2)
     }
 
     fn alloc_lsn(&mut self) -> u64 {

@@ -72,7 +72,7 @@ mod tests {
         }
 
         // Verify all 8000 writes landed.
-        let rtxn = db.begin_read();
+        let mut rtxn = db.begin_read();
         for t in 0..8u64 {
             for i in 0..1000u64 {
                 let key = alloc::format!("w{t}_k{i}");
@@ -129,7 +129,7 @@ mod tests {
         }
 
         // Verify TABLE_A and TABLE_B have different values for the same keys.
-        let rtxn = db.begin_read();
+        let mut rtxn = db.begin_read();
         for t in 0..2u64 {
             for i in 0..500u64 {
                 let key = alloc::format!("a{t}_{i}");
@@ -173,7 +173,7 @@ mod tests {
             let config = BfTreeConfig::new_file(&db_path, 4);
             let db = BfTreeDatabase::open(config).unwrap();
 
-            let rtxn = db.begin_read();
+            let mut rtxn = db.begin_read();
             for i in 0..100u64 {
                 let key = alloc::format!("key_{i}");
                 let val_bytes = rtxn
@@ -207,7 +207,7 @@ mod tests {
             let config = BfTreeConfig::new_file(&db_path, 4);
             let db = BfTreeDatabase::open(config).unwrap();
 
-            let rtxn = db.begin_read();
+            let mut rtxn = db.begin_read();
             assert!(rtxn.get::<&str, u64>(&TABLE_A, &"keep").unwrap().is_some());
             assert!(
                 rtxn.get::<&str, u64>(&TABLE_A, &"remove")
@@ -295,7 +295,7 @@ mod tests {
         }
 
         // Every key must have a valid value from one of the 4 threads.
-        let rtxn = db.begin_read();
+        let mut rtxn = db.begin_read();
         for i in 0..100u64 {
             let key = alloc::format!("storm_{i}");
             let val_bytes = rtxn
@@ -359,7 +359,7 @@ mod tests {
         wtxn.commit().unwrap();
 
         // Phase 2: Verify persisted state.
-        let rtxn = db.begin_read();
+        let mut rtxn = db.begin_read();
 
         // Shared keys: each must have a value from one of the threads.
         for i in 0..OVERLAP {
@@ -479,7 +479,7 @@ mod tests {
         wtxn.commit().unwrap();
 
         // Phase 2: Verify state.
-        let rtxn = db.begin_read();
+        let mut rtxn = db.begin_read();
         for i in 0..KEYS {
             let key = alloc::format!("k_{i}");
             let result = rtxn.get::<&str, u64>(&TABLE_A, &key.as_str()).unwrap();

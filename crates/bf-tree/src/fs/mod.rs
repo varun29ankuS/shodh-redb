@@ -6,6 +6,9 @@ mod memory_vfs;
 #[cfg(feature = "std")]
 mod std_vfs;
 
+#[cfg(feature = "std")]
+mod write_through_vfs;
+
 #[cfg(all(feature = "std", target_os = "linux"))]
 mod std_direct_vfs;
 
@@ -22,6 +25,8 @@ pub(crate) use io_uring_vfs::IoUringVfs;
 pub(crate) use memory_vfs::MemoryVfs;
 #[cfg(feature = "std")]
 pub(crate) use std_vfs::StdVfs;
+#[cfg(feature = "std")]
+pub(crate) use write_through_vfs::WriteThroughVfs;
 
 use crate::error::IoErrorKind;
 use crate::nodes::DISK_PAGE_SIZE;

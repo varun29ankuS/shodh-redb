@@ -28,7 +28,8 @@ use super::buffered_txn::{
     BufferLookup, BufferedScanIter, WriteBuffer, collect_buffer_entries_for_table,
 };
 use super::database::{
-    BfTreeTableScan, TableKind, encode_table_key, table_prefix, table_prefix_end,
+    BfTreeTableScan, TableKind, encode_table_key, encode_table_key_into, table_prefix,
+    table_prefix_end,
 };
 use super::error::BfTreeError;
 use super::verification::{VerifyMode, should_verify, unwrap_value, wrap_value};
@@ -55,6 +56,10 @@ pub struct BfTreeTable<'txn, K: Key + 'static, V: Value + 'static> {
     cdc_log: Option<&'txn Mutex<Vec<CdcEvent>>>,
     buffer: &'txn Mutex<WriteBuffer>,
     verify_mode: &'txn Arc<VerifyMode>,
+    /// Reusable buffer for bf-tree read output, avoiding per-read heap allocation.
+    read_buf: Vec<u8>,
+    /// Reusable buffer for encoded key, avoiding per-read heap allocation.
+    key_buf: Vec<u8>,
     _key: PhantomData<K>,
     _val: PhantomData<V>,
 }
@@ -76,6 +81,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         buffer: &'txn Mutex<WriteBuffer>,
         verify_mode: &'txn Arc<VerifyMode>,
     ) -> Self {
+        let max_record = adapter.inner().config().get_cb_max_record_size();
+        let key_buf_size = adapter.max_key_len() + 64;
         Self {
             name: String::from(name),
             adapter,
@@ -83,6 +90,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
             cdc_log,
             buffer,
             verify_mode,
+            read_buf: vec![0u8; max_record],
+            key_buf: vec![0u8; key_buf_size],
             _key: PhantomData,
             _val: PhantomData,
         }
@@ -233,14 +242,21 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     /// Read the value for a key.
     ///
     /// Checks the write buffer first (for read-your-writes), then falls through
-    /// to `BfTree` if the key is not in the buffer.
-    pub fn get(&self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
+    /// to `BfTree` if the key is not in the buffer. Uses pre-allocated buffers
+    /// to avoid per-read heap allocations on the bf-tree fallthrough path.
+    pub fn get(&mut self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let enc_len = encode_table_key_into(
+            &mut self.key_buf,
+            &self.name,
+            TableKind::Regular,
+            key_bytes.as_ref(),
+        );
+        let encoded_key = &self.key_buf[..enc_len];
         let checksumming = self.verify_mode.is_enabled();
 
         let buffer = self.buffer.lock();
-        match buffer.get(&encoded_key) {
+        match buffer.get(encoded_key) {
             BufferLookup::Found(v) => {
                 return if checksumming {
                     let verify = should_verify(self.verify_mode.as_ref());
@@ -254,11 +270,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         }
         drop(buffer);
 
-        let max_val = self.adapter.inner().config().get_cb_max_record_size();
-        let mut buf = vec![0u8; max_val];
-        match self.adapter.read(&encoded_key, &mut buf) {
+        match self.adapter.read(encoded_key, &mut self.read_buf) {
             Ok(len) => {
-                let raw = &buf[..len as usize];
+                let raw = &self.read_buf[..len as usize];
                 if checksumming {
                     let verify = should_verify(self.verify_mode.as_ref());
                     Ok(Some(unwrap_value(raw, verify)?.to_vec()))
@@ -379,6 +393,10 @@ pub struct BfTreeReadOnlyTable<'txn, K: Key + 'static, V: Value + 'static> {
     name: String,
     adapter: &'txn Arc<BfTreeAdapter>,
     verify_mode: &'txn Arc<VerifyMode>,
+    /// Reusable buffer for bf-tree read output, avoiding per-read heap allocation.
+    read_buf: Vec<u8>,
+    /// Reusable buffer for encoded key, avoiding per-read heap allocation.
+    key_buf: Vec<u8>,
     _key: PhantomData<K>,
     _val: PhantomData<V>,
 }
@@ -397,25 +415,34 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
         adapter: &'txn Arc<BfTreeAdapter>,
         verify_mode: &'txn Arc<VerifyMode>,
     ) -> Self {
+        let max_record = adapter.inner().config().get_cb_max_record_size();
+        let key_buf_size = adapter.max_key_len() + 64;
         Self {
             name: String::from(name),
             adapter,
             verify_mode,
+            read_buf: vec![0u8; max_record],
+            key_buf: vec![0u8; key_buf_size],
             _key: PhantomData,
             _val: PhantomData,
         }
     }
 
     /// Read the value for a key.
-    pub fn get(&self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
+    ///
+    /// Uses pre-allocated buffers to avoid per-read heap allocations.
+    pub fn get(&mut self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let enc_len = encode_table_key_into(
+            &mut self.key_buf,
+            &self.name,
+            TableKind::Regular,
+            key_bytes.as_ref(),
+        );
         let checksumming = self.verify_mode.is_enabled();
-        let max_val = self.adapter.inner().config().get_cb_max_record_size();
-        let mut buf = vec![0u8; max_val];
-        match self.adapter.read(&encoded_key, &mut buf) {
+        match self.adapter.read(&self.key_buf[..enc_len], &mut self.read_buf) {
             Ok(len) => {
-                let raw = &buf[..len as usize];
+                let raw = &self.read_buf[..len as usize];
                 if checksumming {
                     let verify = should_verify(self.verify_mode.as_ref());
                     Ok(Some(unwrap_value(raw, verify)?.to_vec()))
@@ -677,9 +704,39 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
         Self: 'a;
 
     fn st_get(&self, key: &K::SelfType<'_>) -> crate::Result<Option<OwnedKv<V>>> {
-        match self.get(key) {
-            Ok(Some(bytes)) => Ok(Some(OwnedKv::new(bytes))),
-            Ok(None) => Ok(None),
+        // Trait requires `&self`; fall back to allocating read path.
+        let key_bytes = K::as_bytes(key);
+        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let checksumming = self.verify_mode.is_enabled();
+
+        let buffer = self.buffer.lock();
+        match buffer.get(&encoded_key) {
+            BufferLookup::Found(v) => {
+                return if checksumming {
+                    let verify = should_verify(self.verify_mode.as_ref());
+                    Ok(Some(OwnedKv::new(unwrap_value(&v, verify)?.to_vec())))
+                } else {
+                    Ok(Some(OwnedKv::new(v)))
+                };
+            }
+            BufferLookup::Tombstone => return Ok(None),
+            BufferLookup::NotInBuffer => {}
+        }
+        drop(buffer);
+
+        let max_val = self.adapter.inner().config().get_cb_max_record_size();
+        let mut buf = vec![0u8; max_val];
+        match self.adapter.read(&encoded_key, &mut buf) {
+            Ok(len) => {
+                let raw = &buf[..len as usize];
+                if checksumming {
+                    let verify = should_verify(self.verify_mode.as_ref());
+                    Ok(Some(OwnedKv::new(unwrap_value(raw, verify)?.to_vec())))
+                } else {
+                    Ok(Some(OwnedKv::new(raw.to_vec())))
+                }
+            }
+            Err(BfTreeError::NotFound | BfTreeError::Deleted) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -824,9 +881,23 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V
         Self: 'a;
 
     fn st_get(&self, key: &K::SelfType<'_>) -> crate::Result<Option<OwnedKv<V>>> {
-        match self.get(key) {
-            Ok(Some(bytes)) => Ok(Some(OwnedKv::new(bytes))),
-            Ok(None) => Ok(None),
+        // Trait requires `&self`; fall back to allocating read path.
+        let key_bytes = K::as_bytes(key);
+        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let checksumming = self.verify_mode.is_enabled();
+        let max_val = self.adapter.inner().config().get_cb_max_record_size();
+        let mut buf = vec![0u8; max_val];
+        match self.adapter.read(&encoded_key, &mut buf) {
+            Ok(len) => {
+                let raw = &buf[..len as usize];
+                if checksumming {
+                    let verify = should_verify(self.verify_mode.as_ref());
+                    Ok(Some(OwnedKv::new(unwrap_value(raw, verify)?.to_vec())))
+                } else {
+                    Ok(Some(OwnedKv::new(raw.to_vec())))
+                }
+            }
+            Err(BfTreeError::NotFound | BfTreeError::Deleted) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -957,7 +1028,7 @@ mod tests {
 
         // Read via read transaction.
         let rtxn = db.begin_read();
-        let ro_table = rtxn.open_table(ITEMS).unwrap();
+        let mut ro_table = rtxn.open_table(ITEMS).unwrap();
         assert!(ro_table.contains_key(&"x"));
         assert!(!ro_table.contains_key(&"z"));
         let val = ro_table.get(&"x").unwrap().unwrap();
@@ -1166,7 +1237,7 @@ mod tests {
 
         // Verify result is 15.
         let rtxn = db.begin_read();
-        let ro_table = rtxn.open_table(ITEMS).unwrap();
+        let mut ro_table = rtxn.open_table(ITEMS).unwrap();
         let val = ro_table.get(&"counter").unwrap().unwrap();
         let result = u64::from_le_bytes(val.as_slice().try_into().unwrap());
         assert_eq!(result, 15);
@@ -1186,7 +1257,7 @@ mod tests {
 
         // Verify it was set to the operand value.
         let rtxn = db.begin_read();
-        let ro_table = rtxn.open_table(ITEMS).unwrap();
+        let mut ro_table = rtxn.open_table(ITEMS).unwrap();
         let val = ro_table.get(&"fresh").unwrap().unwrap();
         let result = u64::from_le_bytes(val.as_slice().try_into().unwrap());
         assert_eq!(result, 42);
@@ -1218,7 +1289,7 @@ mod tests {
 
         // Key should be gone.
         let rtxn = db.begin_read();
-        let ro_table = rtxn.open_table(ITEMS).unwrap();
+        let mut ro_table = rtxn.open_table(ITEMS).unwrap();
         assert!(ro_table.get(&"doomed").unwrap().is_none());
     }
 }

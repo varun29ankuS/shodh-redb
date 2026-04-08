@@ -1,8 +1,8 @@
-//! BfTree vs RocksDB benchmark.
+//! BfTree vs BTree vs RocksDB benchmark.
 //!
-//! Measures 7 dimensions: latency distribution, concurrent write throughput,
+//! Measures 9 dimensions: latency distribution, concurrent write throughput,
 //! mixed read/write, write amplification, space amplification, recovery time,
-//! and throughput at scale.
+//! throughput at scale, periodic-mode throughput, and periodic-mode mixed.
 
 use std::env::current_dir;
 use std::path::Path;
@@ -15,8 +15,10 @@ use comfy_table::{Cell, Table};
 use rocksdb::{OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions};
 use shodh_redb::TableDefinition;
 use shodh_redb::bf_tree_store::{
-    BfTreeConfig, BfTreeDatabase, BfTreeDatabaseWriteTxn, WriteBatchFn, concurrent_group_commit,
+    BfTreeConfig, BfTreeDatabase, BfTreeDatabaseWriteTxn, DurabilityMode, WriteBatchFn,
+    concurrent_group_commit,
 };
+use shodh_redb::{Database, Durability, ReadableDatabase};
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
@@ -223,11 +225,27 @@ fn rocksdb_delete(db: &OptimisticTransactionDB, key: &[u8]) {
 // ---------------------------------------------------------------------------
 
 fn bftree_config(path: &Path) -> BfTreeConfig {
-    BfTreeConfig::new_file(path.join("bftree.db"), 64)
+    let mut config = BfTreeConfig::new_file(path.join("bftree.db"), 64);
+    // Disable automatic snapshots during benchmarks. We call snapshot()
+    // explicitly between fill and measurement phases to avoid a stop-the-world
+    // snapshot landing mid-measurement (the default interval=100 caused a
+    // 3x regression at the 10K scale point).
+    config.snapshot_interval = 0;
+    config
+}
+
+fn bftree_periodic_config(path: &Path) -> BfTreeConfig {
+    let mut config = bftree_config(path);
+    config.durability = DurabilityMode::Periodic;
+    config
 }
 
 fn open_bftree(path: &Path) -> BfTreeDatabase {
     BfTreeDatabase::create(bftree_config(path)).unwrap()
+}
+
+fn open_bftree_periodic(path: &Path) -> BfTreeDatabase {
+    BfTreeDatabase::create(bftree_periodic_config(path)).unwrap()
 }
 
 fn reopen_bftree(path: &Path) -> BfTreeDatabase {
@@ -241,7 +259,7 @@ fn bftree_put(db: &BfTreeDatabase, key: &[u8], value: &[u8]) {
 }
 
 fn bftree_get(db: &BfTreeDatabase, key: &[u8]) -> Option<Vec<u8>> {
-    let rtxn = db.begin_read();
+    let mut rtxn = db.begin_read();
     rtxn.get::<&[u8], &[u8]>(&TABLE, &key).unwrap()
 }
 
@@ -258,6 +276,74 @@ fn bftree_delete(db: &BfTreeDatabase, key: &[u8]) {
     let wtxn = db.begin_write();
     wtxn.delete::<&[u8], &[u8]>(&TABLE, &key);
     wtxn.commit().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// BTree (original shodh-redb) setup
+// ---------------------------------------------------------------------------
+
+fn open_btree(path: &Path) -> Database {
+    Database::builder()
+        .set_cache_size(256 * 1024 * 1024) // 256 MiB to match RocksDB
+        .create(path.join("btree.redb"))
+        .unwrap()
+}
+
+#[allow(dead_code)]
+fn reopen_btree(path: &Path) -> Database {
+    Database::builder()
+        .set_cache_size(256 * 1024 * 1024)
+        .open(path.join("btree.redb"))
+        .unwrap()
+}
+
+#[allow(dead_code)]
+fn btree_put(db: &Database, key: &[u8], value: &[u8]) {
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        table.insert(key, value).unwrap();
+    }
+    write_txn.commit().unwrap();
+}
+
+fn btree_get(db: &Database, key: &[u8]) -> Option<Vec<u8>> {
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    table.get(key).unwrap().map(|v| v.value().to_vec())
+}
+
+fn btree_batch_put(db: &Database, pairs: &[([u8; KEY_SIZE], Vec<u8>)]) {
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for (k, v) in pairs {
+            table.insert(k.as_slice(), v.as_slice()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+fn btree_batch_put_nosync(db: &Database, pairs: &[([u8; KEY_SIZE], Vec<u8>)]) {
+    let mut write_txn = db.begin_write().unwrap();
+    let _ = write_txn.set_durability(Durability::None);
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for (k, v) in pairs {
+            table.insert(k.as_slice(), v.as_slice()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[allow(dead_code)]
+fn btree_delete(db: &Database, key: &[u8]) {
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        let _ = table.remove(key);
+    }
+    write_txn.commit().unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +376,28 @@ fn fill_bftree(db: &BfTreeDatabase, count: usize, rng: &mut fastrand::Rng) -> Ve
     }
     eprintln!(
         "  [bftree] fill {} entries: {:.1}s",
+        count,
+        start.elapsed().as_secs_f64()
+    );
+    keys
+}
+
+#[allow(dead_code)]
+fn fill_btree(db: &Database, count: usize, rng: &mut fastrand::Rng) -> Vec<[u8; KEY_SIZE]> {
+    let mut keys = Vec::with_capacity(count);
+    let mut batch = Vec::with_capacity(SCALE_FILL_BATCH);
+    let start = Instant::now();
+    for i in 0..count {
+        let (key, value) = random_pair(rng);
+        keys.push(key);
+        batch.push((key, value));
+        if batch.len() >= SCALE_FILL_BATCH || i == count - 1 {
+            btree_batch_put(db, &batch);
+            batch.clear();
+        }
+    }
+    eprintln!(
+        "  [btree] fill {} entries: {:.1}s",
         count,
         start.elapsed().as_secs_f64()
     );
@@ -1030,25 +1138,33 @@ fn bench_recovery() {
 // ---------------------------------------------------------------------------
 
 fn bench_throughput_at_scale() {
-    println!("\n=== 7. Throughput at Scale ===");
+    println!("\n=== 7. Throughput at Scale (Sync) ===");
+    println!("All engines: fsync per commit");
 
     let bf_dir = TempDir::new_in(current_dir().unwrap()).unwrap();
+    let bt_dir = TempDir::new_in(current_dir().unwrap()).unwrap();
     let rk_dir = TempDir::new_in(current_dir().unwrap()).unwrap();
 
     let bf_db = open_bftree(bf_dir.path());
+    let bt_db = open_btree(bt_dir.path());
     let rk_db = open_rocksdb(rk_dir.path());
 
     let mut bf_rng = make_rng();
+    let mut bt_rng = make_rng();
     let mut rk_rng = make_rng();
     let mut bf_keys: Vec<[u8; KEY_SIZE]> = Vec::new();
+    let mut bt_keys: Vec<[u8; KEY_SIZE]> = Vec::new();
     let mut rk_keys: Vec<[u8; KEY_SIZE]> = Vec::new();
 
     let mut bf_read_results = Vec::new();
     let mut bf_write_results = Vec::new();
+    let mut bt_read_results = Vec::new();
+    let mut bt_write_results = Vec::new();
     let mut rk_read_results = Vec::new();
     let mut rk_write_results = Vec::new();
 
     let mut bf_filled = 0usize;
+    let mut bt_filled = 0usize;
     let mut rk_filled = 0usize;
 
     for &level in SCALE_LEVELS {
@@ -1067,6 +1183,21 @@ fn bench_throughput_at_scale() {
             bftree_batch_put(&bf_db, &batch);
             bf_filled = batch_end;
         }
+        let _ = bf_db.snapshot();
+
+        // Fill BTree to level
+        while bt_filled < level {
+            let batch_end = (bt_filled + SCALE_FILL_BATCH).min(level);
+            let batch_sz = batch_end - bt_filled;
+            let mut batch = Vec::with_capacity(batch_sz);
+            for _ in 0..batch_sz {
+                let (key, value) = random_pair(&mut bt_rng);
+                bt_keys.push(key);
+                batch.push((key, value));
+            }
+            btree_batch_put(&bt_db, &batch);
+            bt_filled = batch_end;
+        }
 
         // Fill RocksDB to level
         while rk_filled < level {
@@ -1082,7 +1213,7 @@ fn bench_throughput_at_scale() {
             rk_filled = batch_end;
         }
 
-        // Measure read throughput
+        // Measure read throughput — BfTree
         let mut read_rng = fastrand::Rng::with_seed(42);
         let start = Instant::now();
         for _ in 0..SCALE_SAMPLE_OPS {
@@ -1092,6 +1223,17 @@ fn bench_throughput_at_scale() {
         let bf_read_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
         bf_read_results.push((level, bf_read_ops));
 
+        // Measure read throughput — BTree
+        let mut read_rng = fastrand::Rng::with_seed(42);
+        let start = Instant::now();
+        for _ in 0..SCALE_SAMPLE_OPS {
+            let idx = read_rng.usize(0..bt_keys.len());
+            let _ = btree_get(&bt_db, &bt_keys[idx]);
+        }
+        let bt_read_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
+        bt_read_results.push((level, bt_read_ops));
+
+        // Measure read throughput — RocksDB
         let mut read_rng = fastrand::Rng::with_seed(42);
         let start = Instant::now();
         for _ in 0..SCALE_SAMPLE_OPS {
@@ -1101,7 +1243,7 @@ fn bench_throughput_at_scale() {
         let rk_read_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
         rk_read_results.push((level, rk_read_ops));
 
-        // Measure write throughput (batched)
+        // Measure write throughput — BfTree
         let mut write_rng = fastrand::Rng::with_seed(77);
         let start = Instant::now();
         let mut done = 0;
@@ -1117,6 +1259,23 @@ fn bench_throughput_at_scale() {
         let bf_write_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
         bf_write_results.push((level, bf_write_ops));
 
+        // Measure write throughput — BTree
+        let mut write_rng = fastrand::Rng::with_seed(77);
+        let start = Instant::now();
+        let mut done = 0;
+        while done < SCALE_SAMPLE_OPS {
+            let batch_sz = SCALE_BATCH_SIZE.min(SCALE_SAMPLE_OPS - done);
+            let mut batch = Vec::with_capacity(batch_sz);
+            for _ in 0..batch_sz {
+                batch.push(random_pair(&mut write_rng));
+            }
+            btree_batch_put(&bt_db, &batch);
+            done += batch_sz;
+        }
+        let bt_write_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
+        bt_write_results.push((level, bt_write_ops));
+
+        // Measure write throughput — RocksDB
         let mut write_rng = fastrand::Rng::with_seed(77);
         let start = Instant::now();
         let mut done = 0;
@@ -1137,19 +1296,319 @@ fn bench_throughput_at_scale() {
     table.set_header(vec![
         "Level",
         "BfTree read/s",
+        "BTree read/s",
         "RocksDB read/s",
         "BfTree write/s",
+        "BTree write/s",
         "RocksDB write/s",
     ]);
     for i in 0..SCALE_LEVELS.len() {
         table.add_row(vec![
             Cell::new(format!("{}K", SCALE_LEVELS[i] / 1000)),
             Cell::new(format!("{:.0}", bf_read_results[i].1)),
+            Cell::new(format!("{:.0}", bt_read_results[i].1)),
             Cell::new(format!("{:.0}", rk_read_results[i].1)),
             Cell::new(format!("{:.0}", bf_write_results[i].1)),
+            Cell::new(format!("{:.0}", bt_write_results[i].1)),
             Cell::new(format!("{:.0}", rk_write_results[i].1)),
         ]);
     }
+    println!("{table}");
+}
+
+// ---------------------------------------------------------------------------
+// 8. Throughput at scale (Periodic durability — matches RocksDB default)
+// ---------------------------------------------------------------------------
+
+fn bench_throughput_at_scale_periodic() {
+    println!("\n=== 8. Throughput at Scale (No fsync) ===");
+    println!("BfTree: DurabilityMode::Periodic | BTree: Durability::None | RocksDB: sync=false");
+
+    let bf_dir = TempDir::new_in(current_dir().unwrap()).unwrap();
+    let bt_dir = TempDir::new_in(current_dir().unwrap()).unwrap();
+    let rk_dir = TempDir::new_in(current_dir().unwrap()).unwrap();
+
+    let bf_db = open_bftree_periodic(bf_dir.path());
+    let bt_db = open_btree(bt_dir.path());
+    let rk_db: OptimisticTransactionDB = {
+        let opts = rocksdb_opts();
+        OptimisticTransactionDB::open(&opts, rk_dir.path()).unwrap()
+    };
+
+    let mut bf_rng = make_rng();
+    let mut bt_rng = make_rng();
+    let mut rk_rng = make_rng();
+    let mut bf_keys: Vec<[u8; KEY_SIZE]> = Vec::new();
+    let mut bt_keys: Vec<[u8; KEY_SIZE]> = Vec::new();
+    let mut rk_keys: Vec<[u8; KEY_SIZE]> = Vec::new();
+
+    let mut bf_write_results = Vec::new();
+    let mut bt_write_results = Vec::new();
+    let mut rk_write_results = Vec::new();
+
+    let mut bf_filled = 0usize;
+    let mut bt_filled = 0usize;
+    let mut rk_filled = 0usize;
+
+    for &level in SCALE_LEVELS {
+        println!("  Filling to {level}...");
+
+        // Fill BfTree
+        while bf_filled < level {
+            let batch_end = (bf_filled + SCALE_FILL_BATCH).min(level);
+            let batch_sz = batch_end - bf_filled;
+            let mut batch = Vec::with_capacity(batch_sz);
+            for _ in 0..batch_sz {
+                let (key, value) = random_pair(&mut bf_rng);
+                bf_keys.push(key);
+                batch.push((key, value));
+            }
+            bftree_batch_put(&bf_db, &batch);
+            bf_filled = batch_end;
+        }
+        let _ = bf_db.snapshot();
+
+        // Fill BTree (no-sync for fill)
+        while bt_filled < level {
+            let batch_end = (bt_filled + SCALE_FILL_BATCH).min(level);
+            let batch_sz = batch_end - bt_filled;
+            let mut batch = Vec::with_capacity(batch_sz);
+            for _ in 0..batch_sz {
+                let (key, value) = random_pair(&mut bt_rng);
+                bt_keys.push(key);
+                batch.push((key, value));
+            }
+            btree_batch_put_nosync(&bt_db, &batch);
+            bt_filled = batch_end;
+        }
+
+        // Fill RocksDB (no sync)
+        while rk_filled < level {
+            let batch_end = (rk_filled + SCALE_FILL_BATCH).min(level);
+            let batch_sz = batch_end - rk_filled;
+            let mut batch = Vec::with_capacity(batch_sz);
+            for _ in 0..batch_sz {
+                let (key, value) = random_pair(&mut rk_rng);
+                rk_keys.push(key);
+                batch.push((key, value));
+            }
+            let wo = WriteOptions::new();
+            let to = OptimisticTransactionOptions::new();
+            let txn = rk_db.transaction_opt(&wo, &to);
+            for (k, v) in &batch {
+                txn.put(k, v).unwrap();
+            }
+            txn.commit().unwrap();
+            rk_filled = batch_end;
+        }
+
+        // Measure write throughput — BfTree (periodic)
+        let mut write_rng = fastrand::Rng::with_seed(77);
+        let start = Instant::now();
+        let mut done = 0;
+        while done < SCALE_SAMPLE_OPS {
+            let batch_sz = SCALE_BATCH_SIZE.min(SCALE_SAMPLE_OPS - done);
+            let mut batch = Vec::with_capacity(batch_sz);
+            for _ in 0..batch_sz {
+                batch.push(random_pair(&mut write_rng));
+            }
+            bftree_batch_put(&bf_db, &batch);
+            done += batch_sz;
+        }
+        let bf_write_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
+        bf_write_results.push((level, bf_write_ops));
+
+        // Measure write throughput — BTree (no-sync)
+        let mut write_rng = fastrand::Rng::with_seed(77);
+        let start = Instant::now();
+        let mut done = 0;
+        while done < SCALE_SAMPLE_OPS {
+            let batch_sz = SCALE_BATCH_SIZE.min(SCALE_SAMPLE_OPS - done);
+            let mut batch = Vec::with_capacity(batch_sz);
+            for _ in 0..batch_sz {
+                batch.push(random_pair(&mut write_rng));
+            }
+            btree_batch_put_nosync(&bt_db, &batch);
+            done += batch_sz;
+        }
+        let bt_write_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
+        bt_write_results.push((level, bt_write_ops));
+
+        // Measure write throughput — RocksDB (no-sync)
+        let mut write_rng = fastrand::Rng::with_seed(77);
+        let start = Instant::now();
+        let mut done = 0;
+        while done < SCALE_SAMPLE_OPS {
+            let batch_sz = SCALE_BATCH_SIZE.min(SCALE_SAMPLE_OPS - done);
+            let mut batch = Vec::with_capacity(batch_sz);
+            for _ in 0..batch_sz {
+                batch.push(random_pair(&mut write_rng));
+            }
+            let wo = WriteOptions::new();
+            let txn = rk_db.transaction_opt(&wo, &OptimisticTransactionOptions::new());
+            for (k, v) in &batch {
+                txn.put(k, v).unwrap();
+            }
+            txn.commit().unwrap();
+            done += batch_sz;
+        }
+        let rk_write_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
+        rk_write_results.push((level, rk_write_ops));
+    }
+
+    let mut table = Table::new();
+    table.set_header(vec![
+        "Level",
+        "BfTree write/s",
+        "BTree write/s",
+        "RocksDB write/s",
+    ]);
+    for i in 0..SCALE_LEVELS.len() {
+        let bf_vs_rk = bf_write_results[i].1 / rk_write_results[i].1;
+        let bf_vs_bt = bf_write_results[i].1 / bt_write_results[i].1;
+        table.add_row(vec![
+            Cell::new(format!("{}K", SCALE_LEVELS[i] / 1000)),
+            Cell::new(format!("{:.0} ({bf_vs_rk:.1}x RocksDB, {bf_vs_bt:.1}x BTree)", bf_write_results[i].1)),
+            Cell::new(format!("{:.0}", bt_write_results[i].1)),
+            Cell::new(format!("{:.0}", rk_write_results[i].1)),
+        ]);
+    }
+    println!("{table}");
+}
+
+// ---------------------------------------------------------------------------
+// 9. Mixed read/write (Periodic durability)
+// ---------------------------------------------------------------------------
+
+fn bench_mixed_periodic() {
+    println!("\n=== 9. Mixed Read/Write (Periodic Durability) ===");
+    println!("BfTree: DurabilityMode::Periodic | RocksDB: sync=false");
+
+    // BfTree periodic
+    let bf_dir = TempDir::new_in(current_dir().unwrap()).unwrap();
+    let bf_db = Arc::new(open_bftree_periodic(bf_dir.path()));
+    let mut rng = make_rng();
+    let bf_keys = fill_bftree(&bf_db, MIXED_FILL, &mut rng);
+    let bf_keys = Arc::new(bf_keys);
+
+    // RocksDB no-sync
+    let rk_dir = TempDir::new_in(current_dir().unwrap()).unwrap();
+    let rk_db: Arc<OptimisticTransactionDB> = Arc::new({
+        let opts = rocksdb_opts();
+        OptimisticTransactionDB::open(&opts, rk_dir.path()).unwrap()
+    });
+    let mut rng = make_rng();
+    let rk_keys = fill_rocksdb(&rk_db, MIXED_FILL, &mut rng);
+    let rk_keys = Arc::new(rk_keys);
+
+    // Read-only baseline
+    let bf_readonly = run_readers(&bf_db, &bf_keys, MIXED_READER_THREADS, MIXED_DURATION_SECS);
+    let rk_readonly =
+        run_rocksdb_readers(&rk_db, &rk_keys, MIXED_READER_THREADS, MIXED_DURATION_SECS);
+
+    // Mixed: BfTree periodic writer
+    let (bf_mixed_reads, bf_writer_ops) =
+        run_mixed_bftree(&bf_db, &bf_keys, MIXED_READER_THREADS, MIXED_DURATION_SECS);
+
+    // Mixed: RocksDB no-sync writer
+    let (rk_mixed_reads, rk_writer_ops) = {
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_ops = Arc::new(AtomicU64::new(0));
+        let mut handles = Vec::new();
+
+        for t in 0..MIXED_READER_THREADS {
+            let db = rk_db.clone();
+            let keys = rk_keys.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut hist = LatencyHistogram::with_capacity(100_000);
+                let mut rng = fastrand::Rng::with_seed(RNG_SEED + t as u64 + 50);
+                while !stop.load(Ordering::Relaxed) {
+                    let idx = rng.usize(0..keys.len());
+                    let t = Instant::now();
+                    let _ = rocksdb_get(&db, &keys[idx]);
+                    hist.record(t.elapsed());
+                }
+                hist
+            }));
+        }
+
+        let db_w = rk_db.clone();
+        let stop_w = stop.clone();
+        let wops = writer_ops.clone();
+        let writer = thread::spawn(move || {
+            let mut rng = fastrand::Rng::with_seed(RNG_SEED + 999);
+            let batch_sz = 100usize;
+            while !stop_w.load(Ordering::Relaxed) {
+                let wo = WriteOptions::new(); // sync=false
+                let txn = db_w.transaction_opt(&wo, &OptimisticTransactionOptions::new());
+                for _ in 0..batch_sz {
+                    let (key, value) = random_pair(&mut rng);
+                    txn.put(key, value).unwrap();
+                }
+                txn.commit().unwrap();
+                wops.fetch_add(batch_sz as u64, Ordering::Relaxed);
+            }
+        });
+
+        thread::sleep(Duration::from_secs(MIXED_DURATION_SECS));
+        stop.store(true, Ordering::Relaxed);
+
+        let mut merged = LatencyHistogram::with_capacity(0);
+        for h in handles {
+            let hist = h.join().unwrap();
+            merged.merge(&hist);
+        }
+        writer.join().unwrap();
+        merged.finalize();
+
+        let ops = writer_ops.load(Ordering::Relaxed) as f64 / MIXED_DURATION_SECS as f64;
+        (merged, ops)
+    };
+
+    let bf_degrade = if bf_readonly.p99() > Duration::ZERO {
+        (bf_mixed_reads.p99().as_nanos() as f64 / bf_readonly.p99().as_nanos() as f64 - 1.0) * 100.0
+    } else {
+        0.0
+    };
+    let rk_degrade = if rk_readonly.p99() > Duration::ZERO {
+        (rk_mixed_reads.p99().as_nanos() as f64 / rk_readonly.p99().as_nanos() as f64 - 1.0) * 100.0
+    } else {
+        0.0
+    };
+
+    let mut table = Table::new();
+    table.set_header(vec!["Metric", "BfTree (Periodic)", "RocksDB (no-sync)"]);
+    table.add_row(vec![
+        Cell::new("Read-only p50"),
+        Cell::new(fmt_us(bf_readonly.p50())),
+        Cell::new(fmt_us(rk_readonly.p50())),
+    ]);
+    table.add_row(vec![
+        Cell::new("Read-only p99"),
+        Cell::new(fmt_us(bf_readonly.p99())),
+        Cell::new(fmt_us(rk_readonly.p99())),
+    ]);
+    table.add_row(vec![
+        Cell::new("Mixed p50"),
+        Cell::new(fmt_us(bf_mixed_reads.p50())),
+        Cell::new(fmt_us(rk_mixed_reads.p50())),
+    ]);
+    table.add_row(vec![
+        Cell::new("Mixed p99"),
+        Cell::new(fmt_us(bf_mixed_reads.p99())),
+        Cell::new(fmt_us(rk_mixed_reads.p99())),
+    ]);
+    table.add_row(vec![
+        Cell::new("p99 degradation"),
+        Cell::new(format!("{bf_degrade:+.1}%")),
+        Cell::new(format!("{rk_degrade:+.1}%")),
+    ]);
+    table.add_row(vec![
+        Cell::new("Writer ops/s"),
+        Cell::new(format!("{bf_writer_ops:.0}")),
+        Cell::new(format!("{rk_writer_ops:.0}")),
+    ]);
     println!("{table}");
 }
 
@@ -1174,6 +1633,8 @@ fn main() {
     bench_space_amp();
     bench_recovery();
     bench_throughput_at_scale();
+    bench_throughput_at_scale_periodic();
+    bench_mixed_periodic();
 
     println!("\nDone.");
 }

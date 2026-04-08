@@ -81,6 +81,8 @@ pub struct BfTreeDatabase {
     commit_count: Arc<AtomicU64>,
     /// Snapshot every N commits. 0 = disabled (manual snapshots only).
     snapshot_interval: u64,
+    /// Durability mode for WAL fsync behavior.
+    durability: super::config::DurabilityMode,
 }
 
 impl BfTreeDatabase {
@@ -88,6 +90,7 @@ impl BfTreeDatabase {
     pub fn create(config: BfTreeConfig) -> Result<Self, BfTreeError> {
         let verify_mode = config.verify_mode.clone();
         let snapshot_interval = config.snapshot_interval;
+        let durability = config.durability;
         let adapter = BfTreeAdapter::open(config)?;
         Ok(Self {
             adapter: Arc::new(adapter),
@@ -98,6 +101,7 @@ impl BfTreeDatabase {
             snapshot_lock: Arc::new(Mutex::new(())),
             commit_count: Arc::new(AtomicU64::new(0)),
             snapshot_interval,
+            durability,
         })
     }
 
@@ -105,6 +109,7 @@ impl BfTreeDatabase {
     pub fn open(config: BfTreeConfig) -> Result<Self, BfTreeError> {
         let verify_mode = config.verify_mode.clone();
         let snapshot_interval = config.snapshot_interval;
+        let durability = config.durability;
         let adapter = BfTreeAdapter::open_from_snapshot(config)?;
         // Recover the next transaction ID from the latest CDC log entry.
         let next_id = recover_next_txn_id(&adapter).unwrap_or(1);
@@ -117,6 +122,7 @@ impl BfTreeDatabase {
             snapshot_lock: Arc::new(Mutex::new(())),
             commit_count: Arc::new(AtomicU64::new(0)),
             snapshot_interval,
+            durability,
         })
     }
 
@@ -127,6 +133,7 @@ impl BfTreeDatabase {
     ) -> Result<Self, BfTreeError> {
         let verify_mode = config.verify_mode.clone();
         let snapshot_interval = config.snapshot_interval;
+        let durability = config.durability;
         let adapter = BfTreeAdapter::open(config)?;
         Ok(Self {
             adapter: Arc::new(adapter),
@@ -137,6 +144,7 @@ impl BfTreeDatabase {
             snapshot_lock: Arc::new(Mutex::new(())),
             commit_count: Arc::new(AtomicU64::new(0)),
             snapshot_interval,
+            durability,
         })
     }
 
@@ -144,6 +152,7 @@ impl BfTreeDatabase {
     pub fn open_with_cdc(config: BfTreeConfig, cdc_config: CdcConfig) -> Result<Self, BfTreeError> {
         let verify_mode = config.verify_mode.clone();
         let snapshot_interval = config.snapshot_interval;
+        let durability = config.durability;
         let adapter = BfTreeAdapter::open_from_snapshot(config)?;
         let next_id = recover_next_txn_id(&adapter).unwrap_or(1);
         Ok(Self {
@@ -155,6 +164,7 @@ impl BfTreeDatabase {
             snapshot_lock: Arc::new(Mutex::new(())),
             commit_count: Arc::new(AtomicU64::new(0)),
             snapshot_interval,
+            durability,
         })
     }
 
@@ -186,6 +196,7 @@ impl BfTreeDatabase {
             verify_mode: self.verify_mode.clone(),
             buffer: Mutex::new(WriteBuffer::new()),
             committed: core::sync::atomic::AtomicBool::new(false),
+            durability: self.durability,
         }
     }
 
@@ -193,9 +204,14 @@ impl BfTreeDatabase {
     ///
     /// Reads always see the latest state (no snapshot isolation).
     pub fn begin_read(&self) -> BfTreeDatabaseReadTxn {
+        // Buffers start empty; `get()` grows them on first use. This keeps
+        // `begin_read()` allocation-free for callers that only use
+        // `open_table()` or `contains_key()`.
         BfTreeDatabaseReadTxn {
             adapter: self.adapter.clone(),
             verify_mode: self.verify_mode.clone(),
+            read_buf: Vec::new(),
+            key_buf: Vec::new(),
         }
     }
 
@@ -343,6 +359,30 @@ pub(crate) fn encode_table_key(table_name: &str, kind: TableKind, key_bytes: &[u
     buf
 }
 
+/// Encode a table key into a pre-allocated buffer, returning the encoded length.
+///
+/// Zero-allocation alternative to [`encode_table_key`] for hot read paths.
+/// The buffer must be at least `encoded_table_key_len(table_name, key_bytes)` bytes.
+pub(crate) fn encode_table_key_into(
+    buf: &mut [u8],
+    table_name: &str,
+    kind: TableKind,
+    key_bytes: &[u8],
+) -> usize {
+    let name_bytes = table_name.as_bytes();
+    debug_assert!(u16::try_from(name_bytes.len()).is_ok());
+    #[allow(clippy::cast_possible_truncation)]
+    let name_len = name_bytes.len() as u16;
+    let prefix_len = 2 + name_bytes.len() + 1;
+    let total = prefix_len + key_bytes.len();
+    debug_assert!(buf.len() >= total);
+    buf[..2].copy_from_slice(&name_len.to_le_bytes());
+    buf[2..2 + name_bytes.len()].copy_from_slice(name_bytes);
+    buf[2 + name_bytes.len()] = kind as u8;
+    buf[prefix_len..total].copy_from_slice(key_bytes);
+    total
+}
+
 pub(crate) fn table_prefix(table_name: &str, kind: TableKind) -> Vec<u8> {
     let name_bytes = table_name.as_bytes();
     debug_assert!(u16::try_from(name_bytes.len()).is_ok());
@@ -436,6 +476,8 @@ pub struct BfTreeDatabaseWriteTxn {
     pub(crate) buffer: Mutex<WriteBuffer>,
     /// Track whether buffer has been flushed (committed).
     committed: core::sync::atomic::AtomicBool,
+    /// Durability mode for WAL fsync behavior.
+    durability: super::config::DurabilityMode,
 }
 
 impl BfTreeDatabaseWriteTxn {
@@ -622,7 +664,7 @@ impl BfTreeDatabaseWriteTxn {
             self.stage_txn_id_into_buffer(&mut buffer, commit_id)?;
             // Flush write buffer to BfTree. Each entry goes through WAL
             // append_and_wait(), so data is durable when flush returns.
-            buffer.flush(&self.adapter)?;
+            buffer.flush(&self.adapter, self.durability)?;
         }
         self.committed.store(true, Ordering::SeqCst);
 
@@ -652,7 +694,7 @@ impl BfTreeDatabaseWriteTxn {
             let mut buffer = self.buffer.lock();
             let commit_id = self.stage_cdc_into_buffer(&mut buffer)?;
             self.stage_txn_id_into_buffer(&mut buffer, commit_id)?;
-            buffer.flush(&self.adapter)?;
+            buffer.flush(&self.adapter, self.durability)?;
         }
         self.committed.store(true, Ordering::SeqCst);
         let path = {
@@ -862,6 +904,10 @@ pub struct BfTreeDatabaseReadTxn {
     pub(crate) adapter: Arc<BfTreeAdapter>,
     /// Per-entry checksum verification mode.
     pub(crate) verify_mode: Arc<VerifyMode>,
+    /// Reusable buffer for bf-tree read output, avoiding per-read heap allocation.
+    read_buf: Vec<u8>,
+    /// Reusable buffer for encoded key, avoiding per-read heap allocation.
+    key_buf: Vec<u8>,
 }
 
 impl BfTreeDatabaseReadTxn {
@@ -918,18 +964,30 @@ impl BfTreeDatabaseReadTxn {
     /// Read a typed value from the specified table.
     ///
     /// Returns the raw value bytes. Use `V::from_bytes()` to deserialize.
+    /// Buffers are lazily allocated on first call and reused across subsequent
+    /// reads, amortizing allocation cost over multiple lookups.
     pub fn get<K: Key + 'static, V: Value + 'static>(
-        &self,
+        &mut self,
         definition: &TableDefinition<K, V>,
         key: &K::SelfType<'_>,
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key =
-            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
-        let max_val = self.adapter.inner().config().get_cb_max_record_size();
-        let mut buf = vec![0u8; max_val];
-        match self.adapter.read(&encoded_key, &mut buf) {
-            Ok(len) => Ok(Some(buf[..len as usize].to_vec())),
+        let needed_key_len = 2 + definition.name().len() + 1 + key_bytes.as_ref().len();
+        if self.key_buf.len() < needed_key_len {
+            self.key_buf.resize(needed_key_len, 0);
+        }
+        if self.read_buf.is_empty() {
+            let max_record = self.adapter.inner().config().get_cb_max_record_size();
+            self.read_buf.resize(max_record, 0);
+        }
+        let enc_len = encode_table_key_into(
+            &mut self.key_buf,
+            definition.name(),
+            TableKind::Regular,
+            key_bytes.as_ref(),
+        );
+        match self.adapter.read(&self.key_buf[..enc_len], &mut self.read_buf) {
+            Ok(len) => Ok(Some(self.read_buf[..len as usize].to_vec())),
             Err(BfTreeError::NotFound | BfTreeError::Deleted) => Ok(None),
             Err(e) => Err(e),
         }
@@ -1174,7 +1232,7 @@ mod tests {
         wtxn.insert(&USERS, &"bob", &99u64).unwrap();
         wtxn.commit().unwrap();
 
-        let rtxn = db.begin_read();
+        let mut rtxn = db.begin_read();
         let alice_bytes = rtxn.get::<&str, u64>(&USERS, &"alice").unwrap().unwrap();
         let alice_val = u64::from_le_bytes(alice_bytes.as_slice().try_into().unwrap());
         assert_eq!(alice_val, 42);
@@ -1193,7 +1251,7 @@ mod tests {
         wtxn.insert(&SCORES, &"key", &200u64).unwrap();
         wtxn.commit().unwrap();
 
-        let rtxn = db.begin_read();
+        let mut rtxn = db.begin_read();
         let users_val = rtxn.get::<&str, u64>(&USERS, &"key").unwrap().unwrap();
         let scores_val = rtxn.get::<&str, u64>(&SCORES, &"key").unwrap().unwrap();
 
@@ -1212,7 +1270,7 @@ mod tests {
         wtxn.delete(&USERS, &"temp");
         wtxn.commit().unwrap();
 
-        let rtxn = db.begin_read();
+        let mut rtxn = db.begin_read();
         assert!(rtxn.get::<&str, u64>(&USERS, &"temp").unwrap().is_none());
     }
 
@@ -1646,7 +1704,7 @@ mod tests {
         drop(ttl);
 
         // Now read back from each table type and verify isolation.
-        let reg2 = wtxn.open_table(regular_def).unwrap();
+        let mut reg2 = wtxn.open_table(regular_def).unwrap();
         let reg_val = reg2.get(&"key1").unwrap().unwrap();
         assert_eq!(
             u64::from_le_bytes(reg_val.as_slice().try_into().unwrap()),

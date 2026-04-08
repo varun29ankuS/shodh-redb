@@ -201,7 +201,7 @@ mod tests {
         assert_eq!(count, 3);
 
         let rtxn = db.begin_read();
-        let t = rtxn.open_table(DATA).unwrap();
+        let mut t = rtxn.open_table(DATA).unwrap();
         assert!(t.get(&"a").unwrap().is_some());
         assert!(t.get(&"b").unwrap().is_some());
         assert!(t.get(&"c").unwrap().is_some());
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(count, 4);
 
         let rtxn = db.begin_read();
-        let t = rtxn.open_table(DATA).unwrap();
+        let mut t = rtxn.open_table(DATA).unwrap();
         for i in 0u64..4 {
             let key = alloc::format!("key_{i}");
             assert!(t.get(&key.as_str()).unwrap().is_some());

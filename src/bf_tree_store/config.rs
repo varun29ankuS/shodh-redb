@@ -47,6 +47,26 @@ pub struct BfTreeConfig {
     /// fsync). Set to 0 to disable automatic snapshots entirely (you must
     /// call `BfTreeDatabase::snapshot()` manually, or accept longer recovery).
     pub snapshot_interval: u64,
+    /// Durability mode controlling when WAL data is fsynced. Default: `Sync`.
+    pub durability: DurabilityMode,
+}
+
+/// Controls when WAL data is fsynced to disk.
+///
+/// Determines the durability-performance trade-off for committed data.
+/// All modes still write WAL entries for crash recovery — the difference
+/// is when those entries are fsynced to stable storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurabilityMode {
+    /// Every commit fsyncs the WAL. No data loss on crash. (Default)
+    Sync,
+    /// WAL writes go to OS page cache. The WAL background thread fsyncs
+    /// every `wal_flush_interval_ms`. Up to one flush interval of committed
+    /// data may be lost on crash. Matches `RocksDB`'s default behavior.
+    Periodic,
+    /// No fsync at all. For benchmarks and ephemeral workloads only.
+    /// All committed data is lost on crash.
+    NoSync,
 }
 
 /// Storage backend for Bf-Tree.
@@ -78,6 +98,7 @@ impl Default for BfTreeConfig {
             backend: BfTreeBackend::Memory,
             verify_mode: VerifyMode::None,
             snapshot_interval: 100,
+            durability: DurabilityMode::Sync,
         }
     }
 }
@@ -133,6 +154,7 @@ impl BfTreeConfig {
             backend: BfTreeBackend::Std,
             verify_mode: VerifyMode::None,
             snapshot_interval: 100,
+            durability: DurabilityMode::Sync,
         }
     }
 

@@ -182,6 +182,23 @@ Multi-signal ranked fusion: semantic similarity + temporal recency + causal rele
 
 ## Performance
 
+### Database benchmarks
+
+Measured on a single machine, single-threaded (except mixed workload: 4 readers + 1 writer). All engines use default durability (fsync per commit) unless noted.
+
+| Workload | BfTree (sync) | BfTree (periodic fsync) | RocksDB | Notes |
+|---|---|---|---|---|
+| Sequential writes (50K keys) | 88K ops/s | 1.55M ops/s | 91K ops/s | BfTree periodic mode batches fsync |
+| Point reads (5K keys) | 600K ops/s | -- | 1.9M ops/s | RocksDB block cache advantage |
+| Mixed 4R+1W p99 latency | 33.9 us | 42.6 us | 6.9 us | Reader-friendly RwLock, no cascading stalls |
+| Read-only p99 latency | 1.2 us | -- | 0.8 us | Both sub-microsecond at p50 |
+
+**Where BfTree wins**: concurrent multi-writer (lock-free readers, no single-writer bottleneck), periodic durability throughput (17x sync mode), embedded simplicity (no background compaction, no LSM write amplification).
+
+**Where RocksDB wins**: raw point-read throughput (mature block cache, bloom filters), mixed p99 latency (optimized for read-heavy OLTP).
+
+**Trade-off**: BfTree is designed for AI agent workloads -- write-heavy, concurrent, embedded. RocksDB is a general-purpose LSM with 10+ years of optimization. The gap narrows under multi-writer contention where RocksDB's single-writer mutex becomes the bottleneck.
+
 ### SIMD acceleration
 
 Distance functions (`dot_product`, `euclidean_distance_sq`, `cosine_similarity`, `manhattan_distance`, `hamming_distance`) use hand-written AVX2 intrinsics on x86_64 with runtime feature detection and scalar fallback.

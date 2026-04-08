@@ -122,7 +122,7 @@ impl WriteAheadLogInner {
             eprintln!("bf-tree: WAL flush failed: {_e}");
         }
 
-        // Always advance — append-only WAL. Old in-place rewrite caused
+        // Always advance -- append-only WAL. Old in-place rewrite caused
         // degenerate read-modify-write cycles on NTFS when rewriting the same
         // file offset repeatedly for small flushes.
         self.file_offset += self.buffer_cursor;
@@ -259,7 +259,7 @@ impl WriteAheadLog {
         let required_bytes = std::mem::size_of::<LogHeader>() + log_entry.log_size();
         let remaining = inner.buffer.buffer_size - inner.buffer_cursor;
         if required_bytes > remaining {
-            // Buffer full — flush directly (caller-side) then retry.
+            // Buffer full -- flush directly (caller-side) then retry.
             inner.flush();
             self.flushed_cond.notify_all();
             drop(inner);
@@ -301,7 +301,7 @@ impl WriteAheadLog {
         let required_bytes = std::mem::size_of::<LogHeader>() + log_entry.log_size();
         let remaining = inner.buffer.buffer_size - inner.buffer_cursor;
         if required_bytes > remaining {
-            // Buffer full — flush directly (caller-side) then retry.
+            // Buffer full -- flush directly (caller-side) then retry.
             inner.flush();
             self.flushed_cond.notify_all();
             drop(inner);

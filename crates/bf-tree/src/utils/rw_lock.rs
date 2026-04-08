@@ -370,7 +370,9 @@ mod tests {
 
         // Under reader-friendly semantics, try_read should succeed even
         // though a writer is waiting.
-        let r2 = lock.try_read().expect("reader must proceed while writer is waiting");
+        let r2 = lock
+            .try_read()
+            .expect("reader must proceed while writer is waiting");
         assert_eq!(*r2, 0);
 
         // Release both readers so the writer can proceed.

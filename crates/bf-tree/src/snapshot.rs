@@ -17,17 +17,17 @@ use std::os::windows::fs::FileExt;
 use thread_local::ThreadLocal;
 
 use crate::{
-    BfTree, Config, StorageBackend, WalReader,
     circular_buffer::{CircularBuffer, TombstoneHandle},
     error::{BfTreeError, IoErrorKind},
     fs::VfsImpl,
-    nodes::{DISK_PAGE_SIZE, INNER_NODE_SIZE, InnerNode, InnerNodeBuilder, PageID},
+    nodes::{InnerNode, InnerNodeBuilder, PageID, DISK_PAGE_SIZE, INNER_NODE_SIZE},
     range_scan::ScanReturnField,
-    storage::{LeafStorage, PageLocation, PageTable, make_vfs},
+    storage::{make_vfs, LeafStorage, PageLocation, PageTable},
     sync::atomic::AtomicU64,
     tree::eviction_callback,
-    utils::{BfsVisitor, NodeInfo, inner_lock::ReadGuard},
+    utils::{inner_lock::ReadGuard, BfsVisitor, NodeInfo},
     wal::{LogEntry, LogEntryImpl, WriteAheadLog},
+    BfTree, Config, StorageBackend, WalReader,
 };
 
 const BF_TREE_MAGIC_BEGIN: &[u8; 16] = b"BF-TREE-V0-BEGIN";

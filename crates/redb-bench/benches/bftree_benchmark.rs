@@ -1468,7 +1468,10 @@ fn bench_throughput_at_scale_periodic() {
         let bf_vs_bt = bf_write_results[i].1 / bt_write_results[i].1;
         table.add_row(vec![
             Cell::new(format!("{}K", SCALE_LEVELS[i] / 1000)),
-            Cell::new(format!("{:.0} ({bf_vs_rk:.1}x RocksDB, {bf_vs_bt:.1}x BTree)", bf_write_results[i].1)),
+            Cell::new(format!(
+                "{:.0} ({bf_vs_rk:.1}x RocksDB, {bf_vs_bt:.1}x BTree)",
+                bf_write_results[i].1
+            )),
             Cell::new(format!("{:.0}", bt_write_results[i].1)),
             Cell::new(format!("{:.0}", rk_write_results[i].1)),
         ]);

@@ -1067,7 +1067,10 @@ impl BfTree {
 
     /// Batch delete pre-sorted keys without per-entry WAL fsync.
     /// Keys MUST be sorted in ascending order.
-    pub fn batch_delete_sorted_deferred_wal(&self, keys: &[&[u8]]) -> Result<(), crate::BfTreeError> {
+    pub fn batch_delete_sorted_deferred_wal(
+        &self,
+        keys: &[&[u8]],
+    ) -> Result<(), crate::BfTreeError> {
         for &key in keys {
             self.delete_deferred_wal(key);
         }

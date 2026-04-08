@@ -440,7 +440,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
             key_bytes.as_ref(),
         );
         let checksumming = self.verify_mode.is_enabled();
-        match self.adapter.read(&self.key_buf[..enc_len], &mut self.read_buf) {
+        match self
+            .adapter
+            .read(&self.key_buf[..enc_len], &mut self.read_buf)
+        {
             Ok(len) => {
                 let raw = &self.read_buf[..len as usize];
                 if checksumming {

@@ -986,7 +986,10 @@ impl BfTreeDatabaseReadTxn {
             TableKind::Regular,
             key_bytes.as_ref(),
         );
-        match self.adapter.read(&self.key_buf[..enc_len], &mut self.read_buf) {
+        match self
+            .adapter
+            .read(&self.key_buf[..enc_len], &mut self.read_buf)
+        {
             Ok(len) => Ok(Some(self.read_buf[..len as usize].to_vec())),
             Err(BfTreeError::NotFound | BfTreeError::Deleted) => Ok(None),
             Err(e) => Err(e),

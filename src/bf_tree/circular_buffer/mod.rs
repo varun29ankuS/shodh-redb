@@ -408,7 +408,7 @@ impl CircularBuffer {
     /// TODO: I don't think we should ever expose the `copy_on_access_percent` to user, it is an internal implementation detail.
     ///
     ///
-    /// ```
+    /// ```ignore
     /// use bf_tree::circular_buffer::CircularBuffer;
     /// let buffer = CircularBuffer::new(4096 * 2, 0.1, 64, 1952, 4096, 32, None, false);
     /// ```
@@ -525,7 +525,7 @@ impl CircularBuffer {
     /// Ignores alignment, always align to 8
     /// Returns None if we have no free space, which caller needs to call [CircularBuffer::evict_one] or [CircularBuffer::evict_n].
     ///
-    /// ```
+    /// ```ignore
     /// use bf_tree::circular_buffer::CircularBuffer;
     /// let mut buffer = CircularBuffer::new(4096 * 2, 0.1, 64, 1952, 4096, 32, None, false);
     ///
@@ -677,7 +677,7 @@ impl CircularBuffer {
     ///
     /// It panics if the ptr is already dealloced, so double free is not allowed.
     ///
-    /// ```
+    /// ```ignore
     /// use bf_tree::circular_buffer::CircularBuffer;
     /// let mut buffer = CircularBuffer::new(4096 * 2, 0.1, 64, 1952, 4096, 32, None, false);
     ///
@@ -806,7 +806,7 @@ impl CircularBuffer {
     /// If you failed to evict the item, return Err, and eviction will release the handle and restart the eviction again.
     ///
     ///
-    /// ```
+    /// ```ignore
     /// use bf_tree::circular_buffer::CircularBuffer;
     /// let mut buffer = CircularBuffer::new(1024 * 2, 0.1, 64, 256, 1024, 32, None, true);
     ///

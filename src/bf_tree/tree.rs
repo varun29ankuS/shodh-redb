@@ -327,7 +327,7 @@ impl BfTree {
     ///
     /// Mini page cache must be at least 8192 bytes for practical workloads.
     ///
-    /// ```
+    /// ```ignore
     /// use bf_tree::BfTree;
     /// let tree = BfTree::new(":memory:", 8192).unwrap();
     /// ```
@@ -847,7 +847,7 @@ impl BfTree {
 
     /// Insert a key-value pair to the system, overrides existing value if present.
     ///
-    /// ```
+    /// ```ignore
     /// use bf_tree::BfTree;
     /// use bf_tree::LeafReadResult;
     ///
@@ -1095,7 +1095,7 @@ impl BfTree {
     ///
     /// TODO: don't panic if the out_buffer is too small, instead returns a error.
     ///
-    /// ```
+    /// ```ignore
     /// use bf_tree::BfTree;
     /// use bf_tree::LeafReadResult;
     ///

@@ -55,7 +55,7 @@ fuzz_target!(|ops: Vec<Op>| {
                     pending.insert(key.to_vec(), Some(value.to_vec()));
                     needs_commit = true;
                 }
-                // Intentionally drop without commit — tests abort path
+                // Intentionally drop without commit -- tests abort path
                 if !needs_commit {
                     continue;
                 }
@@ -108,10 +108,10 @@ fuzz_target!(|ops: Vec<Op>| {
                         }
                     }
                     Ok(None) => {
-                        // Key not found — consistent with model if absent
+                        // Key not found -- consistent with model if absent
                     }
                     Err(_) => {
-                        // I/O or internal error — acceptable in fuzzing
+                        // I/O or internal error -- acceptable in fuzzing
                     }
                 }
             }

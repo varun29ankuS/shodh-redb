@@ -54,7 +54,7 @@ pub struct BfTreeConfig {
 /// Controls when WAL data is fsynced to disk.
 ///
 /// Determines the durability-performance trade-off for committed data.
-/// All modes still write WAL entries for crash recovery — the difference
+/// All modes still write WAL entries for crash recovery -- the difference
 /// is when those entries are fsynced to stable storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurabilityMode {

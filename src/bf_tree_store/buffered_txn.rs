@@ -223,7 +223,7 @@ impl WriteBuffer {
 
         // Phase 2: Separate inserts and deletes, apply in batch.
         //
-        // BTreeMap iteration order is sorted by key — exactly what
+        // BTreeMap iteration order is sorted by key -- exactly what
         // batch_insert_sorted_deferred_wal needs for leaf caching.
         let mut insert_pairs: Vec<(&[u8], &[u8])> = Vec::new();
         let mut delete_keys: Vec<&[u8]> = Vec::new();
@@ -252,7 +252,7 @@ impl WriteBuffer {
         if !insert_pairs.is_empty()
             && let Err(flush_err) = adapter.batch_insert_sorted_deferred_wal(&insert_pairs)
         {
-            // Batch insert failed — entries up to the failure point may have been
+            // Batch insert failed -- entries up to the failure point may have been
             // applied. Best-effort rollback: delete all intended insert keys.
             let flushed_inserts: Vec<Vec<u8>> =
                 insert_pairs.iter().map(|(k, _)| k.to_vec()).collect();

@@ -1213,7 +1213,7 @@ fn bench_throughput_at_scale() {
             rk_filled = batch_end;
         }
 
-        // Measure read throughput — BfTree
+        // Measure read throughput -- BfTree
         let mut read_rng = fastrand::Rng::with_seed(42);
         let start = Instant::now();
         for _ in 0..SCALE_SAMPLE_OPS {
@@ -1223,7 +1223,7 @@ fn bench_throughput_at_scale() {
         let bf_read_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
         bf_read_results.push((level, bf_read_ops));
 
-        // Measure read throughput — BTree
+        // Measure read throughput -- BTree
         let mut read_rng = fastrand::Rng::with_seed(42);
         let start = Instant::now();
         for _ in 0..SCALE_SAMPLE_OPS {
@@ -1233,7 +1233,7 @@ fn bench_throughput_at_scale() {
         let bt_read_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
         bt_read_results.push((level, bt_read_ops));
 
-        // Measure read throughput — RocksDB
+        // Measure read throughput -- RocksDB
         let mut read_rng = fastrand::Rng::with_seed(42);
         let start = Instant::now();
         for _ in 0..SCALE_SAMPLE_OPS {
@@ -1243,7 +1243,7 @@ fn bench_throughput_at_scale() {
         let rk_read_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
         rk_read_results.push((level, rk_read_ops));
 
-        // Measure write throughput — BfTree
+        // Measure write throughput -- BfTree
         let mut write_rng = fastrand::Rng::with_seed(77);
         let start = Instant::now();
         let mut done = 0;
@@ -1259,7 +1259,7 @@ fn bench_throughput_at_scale() {
         let bf_write_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
         bf_write_results.push((level, bf_write_ops));
 
-        // Measure write throughput — BTree
+        // Measure write throughput -- BTree
         let mut write_rng = fastrand::Rng::with_seed(77);
         let start = Instant::now();
         let mut done = 0;
@@ -1275,7 +1275,7 @@ fn bench_throughput_at_scale() {
         let bt_write_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
         bt_write_results.push((level, bt_write_ops));
 
-        // Measure write throughput — RocksDB
+        // Measure write throughput -- RocksDB
         let mut write_rng = fastrand::Rng::with_seed(77);
         let start = Instant::now();
         let mut done = 0;
@@ -1317,7 +1317,7 @@ fn bench_throughput_at_scale() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Throughput at scale (Periodic durability — matches RocksDB default)
+// 8. Throughput at scale (Periodic durability -- matches RocksDB default)
 // ---------------------------------------------------------------------------
 
 fn bench_throughput_at_scale_periodic() {
@@ -1402,7 +1402,7 @@ fn bench_throughput_at_scale_periodic() {
             rk_filled = batch_end;
         }
 
-        // Measure write throughput — BfTree (periodic)
+        // Measure write throughput -- BfTree (periodic)
         let mut write_rng = fastrand::Rng::with_seed(77);
         let start = Instant::now();
         let mut done = 0;
@@ -1418,7 +1418,7 @@ fn bench_throughput_at_scale_periodic() {
         let bf_write_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
         bf_write_results.push((level, bf_write_ops));
 
-        // Measure write throughput — BTree (no-sync)
+        // Measure write throughput -- BTree (no-sync)
         let mut write_rng = fastrand::Rng::with_seed(77);
         let start = Instant::now();
         let mut done = 0;
@@ -1434,7 +1434,7 @@ fn bench_throughput_at_scale_periodic() {
         let bt_write_ops = SCALE_SAMPLE_OPS as f64 / start.elapsed().as_secs_f64();
         bt_write_results.push((level, bt_write_ops));
 
-        // Measure write throughput — RocksDB (no-sync)
+        // Measure write throughput -- RocksDB (no-sync)
         let mut write_rng = fastrand::Rng::with_seed(77);
         let start = Instant::now();
         let mut done = 0;

@@ -24,7 +24,7 @@ use shuttle::rand::{Rng, thread_rng};
 use rand_08::{Rng, thread_rng};
 
 fn make_key(key: u32, len: usize) -> Vec<u8> {
-    let bytes = key.to_ne_bytes();
+    let bytes = key.to_le_bytes();
     bytes.into_iter().cycle().take(len).collect::<Vec<_>>()
 }
 

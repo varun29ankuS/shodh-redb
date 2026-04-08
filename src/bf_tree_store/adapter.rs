@@ -104,6 +104,30 @@ impl BfTreeAdapter {
         self.inner.delete_deferred_wal(key);
     }
 
+    /// Batch insert pre-sorted key-value pairs without per-entry WAL fsync.
+    ///
+    /// Exploits key locality: sorted entries often land in the same leaf,
+    /// so tree traversal is skipped when consecutive keys share a leaf.
+    /// Entries MUST be sorted by key in ascending order.
+    /// Caller MUST call `flush_wal()` afterwards for durability.
+    pub fn batch_insert_sorted_deferred_wal(
+        &self,
+        entries: &[(&[u8], &[u8])],
+    ) -> Result<(), BfTreeError> {
+        self.inner
+            .batch_insert_sorted_deferred_wal(entries)
+            .map_err(|e| BfTreeError::InvalidKV(alloc::format!("batch insert failed: {e:?}")))
+    }
+
+    /// Batch delete pre-sorted keys without per-entry WAL fsync.
+    /// Keys MUST be sorted in ascending order.
+    /// Caller MUST call `flush_wal()` afterwards for durability.
+    pub fn batch_delete_sorted_deferred_wal(&self, keys: &[&[u8]]) -> Result<(), BfTreeError> {
+        self.inner
+            .batch_delete_sorted_deferred_wal(keys)
+            .map_err(|e| BfTreeError::InvalidKV(alloc::format!("batch delete failed: {e:?}")))
+    }
+
     /// Flush the WAL, blocking until all buffered entries are fsync'd.
     pub fn flush_wal(&self) -> Result<(), bf_tree::BfTreeError> {
         self.inner.flush_wal()

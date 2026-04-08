@@ -93,6 +93,13 @@ pub enum StorageBackend {
     Memory,
     #[cfg(feature = "std")]
     Std,
+    /// Write-through mode: every write is durable without explicit fsync.
+    ///
+    /// Uses `FILE_FLAG_WRITE_THROUGH` on Windows and `O_DSYNC` on Linux.
+    /// Ideal for WAL files where per-write durability is required and the
+    /// cost of `FlushFileBuffers()`/`fdatasync()` dominates latency.
+    #[cfg(feature = "std")]
+    StdWriteThrough,
     #[cfg(all(feature = "std", target_os = "linux"))]
     StdDirect,
     #[cfg(all(feature = "std", target_os = "linux"))]
@@ -561,7 +568,7 @@ impl WalConfig {
         Self {
             file_path: file_path.as_ref().to_path_buf(),
             flush_interval: Duration::from_millis(1),
-            segment_size: 1024 * 1024 * 1024,
+            segment_size: 64 * 1024 * 1024,
             storage_backend: StorageBackend::Std,
         }
     }
@@ -572,7 +579,12 @@ impl WalConfig {
         self
     }
 
-    /// Default: 1MB
+    /// Default: 64 MiB
+    ///
+    /// Each WAL segment is a contiguous buffer that is flushed to disk. Only the
+    /// used portion is written (not the full allocation), so a larger segment
+    /// reduces the frequency of segment rollovers at the cost of higher virtual
+    /// memory usage.
     pub fn segment_size(&mut self, size: usize) -> &mut Self {
         self.segment_size = size;
         self

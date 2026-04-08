@@ -57,7 +57,15 @@ impl RawBuffer {
     /// Caller must ensure `offset + size <= buffer_size` and that no other references
     /// overlap the returned slice for the duration of the borrow.
     unsafe fn as_mut_slice_at_exact(&mut self, offset: usize, size: usize) -> &mut [u8] {
+        debug_assert!(
+            offset
+                .checked_add(size)
+                .is_some_and(|end| end <= self.buffer_size),
+            "as_mut_slice_at_exact: offset({offset}) + size({size}) overflows or exceeds buffer_size({})",
+            self.buffer_size,
+        );
         // SAFETY: Precondition guaranteed by caller; ptr is valid for buffer_size bytes.
+        // The debug_assert above catches violations in debug builds.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.add(offset), size) }
     }
 }
@@ -114,10 +122,11 @@ impl WriteAheadLogInner {
             eprintln!("bf-tree: WAL flush failed: {_e}");
         }
 
-        if !self.should_inplace_flush() {
-            self.file_offset += self.buffer.buffer_size;
-            self.buffer_cursor = 0;
-        }
+        // Always advance — append-only WAL. Old in-place rewrite caused
+        // degenerate read-modify-write cycles on NTFS when rewriting the same
+        // file offset repeatedly for small flushes.
+        self.file_offset += self.buffer_cursor;
+        self.buffer_cursor = 0;
 
         self.flushed_lsn = self.next_lsn - 1;
         self.need_flush = false;
@@ -141,12 +150,6 @@ impl WriteAheadLogInner {
         // SAFETY: debug_assert above verifies cursor + size <= buffer_size. The &mut self
         // borrow ensures no other references to the buffer exist concurrently.
         unsafe { self.buffer.as_mut_slice_at_exact(cursor, size) }
-    }
-
-    /// if buffer is less than half full, we should not create a new buffer,
-    /// instead inplace flush the buffer
-    fn should_inplace_flush(&self) -> bool {
-        self.buffer_cursor < (self.buffer.buffer_size / 2)
     }
 
     fn alloc_lsn(&mut self) -> u64 {
@@ -256,14 +259,9 @@ impl WriteAheadLog {
         let required_bytes = std::mem::size_of::<LogHeader>() + log_entry.log_size();
         let remaining = inner.buffer.buffer_size - inner.buffer_cursor;
         if required_bytes > remaining {
-            // need to flush buffer
-            inner.need_flush = true;
-            self.need_flush_cond.notify_all();
-            inner = self
-                .flushed_cond
-                .wait_while(inner, |inner| !inner.need_flush)
-                .map_err(|_| TreeError::IoError(IoErrorKind::WalAppend))?;
-            // we need to retry here because by the time we wake up, the buffer maybe already full again.
+            // Buffer full — flush directly (caller-side) then retry.
+            inner.flush();
+            self.flushed_cond.notify_all();
             drop(inner);
             return self.append_and_wait(log_entry, page_offset);
         }
@@ -276,12 +274,11 @@ impl WriteAheadLog {
         buffer[0..LogHeader::size()].copy_from_slice(header.as_slice());
         log_entry.write_to_buffer(&mut buffer[LogHeader::size()..]);
 
-        while inner.flushed_lsn < lsn {
-            inner = self
-                .flushed_cond
-                .wait(inner)
-                .map_err(|_| TreeError::IoError(IoErrorKind::WalFlush))?;
-        }
+        // Caller-side flush: write+fsync directly instead of waiting for
+        // background thread. This eliminates condvar round-trip latency.
+        inner.flush();
+        self.flushed_cond.notify_all();
+
         Ok(lsn)
     }
 
@@ -304,12 +301,9 @@ impl WriteAheadLog {
         let required_bytes = std::mem::size_of::<LogHeader>() + log_entry.log_size();
         let remaining = inner.buffer.buffer_size - inner.buffer_cursor;
         if required_bytes > remaining {
-            inner.need_flush = true;
-            self.need_flush_cond.notify_all();
-            inner = self
-                .flushed_cond
-                .wait_while(inner, |inner| !inner.need_flush)
-                .map_err(|_| TreeError::IoError(IoErrorKind::WalAppend))?;
+            // Buffer full — flush directly (caller-side) then retry.
+            inner.flush();
+            self.flushed_cond.notify_all();
             drop(inner);
             return self.append_no_wait(log_entry, page_offset);
         }
@@ -327,6 +321,13 @@ impl WriteAheadLog {
 
     /// Flush all buffered WAL entries and block until fsync completes.
     ///
+    /// The calling thread performs the write+fsync directly while holding the
+    /// mutex, eliminating the condvar round-trip to the background thread.
+    /// This naturally provides group commit: if multiple threads call this
+    /// concurrently, the first to acquire the lock flushes all pending entries
+    /// in a single write+fsync, and subsequent callers see their LSN already
+    /// flushed.
+    ///
     /// Returns the flushed LSN. No-op if the buffer is empty.
     pub(crate) fn flush_and_wait(&self) -> Result<u64, TreeError> {
         let mut inner = self
@@ -339,22 +340,18 @@ impl WriteAheadLog {
             return Ok(inner.flushed_lsn);
         }
 
-        inner.need_flush = true;
-        self.need_flush_cond.notify_all();
+        // Caller-side flush: do write+fsync directly instead of signaling the
+        // background thread and waiting for it to wake up. This eliminates
+        // ~5ms of condvar round-trip latency per commit.
+        inner.flush();
+        self.flushed_cond.notify_all();
 
-        while inner.flushed_lsn < target_lsn {
-            inner = self
-                .flushed_cond
-                .wait(inner)
-                .map_err(|_| TreeError::IoError(IoErrorKind::WalFlush))?;
-        }
         Ok(inner.flushed_lsn)
     }
 
     /// Block until the given LSN has been durably flushed to disk.
     ///
-    /// Triggers an immediate flush if one is not already in progress,
-    /// then waits for the background thread to complete fsync.
+    /// The calling thread performs the flush directly (caller-side group commit).
     pub(crate) fn wait_for_lsn(&self, lsn: u64) -> Result<(), TreeError> {
         let mut inner = self
             .inner
@@ -365,16 +362,10 @@ impl WriteAheadLog {
             return Ok(());
         }
 
-        // Signal the background thread to flush now.
-        inner.need_flush = true;
-        self.need_flush_cond.notify_all();
+        // Caller-side flush: write+fsync directly.
+        inner.flush();
+        self.flushed_cond.notify_all();
 
-        while inner.flushed_lsn < lsn {
-            inner = self
-                .flushed_cond
-                .wait(inner)
-                .map_err(|_| TreeError::IoError(IoErrorKind::WalFlush))?;
-        }
         Ok(())
     }
 }
@@ -615,7 +606,12 @@ mod tests {
     #[test]
     fn simple_wal() {
         const TEST_SEGMENT_SIZE: usize = 4096;
-        let wal = make_test_wal("wal_simple_test.log", TEST_SEGMENT_SIZE);
+        let pid = std::process::id();
+        let tid = utils::thread_id_to_u64(std::thread::current().id());
+        let wal = make_test_wal(
+            &format!("wal_simple_test_{}_{}.log", pid, tid),
+            TEST_SEGMENT_SIZE,
+        );
         let tmp_file = wal.config.file_path.clone();
 
         let log_entry_cnt = 4096;

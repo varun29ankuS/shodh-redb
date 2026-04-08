@@ -214,7 +214,7 @@ mod tests {
         wtxn.commit().unwrap();
 
         let rtxn = db.begin_read();
-        let t = rtxn.open_table(TABLE).unwrap();
+        let mut t = rtxn.open_table(TABLE).unwrap();
         let val = t.get(&"hello").unwrap().unwrap();
         assert_eq!(u64::from_le_bytes(val[..8].try_into().unwrap()), 42);
     }

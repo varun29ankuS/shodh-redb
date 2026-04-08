@@ -63,7 +63,7 @@ fn crud_insert_get_update_delete() {
 
     // Read back
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(USERS).unwrap();
+    let mut t = rtxn.open_table(USERS).unwrap();
     assert_eq!(t.get(&"alice").unwrap().unwrap(), b"engineer");
     assert_eq!(t.get(&"bob").unwrap().unwrap(), b"designer");
     assert_eq!(t.get(&"carol").unwrap().unwrap(), b"pm");
@@ -77,7 +77,7 @@ fn crud_insert_get_update_delete() {
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(USERS).unwrap();
+    let mut t = rtxn.open_table(USERS).unwrap();
     assert_eq!(t.get(&"alice").unwrap().unwrap(), b"staff engineer");
 
     // Delete
@@ -88,7 +88,7 @@ fn crud_insert_get_update_delete() {
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(USERS).unwrap();
+    let mut t = rtxn.open_table(USERS).unwrap();
     assert!(t.get(&"bob").unwrap().is_none());
     assert!(t.get(&"alice").unwrap().is_some());
 }
@@ -116,7 +116,7 @@ fn transaction_rollback_on_drop() {
 
     // Original value should be intact, new key should not exist
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(COUNTERS).unwrap();
+    let mut t = rtxn.open_table(COUNTERS).unwrap();
     let val = t.get(&"x").unwrap().unwrap();
     assert_eq!(u64::from_le_bytes(val[..8].try_into().unwrap()), 100);
     assert!(t.get(&"y").unwrap().is_none());
@@ -480,7 +480,7 @@ fn group_commit_sequential() {
     assert_eq!(count, 3);
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(COUNTERS).unwrap();
+    let mut t = rtxn.open_table(COUNTERS).unwrap();
     assert!(t.get(&"batch_a").unwrap().is_some());
     assert!(t.get(&"batch_b").unwrap().is_some());
     assert!(t.get(&"batch_c").unwrap().is_some());
@@ -505,7 +505,7 @@ fn group_commit_concurrent() {
     assert_eq!(count, 8);
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(SCORES).unwrap();
+    let mut t = rtxn.open_table(SCORES).unwrap();
     for i in 0u64..8 {
         assert!(
             t.get(&(i * 100)).unwrap().is_some(),
@@ -539,7 +539,7 @@ fn history_snapshot_and_restore() {
     // Open historical snapshot -- should be a valid, readable database
     let historical = history.open_historical(snap_id).unwrap();
     let rtxn_hist = historical.begin_read();
-    let t_hist = rtxn_hist.open_table(USERS).unwrap();
+    let mut t_hist = rtxn_hist.open_table(USERS).unwrap();
     // The snapshot captured the state at snapshot time -- alice should exist
     let alice_val = t_hist.get(&"alice").unwrap();
     assert!(alice_val.is_some(), "snapshot should contain alice");
@@ -616,7 +616,7 @@ fn unified_api_bftree_backend() {
     wtxn.commit().unwrap();
 
     let rtxn = db.begin_read();
-    let t = rtxn.open_table(COUNTERS).unwrap();
+    let mut t = rtxn.open_table(COUNTERS).unwrap();
     let val = t.get(&"unified").unwrap().unwrap();
     assert_eq!(u64::from_le_bytes(val[..8].try_into().unwrap()), 42);
 }

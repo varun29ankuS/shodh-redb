@@ -46,7 +46,7 @@ mod verification;
 
 pub use adapter::BfTreeAdapter;
 pub use blob::{BfTreeBlobStore, BfTreeBlobWriter, BfTreeReadOnlyBlobStore};
-pub use config::{BfTreeBackend, BfTreeConfig};
+pub use config::{BfTreeBackend, BfTreeConfig, DurabilityMode};
 pub use database::{
     BfTreeBuilder, BfTreeDatabase, BfTreeDatabaseReadTxn, BfTreeDatabaseWriteTxn, BfTreeTableScan,
 };

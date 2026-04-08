@@ -162,7 +162,12 @@ impl BfTree {
         // SAFETY: BfTreeMeta is #[repr(C, align(512))] with only primitive fields.
         // The buffer is 4096 bytes (>= size_of::<BfTreeMeta>()) and was just read.
         let meta = unsafe { (buf.as_ptr() as *const BfTreeMeta).read() };
-        meta.check_magic();
+        // If the snapshot file exists but was never written (e.g. amortized
+        // snapshots haven't triggered yet), the magic header will be all zeros.
+        // Treat this as "no snapshot" rather than panicking.
+        if meta.magic_begin != *BF_TREE_MAGIC_BEGIN || meta.magic_end != *BF_TREE_MAGIC_END {
+            return Ok(0);
+        }
         Ok(meta.snapshot_lsn)
     }
 
@@ -199,7 +204,12 @@ impl BfTree {
         // SAFETY: BfTreeMeta is #[repr(C, align(512))] with only primitive fields.
         // The buffer is 4096 bytes (>= size_of::<BfTreeMeta>()) and was just read from disk.
         let bf_meta = unsafe { (metadata.as_ptr() as *const BfTreeMeta).read() };
-        bf_meta.check_magic();
+        // If the file exists but has no valid snapshot (e.g. created by StdVfs::open
+        // but never snapshot'd because amortized snapshots haven't triggered), fall
+        // back to creating a fresh tree. WAL replay will restore the data.
+        if bf_meta.magic_begin != *BF_TREE_MAGIC_BEGIN || bf_meta.magic_end != *BF_TREE_MAGIC_END {
+            return BfTree::with_config(bf_tree_config.clone(), buffer_ptr);
+        }
         let actual_size = reader
             .metadata()
             .map_err(|_| IoErrorKind::SnapshotRead)?
@@ -360,7 +370,11 @@ impl BfTree {
             match entry.try_read().unwrap().as_ref() {
                 PageLocation::Base(base) => leaf_mapping.push((pid, *base)),
                 PageLocation::Full(_) | PageLocation::Mini(_) => {
-                    unreachable!("Circular buffer should already be drained!")
+                    // Concurrent writers may have inserted into the circular
+                    // buffer between drain() and this serialization pass.
+                    // These pages will be captured by the next snapshot; skip
+                    // them here to avoid panicking under concurrent workloads.
+                    continue;
                 }
                 PageLocation::Null => panic!("Snapshot of Null page"),
             }

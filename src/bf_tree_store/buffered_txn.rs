@@ -185,7 +185,11 @@ impl WriteBuffer {
     /// On partial write failure (adapter error mid-flush), compensating actions
     /// undo already-applied operations: inserts are rolled back via delete, and
     /// deletes are rolled back via re-insert of the previously-read value.
-    pub(crate) fn flush(&mut self, adapter: &BfTreeAdapter) -> Result<(), BfTreeError> {
+    pub(crate) fn flush(
+        &mut self,
+        adapter: &BfTreeAdapter,
+        durability: super::config::DurabilityMode,
+    ) -> Result<(), BfTreeError> {
         let max_record_size = adapter.inner().config().get_cb_max_record_size();
         let max_key_len = adapter.max_key_len();
 
@@ -217,47 +221,79 @@ impl WriteBuffer {
             }
         }
 
-        // Phase 2: Apply entries, tracking flushed operations for rollback.
+        // Phase 2: Separate inserts and deletes, apply in batch.
         //
-        // flushed_inserts: keys that were inserted (undo = delete).
-        // flushed_deletes: (key, Option<prev_value>) for keys that were deleted
-        //   (undo = re-insert prev_value if it existed).
-        let mut flushed_inserts: Vec<Vec<u8>> = Vec::new();
-        let mut flushed_deletes: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        // BTreeMap iteration order is sorted by key — exactly what
+        // batch_insert_sorted_deferred_wal needs for leaf caching.
+        let mut insert_pairs: Vec<(&[u8], &[u8])> = Vec::new();
+        let mut delete_keys: Vec<&[u8]> = Vec::new();
+        let mut delete_prev_values: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
 
-        // Single reusable buffer for reading previous values before deletes,
-        // avoiding a per-delete allocation of max_record_size bytes.
+        // Single reusable buffer for reading previous values before deletes.
         let mut delete_read_buf = vec![0u8; max_record_size];
 
         for (key, value) in &self.entries {
             if let Some(val) = value {
-                if let Err(flush_err) = adapter.insert_deferred_wal(key, val) {
-                    // Compensate: undo all previously flushed entries.
-                    if let Err((rollback_failures, last_rollback_error)) =
-                        Self::compensate_rollback(adapter, &flushed_inserts, &flushed_deletes)
-                    {
-                        return Err(BfTreeError::PartialFlushRollbackFailed {
-                            flush_error: alloc::format!("{flush_err}"),
-                            rollback_failures,
-                            last_rollback_error,
-                        });
-                    }
-                    return Err(flush_err);
-                }
-                flushed_inserts.push(key.clone());
+                insert_pairs.push((key.as_slice(), val.as_slice()));
             } else {
                 // Snapshot the current value before deleting for rollback.
                 let prev = match adapter.read(key, &mut delete_read_buf) {
                     Ok(len) => Some(delete_read_buf[..len as usize].to_vec()),
                     Err(_) => None,
                 };
-                adapter.delete_deferred_wal(key);
-                flushed_deletes.push((key.clone(), prev));
+                delete_keys.push(key.as_slice());
+                delete_prev_values.push((key.clone(), prev));
             }
         }
 
-        // Flush all WAL entries in a single fsync instead of per-entry.
-        adapter.flush_wal().map_err(BfTreeError::from)?;
+        // Batch insert: exploits key locality to skip redundant tree traversals.
+        // For N sorted entries hitting ~K distinct leaves, this does K traversals
+        // instead of N (typically 10-50x fewer for batch sizes 100-5000).
+        if !insert_pairs.is_empty()
+            && let Err(flush_err) = adapter.batch_insert_sorted_deferred_wal(&insert_pairs)
+        {
+            // Batch insert failed — entries up to the failure point may have been
+            // applied. Best-effort rollback: delete all intended insert keys.
+            let flushed_inserts: Vec<Vec<u8>> =
+                insert_pairs.iter().map(|(k, _)| k.to_vec()).collect();
+            if let Err((rollback_failures, last_rollback_error)) =
+                Self::compensate_rollback(adapter, &flushed_inserts, &[])
+            {
+                return Err(BfTreeError::PartialFlushRollbackFailed {
+                    flush_error: alloc::format!("{flush_err}"),
+                    rollback_failures,
+                    last_rollback_error,
+                });
+            }
+            return Err(flush_err);
+        }
+
+        // Batch delete.
+        if !delete_keys.is_empty()
+            && let Err(flush_err) = adapter.batch_delete_sorted_deferred_wal(&delete_keys)
+        {
+            // Rollback inserts + already-applied deletes.
+            let flushed_inserts: Vec<Vec<u8>> =
+                insert_pairs.iter().map(|(k, _)| k.to_vec()).collect();
+            if let Err((rollback_failures, last_rollback_error)) =
+                Self::compensate_rollback(adapter, &flushed_inserts, &delete_prev_values)
+            {
+                return Err(BfTreeError::PartialFlushRollbackFailed {
+                    flush_error: alloc::format!("{flush_err}"),
+                    rollback_failures,
+                    last_rollback_error,
+                });
+            }
+            return Err(flush_err);
+        }
+
+        // Flush WAL based on durability mode:
+        // - Sync: fsync now (no data loss on crash)
+        // - Periodic: WAL background thread fsyncs every wal_flush_interval_ms
+        // - NoSync: no fsync (for benchmarks/ephemeral workloads)
+        if durability == super::config::DurabilityMode::Sync {
+            adapter.flush_wal().map_err(BfTreeError::from)?;
+        }
 
         self.entries.clear();
         Ok(())
@@ -628,7 +664,7 @@ pub(crate) fn collect_all_buffer_entries_for_table(
 mod tests {
     use super::*;
     use crate::TableDefinition;
-    use crate::bf_tree_store::config::BfTreeConfig;
+    use crate::bf_tree_store::config::{BfTreeConfig, DurabilityMode};
     use crate::bf_tree_store::database::{BfTreeDatabase, TableKind, encode_table_key};
     use crate::storage_traits::WriteTable;
 
@@ -678,7 +714,7 @@ mod tests {
         buf.put(key1.clone(), b"v1".to_vec()).unwrap();
         buf.put(key2.clone(), b"v2".to_vec()).unwrap();
 
-        buf.flush(adapter).unwrap();
+        buf.flush(adapter, DurabilityMode::Sync).unwrap();
 
         // Verify in adapter.
         let max = adapter.inner().config().get_cb_max_record_size();
@@ -717,7 +753,7 @@ mod tests {
         // Buffer a delete for the existing key.
         let mut buf = WriteBuffer::new();
         buf.delete(key.clone());
-        buf.flush(adapter).unwrap();
+        buf.flush(adapter, DurabilityMode::Sync).unwrap();
 
         // Key should be gone.
         let max = adapter.inner().config().get_cb_max_record_size();
@@ -754,7 +790,7 @@ mod tests {
 
         // Verify not visible via read transaction.
         let rtxn = db.begin_read();
-        let ro = rtxn.open_table(ITEMS).unwrap();
+        let mut ro = rtxn.open_table(ITEMS).unwrap();
         assert!(ro.get(&"temp").unwrap().is_none());
     }
 
@@ -770,7 +806,7 @@ mod tests {
 
         // Should be visible.
         let rtxn = db.begin_read();
-        let ro = rtxn.open_table(ITEMS).unwrap();
+        let mut ro = rtxn.open_table(ITEMS).unwrap();
         let val = ro.get(&"committed").unwrap().unwrap();
         assert_eq!(u64::from_le_bytes(val.as_slice().try_into().unwrap()), 77);
     }
@@ -902,7 +938,7 @@ mod tests {
         buf.put(key_b.clone(), val_b).unwrap();
 
         // Flush should fail because key_b's combined size exceeds max_record_size.
-        let result = buf.flush(adapter);
+        let result = buf.flush(adapter, DurabilityMode::Sync);
         assert!(
             result.is_err(),
             "flush must fail on oversized combined record"
@@ -944,7 +980,7 @@ mod tests {
         buf.put(key_z.clone(), val_z).unwrap();
 
         // Flush fails on key_z insert.
-        let result = buf.flush(adapter);
+        let result = buf.flush(adapter, DurabilityMode::Sync);
         assert!(
             result.is_err(),
             "flush must fail on oversized combined record"

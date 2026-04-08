@@ -1038,6 +1038,45 @@ impl BfTree {
         }
     }
 
+    /// Batch insert pre-sorted key-value pairs without per-entry WAL fsync.
+    ///
+    /// Each entry uses `write_inner_impl` with `wal_wait=false`, deferring
+    /// WAL fsync until the caller invokes `flush_wal()`. The sorted order
+    /// of entries means consecutive keys often hit the same leaf, giving
+    /// better CPU cache locality even without explicit leaf caching.
+    ///
+    /// Returns `Ok(())` on success, or the first error encountered.
+    /// On error, entries up to the failing one have been applied; the
+    /// caller should handle partial-write rollback.
+    pub fn batch_insert_sorted_deferred_wal(
+        &self,
+        entries: &[(&[u8], &[u8])],
+    ) -> Result<(), crate::BfTreeError> {
+        for &(key, value) in entries {
+            match self.insert_deferred_wal(key, value) {
+                LeafInsertResult::Success => {}
+                LeafInsertResult::InvalidKV(_msg) => {
+                    return Err(crate::BfTreeError::Io(
+                        crate::error::IoErrorKind::Corruption,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Batch delete pre-sorted keys without per-entry WAL fsync.
+    /// Keys MUST be sorted in ascending order.
+    pub fn batch_delete_sorted_deferred_wal(
+        &self,
+        keys: &[&[u8]],
+    ) -> Result<(), crate::BfTreeError> {
+        for &key in keys {
+            self.delete_deferred_wal(key);
+        }
+        Ok(())
+    }
+
     /// Flush the WAL, blocking until all buffered entries are fsync'd.
     ///
     /// Must be called after `insert_deferred_wal` / `delete_deferred_wal`

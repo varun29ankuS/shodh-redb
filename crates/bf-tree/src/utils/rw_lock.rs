@@ -19,6 +19,13 @@ pub struct RwLock<T> {
     writer_wake_counter: AtomicU32,
 }
 
+// SAFETY: RwLock synchronizes all access to T through atomic lock_val. Shared
+// access (&T) is only granted while lock_val indicates readers-only or
+// readers+writer-waiting (never while writer holds exclusive). Exclusive access
+// (&mut T) is only granted when lock_val == u32::MAX (writer holds lock).
+unsafe impl<T: Send> Send for RwLock<T> {}
+unsafe impl<T: Send> Sync for RwLock<T> {}
+
 impl<T> RwLock<T> {
     pub fn new(val: T) -> Self {
         Self {
@@ -31,7 +38,12 @@ impl<T> RwLock<T> {
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
         let mut v = self.lock_val.load(Ordering::Relaxed);
         loop {
-            if v.is_multiple_of(2) {
+            // Reader-friendly: allow readers through when a writer is WAITING
+            // (odd lock_val) but not when a writer HOLDS exclusive access
+            // (u32::MAX). This prevents cascading reader stalls where all new
+            // readers block behind a waiting writer on the same leaf node.
+            if v != u32::MAX {
+                debug_assert!(v < u32::MAX - 2, "reader count overflow");
                 match self.lock_val.compare_exchange_weak(
                     v,
                     v + 2,
@@ -43,7 +55,7 @@ impl<T> RwLock<T> {
                 }
             }
 
-            if !v.is_multiple_of(2) {
+            if v == u32::MAX {
                 atomic_wait::wait(&self.lock_val, v);
                 v = self.lock_val.load(Ordering::Relaxed);
             }
@@ -53,12 +65,10 @@ impl<T> RwLock<T> {
     pub fn try_read(&self) -> Result<RwLockReadGuard<'_, T>, ()> {
         let v = self.lock_val.load(Ordering::Relaxed);
 
-        if v.is_multiple_of(2) {
-            let new_v = v + 2;
-
+        if v != u32::MAX {
             match self.lock_val.compare_exchange_weak(
                 v,
-                new_v,
+                v + 2,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
@@ -327,5 +337,107 @@ mod tests {
         let lock = RwLock::new(0u32);
         let _r = lock.read();
         assert!(lock.try_write().is_err());
+    }
+
+    #[test]
+    fn try_read_succeeds_with_writer_waiting() {
+        use crate::sync::atomic::AtomicU32;
+        use std::sync::Arc;
+
+        let lock = Arc::new(RwLock::new(0u32));
+        let barrier = Arc::new(AtomicU32::new(0));
+
+        // R1 acquires read lock.
+        let r1 = lock.read();
+        assert_eq!(*r1, 0);
+
+        // Spawn a writer thread that will block waiting for R1 to release.
+        let lock2 = lock.clone();
+        let barrier2 = barrier.clone();
+        let writer = std::thread::spawn(move || {
+            barrier2.store(1, Ordering::Release);
+            let mut w = lock2.write();
+            *w = 99;
+            drop(w);
+        });
+
+        // Wait for writer thread to start and set the writer-waiting flag.
+        while barrier.load(Ordering::Acquire) == 0 {
+            std::thread::yield_now();
+        }
+        // Give writer time to set the odd bit on lock_val.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Under reader-friendly semantics, try_read should succeed even
+        // though a writer is waiting.
+        let r2 = lock.try_read().expect("reader must proceed while writer is waiting");
+        assert_eq!(*r2, 0);
+
+        // Release both readers so the writer can proceed.
+        drop(r1);
+        drop(r2);
+        writer.join().unwrap();
+
+        // Writer should have set value to 99.
+        assert_eq!(*lock.read(), 99);
+    }
+
+    #[test]
+    fn try_read_fails_when_writer_holds_lock() {
+        let lock = RwLock::new(0u32);
+        let _w = lock.write();
+        assert!(lock.try_read().is_err());
+    }
+
+    #[test]
+    fn writer_not_starved_under_moderate_read_load() {
+        use std::sync::Arc;
+
+        let lock = Arc::new(RwLock::new(0u64));
+        let done = Arc::new(AtomicU32::new(0));
+
+        // Spawn 4 reader threads that continuously acquire/release.
+        let mut readers = Vec::new();
+        for _ in 0..4 {
+            let lock = lock.clone();
+            let done = done.clone();
+            readers.push(std::thread::spawn(move || {
+                let mut count = 0u64;
+                while done.load(Ordering::Relaxed) == 0 {
+                    let r = lock.read();
+                    let _ = *r;
+                    drop(r);
+                    count += 1;
+                }
+                count
+            }));
+        }
+
+        // Let readers warm up.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Writer must complete within a bounded time (1 second).
+        let lock_w = lock.clone();
+        let writer = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut w = lock_w.write();
+            let elapsed = start.elapsed();
+            *w = 42;
+            drop(w);
+            elapsed
+        });
+
+        let elapsed = writer.join().unwrap();
+        done.store(1, Ordering::Relaxed);
+
+        for r in readers {
+            r.join().unwrap();
+        }
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "writer took {elapsed:?} -- possible starvation"
+        );
+        assert_eq!(*lock.read(), 42);
     }
 }

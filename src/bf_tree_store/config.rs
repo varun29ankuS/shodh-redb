@@ -3,14 +3,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bf_tree::{Config, StorageBackend, WalConfig};
+use crate::bf_tree::{Config, StorageBackend, WalConfig};
 
 use super::BfTreeError;
 use super::verification::VerifyMode;
 
 /// Configuration for the Bf-Tree storage engine.
 ///
-/// Wraps `bf_tree::Config` with shodh-redb-specific defaults and validation.
+/// Wraps `crate::bf_tree::Config` with shodh-redb-specific defaults and validation.
 pub struct BfTreeConfig {
     /// Path to the data file. Use `:memory:` for in-memory mode.
     pub file_path: PathBuf,

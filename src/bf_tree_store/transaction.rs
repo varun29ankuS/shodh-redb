@@ -167,7 +167,7 @@ impl BfTreeReadTxn {
         &self,
         start_key: &[u8],
         count: usize,
-    ) -> Result<bf_tree::ScanIter<'_, '_>, BfTreeError> {
+    ) -> Result<crate::bf_tree::ScanIter<'_, '_>, BfTreeError> {
         self.adapter.scan_from(start_key, count)
     }
 
@@ -176,7 +176,7 @@ impl BfTreeReadTxn {
         &self,
         start_key: &[u8],
         end_key: &[u8],
-    ) -> Result<bf_tree::ScanIter<'_, '_>, BfTreeError> {
+    ) -> Result<crate::bf_tree::ScanIter<'_, '_>, BfTreeError> {
         self.adapter.scan_range(start_key, end_key)
     }
 

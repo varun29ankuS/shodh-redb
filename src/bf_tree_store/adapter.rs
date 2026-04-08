@@ -2,7 +2,7 @@
 
 use alloc::sync::Arc;
 
-use bf_tree::{BfTree, LeafInsertResult, LeafReadResult, ScanIter, ScanReturnField};
+use crate::bf_tree::{BfTree, LeafInsertResult, LeafReadResult, ScanIter, ScanReturnField};
 
 use super::config::BfTreeConfig;
 use super::error::BfTreeError;
@@ -129,7 +129,7 @@ impl BfTreeAdapter {
     }
 
     /// Flush the WAL, blocking until all buffered entries are fsync'd.
-    pub fn flush_wal(&self) -> Result<(), bf_tree::BfTreeError> {
+    pub fn flush_wal(&self) -> Result<(), crate::bf_tree::BfTreeError> {
         self.inner.flush_wal()
     }
 
@@ -173,7 +173,7 @@ impl BfTreeAdapter {
     ///
     /// This is a stop-the-world operation that flushes the circular buffer
     /// to disk and writes snapshot metadata.
-    pub fn snapshot(&self) -> Result<std::path::PathBuf, bf_tree::BfTreeError> {
+    pub fn snapshot(&self) -> Result<std::path::PathBuf, crate::bf_tree::BfTreeError> {
         self.inner.snapshot()
     }
 
@@ -183,7 +183,7 @@ impl BfTreeAdapter {
     }
 
     /// Get the current circular buffer utilization metrics.
-    pub fn buffer_metrics(&self) -> bf_tree::circular_buffer::CircularBufferMetrics {
+    pub fn buffer_metrics(&self) -> crate::bf_tree::circular_buffer::CircularBufferMetrics {
         self.inner.get_buffer_metrics()
     }
 }

@@ -12,7 +12,7 @@ Give your agents persistent memory, semantic retrieval, and structured state -- 
 
 ```toml
 [dependencies]
-shodh-redb = { version = "0.2", features = ["bf_tree"] }
+shodh-redb = { version = "0.3", features = ["bf_tree"] }
 ```
 
 ---

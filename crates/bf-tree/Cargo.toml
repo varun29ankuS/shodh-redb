@@ -54,7 +54,7 @@ shuttle = ["std"]
 tracing = ["std", "dep:tracing"]
 
 [dependencies]
-cfg-if = "=1.0.0"
+cfg-if = "1"
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
 
 portable-atomic = { version = "1", default-features = false, features = ["fallback"] }

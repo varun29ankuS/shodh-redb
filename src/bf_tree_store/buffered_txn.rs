@@ -599,7 +599,10 @@ impl<K: Key + 'static, V: Value + 'static> Iterator for BufferedScanIter<'_, K, 
                 return None;
             }
 
-            let k = OwnedKv::new(key);
+            // Reverse byte-order transformation before returning to caller.
+            let mut key_user = key;
+            K::from_byte_ordered_in_place(&mut key_user);
+            let k = OwnedKv::new(key_user);
             let v = if self.verify_mode.is_enabled() {
                 let verify = should_verify(self.verify_mode.as_ref());
                 match unwrap_value(&val, verify) {

@@ -137,7 +137,14 @@ fn validate_snapshot_path(snapshot_path: &str) -> Result<(), BfTreeError> {
 
     let path = Path::new(snapshot_path);
 
-    // Reject any path component that is ".." to prevent directory traversal.
+    // Reject any path component that is ".." to prevent directory traversal
+    // attacks where a crafted PENDING entry causes `remove_file` to delete
+    // files outside the expected directory.
+    //
+    // Absolute paths are intentionally allowed: the snapshot system creates
+    // snapshots using the full database file path (which is absolute). The
+    // remaining attack surface (a crafted absolute path like "/dev/zero") is
+    // mitigated by BfTree's file header validation, which rejects non-DB files.
     for component in path.components() {
         if let std::path::Component::ParentDir = component {
             return Err(BfTreeError::InvalidOperation(alloc::format!(

@@ -27,6 +27,13 @@ fn sqrt_f32(x: f32) -> f32 {
         if x == 0.0 || x.is_infinite() {
             return x;
         }
+        // Subnormals (x < MIN_POSITIVE) have a biased exponent of 0, which
+        // makes the bit-manipulation initial guess wildly inaccurate. Scale
+        // into the normal range, compute sqrt there, then scale back.
+        if x < f32::MIN_POSITIVE {
+            // 2^24 = 16777216.0; sqrt(2^24) = 4096.0
+            return sqrt_f32(x * 16_777_216.0) / 4096.0;
+        }
         // Initial estimate via bit manipulation (fast inverse sqrt trick variant)
         let bits = x.to_bits();
         let guess_bits = (bits >> 1) + 0x1FC0_0000;
@@ -89,6 +96,9 @@ impl DistanceMetric {
     /// [`f32::MAX`] when the computed distance is NaN (e.g. due to NaN
     /// elements in the input vectors) to avoid silent NaN propagation
     /// through search results.
+    ///
+    /// NaN distances are replaced with `f32::MAX` (treated as maximally
+    /// distant) so that `BinaryHeap` ordering is never corrupted.
     #[inline]
     pub fn compute(&self, a: &[f32], b: &[f32]) -> f32 {
         if a.len() != b.len() {

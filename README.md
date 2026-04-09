@@ -184,20 +184,25 @@ Multi-signal ranked fusion: semantic similarity + temporal recency + causal rele
 
 ### Database benchmarks
 
-Measured on a single machine, single-threaded (except mixed workload: 4 readers + 1 writer). All engines use default durability (fsync per commit) unless noted.
+Measured on x86_64 (12 cores), key=24B, value=150B. All engines use fsync per commit unless noted.
 
-| Workload | BfTree (sync) | BfTree (periodic fsync) | RocksDB | Notes |
+| Workload | BfTree (sync) | BfTree (periodic) | RocksDB | BTree (redb) |
 |---|---|---|---|---|
-| Sequential writes (50K keys) | 88K ops/s | 1.55M ops/s | 91K ops/s | BfTree periodic mode batches fsync |
-| Point reads (5K keys) | 600K ops/s | -- | 1.9M ops/s | RocksDB block cache advantage |
-| Mixed 4R+1W p99 latency | 33.9 us | 42.6 us | 6.9 us | Reader-friendly RwLock, no cascading stalls |
-| Read-only p99 latency | 1.2 us | -- | 0.8 us | Both sub-microsecond at p50 |
+| Write throughput (50K keys) | 660K ops/s | **1.24M ops/s** | 252K ops/s | 25K ops/s |
+| Write throughput (10K keys) | 515K ops/s | **1.51M ops/s** | 302K ops/s | 33K ops/s |
+| Single-thread writes | **593K ops/s** | -- | 338K ops/s | -- |
+| Point read p50 | 0.8 us | -- | 0.6 us | -- |
+| Range scan p50 (10 keys) | **0.7 us** | -- | 1.4 us | -- |
+| Mixed 4R+1W p99 latency | 42.9 us | 37.2 us | 6.7 us | -- |
+| Read-only p99 latency | 1.1 us | 1.2 us | 1.7 us | -- |
+| Recovery time (10K keys) | **1.0 ms** | -- | 68.4 ms | -- |
+| Write amplification | 1.22x | -- | 1.03x | -- |
 
-**Where BfTree wins**: concurrent multi-writer (lock-free readers, no single-writer bottleneck), periodic durability throughput (17x sync mode), embedded simplicity (no background compaction, no LSM write amplification).
+**Where BfTree wins**: write throughput (6.2x RocksDB at 50K periodic), single-writer latency, recovery time (68x faster), range scans, concurrent multi-writer (lock-free readers, no single-writer bottleneck), embedded simplicity (no background compaction, no LSM write amplification).
 
-**Where RocksDB wins**: raw point-read throughput (mature block cache, bloom filters), mixed p99 latency (optimized for read-heavy OLTP).
+**Where RocksDB wins**: point-read p50 (mature block cache, bloom filters), mixed p99 latency (optimized for read-heavy OLTP), multi-threaded scaling at 4+ threads, lower write amplification.
 
-**Trade-off**: BfTree is designed for AI agent workloads -- write-heavy, concurrent, embedded. RocksDB is a general-purpose LSM with 10+ years of optimization. The gap narrows under multi-writer contention where RocksDB's single-writer mutex becomes the bottleneck.
+**Trade-off**: BfTree is designed for AI agent workloads -- write-heavy, concurrent, embedded. RocksDB is a general-purpose LSM with 10+ years of optimization.
 
 ### SIMD acceleration
 
@@ -269,7 +274,7 @@ The core library compiles with `#![no_std]` (disable the `std` feature). Vector 
 
 ## Credits
 
-BfTree integration wraps [bf-tree](https://crates.io/crates/bf-tree) (Microsoft Research, VLDB 2024). Core page cache and crash recovery inherited from [redb](https://github.com/cberner/redb). All extensions -- vectors, blobs, TTL, merge operators, HLC, CDC, composite queries, group commit -- are original work.
+BfTree engine based on [bf-tree](https://www.microsoft.com/en-us/research/publication/bf-tree/) (Microsoft Research, VLDB 2024), vendored and adapted for `no_std`/edition 2024. Core page cache and crash recovery inherited from [redb](https://github.com/cberner/redb). All extensions -- vectors, blobs, TTL, merge operators, HLC, CDC, composite queries, group commit -- are original work.
 
 ## License
 

@@ -218,7 +218,7 @@ impl BfTreeDatabase {
     /// Take a durability snapshot. All data is guaranteed recoverable after crash.
     ///
     /// Serialized with concurrent commit operations via the snapshot lock.
-    pub fn snapshot(&self) -> Result<std::path::PathBuf, bf_tree::BfTreeError> {
+    pub fn snapshot(&self) -> Result<std::path::PathBuf, crate::bf_tree::BfTreeError> {
         let _guard = self.snapshot_lock.lock();
         self.adapter.snapshot()
     }
@@ -1142,7 +1142,7 @@ impl BfTreeDatabaseReadTxn {
 ///
 /// Yields `(key_bytes, value_bytes)` with the table prefix stripped from keys.
 pub struct BfTreeTableScan<'a> {
-    pub(crate) iter: bf_tree::ScanIter<'a, 'a>,
+    pub(crate) iter: crate::bf_tree::ScanIter<'a, 'a>,
     pub(crate) prefix_len: usize,
 }
 

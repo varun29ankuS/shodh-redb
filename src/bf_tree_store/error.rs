@@ -16,9 +16,9 @@ pub enum BfTreeError {
     /// The key exceeds the configured maximum key length.
     InvalidKey,
     /// Configuration validation failed.
-    Config(bf_tree::ConfigError),
+    Config(crate::bf_tree::ConfigError),
     /// Scan operation failed.
-    Scan(bf_tree::ScanIterError),
+    Scan(crate::bf_tree::ScanIterError),
     /// Data corruption detected (e.g., missing blob chunks).
     Corruption(String),
     /// Invalid operation (e.g., write after finish).
@@ -77,25 +77,25 @@ impl fmt::Display for BfTreeError {
 #[cfg(feature = "std")]
 impl std::error::Error for BfTreeError {}
 
-impl From<bf_tree::ConfigError> for BfTreeError {
-    fn from(e: bf_tree::ConfigError) -> Self {
+impl From<crate::bf_tree::ConfigError> for BfTreeError {
+    fn from(e: crate::bf_tree::ConfigError) -> Self {
         Self::Config(e)
     }
 }
 
-impl From<bf_tree::BfTreeError> for BfTreeError {
-    fn from(e: bf_tree::BfTreeError) -> Self {
+impl From<crate::bf_tree::BfTreeError> for BfTreeError {
+    fn from(e: crate::bf_tree::BfTreeError) -> Self {
         match e {
-            bf_tree::BfTreeError::Config(ce) => Self::Config(ce),
-            bf_tree::BfTreeError::Io(io) => {
+            crate::bf_tree::BfTreeError::Config(ce) => Self::Config(ce),
+            crate::bf_tree::BfTreeError::Io(io) => {
                 Self::Corruption(alloc::format!("bf-tree I/O error: {io}"))
             }
         }
     }
 }
 
-impl From<bf_tree::ScanIterError> for BfTreeError {
-    fn from(e: bf_tree::ScanIterError) -> Self {
+impl From<crate::bf_tree::ScanIterError> for BfTreeError {
+    fn from(e: crate::bf_tree::ScanIterError) -> Self {
         Self::Scan(e)
     }
 }

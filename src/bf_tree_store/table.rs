@@ -485,7 +485,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
 /// into a standard `Iterator` that allocates owned bytes for each entry.
 ///
 /// Supports optional start/end key filtering for exclusive bounds, since
-/// `bf_tree::scan_with_end_key` uses inclusive bounds `[start, end]`.
+/// `crate::bf_tree::scan_with_end_key` uses inclusive bounds `[start, end]`.
 pub struct BfTreeRangeIter<'a, K: Key + 'static, V: Value + 'static> {
     scan: BfTreeTableScan<'a>,
     buf: Vec<u8>,
@@ -582,7 +582,7 @@ fn build_bf_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     end_inclusive: bool,
     verify_mode: Arc<VerifyMode>,
 ) -> crate::Result<BfTreeRangeIter<'a, K, V>> {
-    // bf_tree::scan_with_end_key uses inclusive bounds [start, end].
+    // crate::bf_tree::scan_with_end_key uses inclusive bounds [start, end].
     // We handle exclusivity via iterator-level filtering on the user key.
 
     let (scan_start, exclude_start) = match start {

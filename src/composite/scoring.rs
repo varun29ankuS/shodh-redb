@@ -29,23 +29,30 @@ pub(crate) fn normalize_semantic(blob_distances: &[(BlobId, f32)]) -> HashMap<Bl
         return HashMap::new();
     }
 
+    // Filter non-finite distances (NaN, Inf) to prevent poison propagation
+    // through the min/max folds. Non-finite entries get score 0.0 below.
     let min_d = blob_distances
         .iter()
         .map(|(_, d)| *d)
+        .filter(|d| d.is_finite())
         .fold(f32::INFINITY, f32::min);
     let max_d = blob_distances
         .iter()
         .map(|(_, d)| *d)
+        .filter(|d| d.is_finite())
         .fold(f32::NEG_INFINITY, f32::max);
     let range = max_d - min_d;
 
-    if range <= f32::EPSILON {
+    if !range.is_finite() || range <= f32::EPSILON {
         return blob_distances.iter().map(|(id, _)| (*id, 1.0)).collect();
     }
 
     blob_distances
         .iter()
         .map(|(id, d)| {
+            if !d.is_finite() {
+                return (*id, 0.0);
+            }
             let score = f64::from(1.0 - (d - min_d) / range);
             (*id, score)
         })

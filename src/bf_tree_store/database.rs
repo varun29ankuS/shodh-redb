@@ -410,12 +410,10 @@ pub(crate) fn table_prefix_end(table_name: &str, kind: TableKind) -> Vec<u8> {
         // This byte overflows; zero it and carry to the next position.
         prefix[i] = 0x00;
     }
-    // Every byte in the prefix was 0xFF.  The only way to produce a value
-    // strictly greater than 0xFF..FF of the same length is to use a longer
-    // byte string.  Restore the prefix and append 0xFF so the result is
-    // lexicographically larger than any key that starts with the original
-    // prefix.
-    prefix.fill(0xFF);
+    // Every byte in the prefix was 0xFF. This is unreachable in practice:
+    // the kind discriminator byte is at most 0x02, so the carry always stops
+    // there. Guard with debug_assert to catch any future encoding changes.
+    debug_assert!(false, "table_prefix_end: all-0xFF prefix is unreachable");
     prefix.push(0xFF);
     prefix
 }
@@ -673,7 +671,7 @@ impl BfTreeDatabaseWriteTxn {
         // time on crash recovery. The snapshot_lock serializes concurrent
         // snapshot attempts so only one thread performs the expensive I/O.
         if self.snapshot_interval > 0 && !self.adapter.inner().config().is_memory_backend() {
-            let count = self.commit_count.fetch_add(1, Ordering::Relaxed) + 1;
+            let count = self.commit_count.fetch_add(1, Ordering::AcqRel) + 1;
             if count % self.snapshot_interval == 0 {
                 let _snap_guard = self.snapshot_lock.lock();
                 self.adapter.snapshot()?;

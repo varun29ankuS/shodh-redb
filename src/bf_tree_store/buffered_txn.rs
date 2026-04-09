@@ -73,6 +73,7 @@ impl WriteBuffer {
     }
 
     /// Create an empty write buffer with a custom entry limit.
+    // Retained for downstream/test use; standard collection API.
     #[allow(dead_code)]
     pub(crate) fn with_max_entries(max_buffer_entries: usize) -> Self {
         Self {
@@ -166,6 +167,7 @@ impl WriteBuffer {
     }
 
     /// Number of buffered entries.
+    // Standard collection API; retained for diagnostics and test use.
     #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()

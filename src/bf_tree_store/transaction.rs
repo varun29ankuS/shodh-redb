@@ -48,7 +48,9 @@ impl BfTreeWriteTxn {
     /// Create a new write transaction handle.
     ///
     /// This is cheap -- no locks acquired, no state copied.
-    #[allow(dead_code)] // wired into Database layer in subsequent commit
+    // Scaffolding for the explicit-transaction API (not yet wired into
+    // BfTreeDatabase, which currently exposes direct put/read methods).
+    #[allow(dead_code)]
     pub(crate) fn new(adapter: Arc<BfTreeAdapter>) -> Self {
         Self {
             adapter,
@@ -145,7 +147,9 @@ pub struct BfTreeReadTxn {
 
 impl BfTreeReadTxn {
     /// Create a new read transaction handle.
-    #[allow(dead_code)] // wired into Database layer in subsequent commit
+    // Scaffolding for the explicit-transaction API (not yet wired into
+    // BfTreeDatabase, which currently exposes direct read methods).
+    #[allow(dead_code)]
     pub(crate) fn new(adapter: Arc<BfTreeAdapter>) -> Self {
         Self { adapter }
     }

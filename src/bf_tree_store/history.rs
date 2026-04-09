@@ -111,6 +111,8 @@ impl HistoryEntry {
 }
 
 fn now_ns() -> u64 {
+    // as_nanos() returns u128; truncation to u64 is safe for ~584 years
+    // after the Unix epoch (until year 2554).
     #[allow(clippy::cast_possible_truncation)]
     let ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -213,6 +215,8 @@ impl BfTreeHistory {
                 if !snap_path.is_empty() && validate_snapshot_path(&snap_path).is_ok() {
                     let path = Path::new(&snap_path);
                     if path.exists() {
+                        // Best-effort cleanup of stale pending snapshots at startup;
+                        // failure is non-fatal since the metadata entry is deleted below.
                         let _ = std::fs::remove_file(path);
                     }
                 }

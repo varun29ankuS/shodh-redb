@@ -70,7 +70,10 @@ pub fn select_diverse_probes(
         return candidates[..n].to_vec();
     }
 
-    if candidate_centroids.len() != candidates.len() * dim {
+    let Some(total_centroid_floats) = candidates.len().checked_mul(dim) else {
+        return candidates[..n].to_vec(); // overflow: fallback to top-n
+    };
+    if candidate_centroids.len() != total_centroid_floats {
         // Length mismatch -- cannot safely index into centroid data.
         // Return the top-n by distance as a fallback rather than panicking.
         return candidates[..n].to_vec();
@@ -79,6 +82,8 @@ pub fn select_diverse_probes(
     // Shortlist: top 2*nprobe by distance (already sorted)
     let shortlist_len = candidates.len().min(nprobe.saturating_mul(2));
     let shortlist = &candidates[..shortlist_len];
+    // SAFETY: shortlist_len <= candidates.len(), and candidates.len() * dim
+    // was verified above, so shortlist_len * dim cannot overflow.
     let shortlist_centroids = &candidate_centroids[..shortlist_len * dim];
 
     let lambda = diversity.lambda.clamp(0.0, 1.0);

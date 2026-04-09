@@ -75,6 +75,7 @@ pub fn unwrap_value(wrapped: &[u8], verify: bool) -> Result<&[u8], BfTreeError> 
         ));
     }
 
+    // SAFETY: wrapped.len() >= CHECKSUM_SIZE (4) is checked above.
     let stored_checksum = u32::from_le_bytes(wrapped[..CHECKSUM_SIZE].try_into().unwrap());
     let data = &wrapped[CHECKSUM_SIZE..];
 
@@ -91,6 +92,7 @@ pub fn unwrap_value(wrapped: &[u8], verify: bool) -> Result<&[u8], BfTreeError> 
 }
 
 /// Unwrap a checksum-wrapped value into an owned Vec, optionally verifying.
+// Convenience wrapper for callers that need ownership (e.g., cross-thread transfer).
 #[allow(dead_code)]
 pub fn unwrap_value_owned(wrapped: &[u8], verify: bool) -> Result<Vec<u8>, BfTreeError> {
     unwrap_value(wrapped, verify).map(|data| data.to_vec())

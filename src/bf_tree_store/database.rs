@@ -632,8 +632,7 @@ impl BfTreeDatabaseWriteTxn {
         value: &V::SelfType<'_>,
     ) -> Result<(), BfTreeError> {
         let val_bytes = V::as_bytes(value);
-        let encoded_key =
-            encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
+        let encoded_key = encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
         self.buffer
             .lock()
             .put(encoded_key, val_bytes.as_ref().to_vec())?;
@@ -649,8 +648,7 @@ impl BfTreeDatabaseWriteTxn {
         definition: &TableDefinition<K, V>,
         key: &K::SelfType<'_>,
     ) {
-        let encoded_key =
-            encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
+        let encoded_key = encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
         self.buffer.lock().delete(encoded_key);
         self.ops_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -664,8 +662,7 @@ impl BfTreeDatabaseWriteTxn {
         definition: &TableDefinition<K, V>,
         key: &K::SelfType<'_>,
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
-        let encoded_key =
-            encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
+        let encoded_key = encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
 
         // Check write buffer first.
         {
@@ -696,8 +693,7 @@ impl BfTreeDatabaseWriteTxn {
         definition: &TableDefinition<K, V>,
         key: &K::SelfType<'_>,
     ) -> bool {
-        let encoded_key =
-            encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
+        let encoded_key = encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
 
         // Check write buffer first.
         {
@@ -1071,8 +1067,7 @@ impl BfTreeDatabaseReadTxn {
         definition: &TableDefinition<K, V>,
         key: &K::SelfType<'_>,
     ) -> bool {
-        let encoded_key =
-            encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
+        let encoded_key = encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
         self.adapter.contains_key(&encoded_key)
     }
 

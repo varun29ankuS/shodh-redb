@@ -21,8 +21,8 @@
 use crate::compat::Mutex;
 use alloc::collections::VecDeque;
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};

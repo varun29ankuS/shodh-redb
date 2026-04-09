@@ -229,6 +229,7 @@ fn next_sequence(buffer: &Mutex<WriteBuffer>, adapter: &BfTreeAdapter) -> Result
     };
 
     let seq = match current {
+        // SAFETY: len >= 8 guarantees bytes[..8] converts to [u8; 8].
         Some(bytes) if bytes.len() >= 8 => u64::from_le_bytes(bytes[..8].try_into().unwrap()),
         _ => 1,
     };
@@ -604,6 +605,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 && val_bytes.len() >= BlobMeta::SERIALIZED_SIZE
             {
                 let blob_id =
+                    // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                     BlobId::from_be_bytes(key_bytes[..BlobId::SERIALIZED_SIZE].try_into().unwrap());
                 let mut meta_arr = [0u8; BlobMeta::SERIALIZED_SIZE];
                 meta_arr.copy_from_slice(&val_bytes[..BlobMeta::SERIALIZED_SIZE]);
@@ -641,6 +643,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         for (key_bytes, _) in &entries {
             if key_bytes.len() >= TagKey::SERIALIZED_SIZE {
                 let tk =
+                    // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                     TagKey::from_be_bytes(key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap());
                 results.push(tk.blob_id);
             }
@@ -669,6 +672,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         let mut results = Vec::new();
         for (key_bytes, _) in &entries {
             if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
+                // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                 let nk = NamespaceKey::from_be_bytes(
                     key_bytes[..NamespaceKey::SERIALIZED_SIZE]
                         .try_into()
@@ -768,6 +772,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
 
                     let blob_id_bytes = &bytes[DedupVal::SERIALIZED_SIZE
                         ..DedupVal::SERIALIZED_SIZE + BlobId::SERIALIZED_SIZE];
+                    // SAFETY: blob_id_bytes slice is exactly SERIALIZED_SIZE bytes (guarded above).
                     let blob_id = BlobId::from_be_bytes(blob_id_bytes.try_into().unwrap());
 
                     // Verify the target blob still exists. If it was deleted,
@@ -853,6 +858,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 }
                 let key_bytes = &scan_buf[prefix_len..key_len];
                 if key_bytes.len() >= TagKey::SERIALIZED_SIZE {
+                    // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                     let tk = TagKey::from_be_bytes(
                         key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap(),
                     );
@@ -871,6 +877,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
             if key.len() > prefix_len {
                 let key_bytes = &key[prefix_len..];
                 if key_bytes.len() >= TagKey::SERIALIZED_SIZE {
+                    // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                     let tk = TagKey::from_be_bytes(
                         key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap(),
                     );
@@ -906,6 +913,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 }
                 let key_bytes = &scan_buf[prefix_len..key_len];
                 if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
+                    // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                     let nk = NamespaceKey::from_be_bytes(
                         key_bytes[..NamespaceKey::SERIALIZED_SIZE]
                             .try_into()
@@ -926,6 +934,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
             if key.len() > prefix_len {
                 let key_bytes = &key[prefix_len..];
                 if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
+                    // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                     let nk = NamespaceKey::from_be_bytes(
                         key_bytes[..NamespaceKey::SERIALIZED_SIZE]
                             .try_into()
@@ -999,6 +1008,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
                 }
                 let key_bytes = &scan_buf[prefix_len..key_len];
                 if key_bytes.len() >= CausalEdgeKey::SERIALIZED_SIZE {
+                    // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                     let cek = CausalEdgeKey::from_be_bytes(
                         key_bytes[..CausalEdgeKey::SERIALIZED_SIZE]
                             .try_into()
@@ -1019,6 +1029,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
             if key.len() > prefix_len {
                 let key_bytes = &key[prefix_len..];
                 if key_bytes.len() >= CausalEdgeKey::SERIALIZED_SIZE {
+                    // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                     let cek = CausalEdgeKey::from_be_bytes(
                         key_bytes[..CausalEdgeKey::SERIALIZED_SIZE]
                             .try_into()
@@ -1450,6 +1461,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
             let key_bytes = &scan_buf[prefix_len..key_len];
             if key_bytes.len() >= TagKey::SERIALIZED_SIZE {
                 let tk =
+                    // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                     TagKey::from_be_bytes(key_bytes[..TagKey::SERIALIZED_SIZE].try_into().unwrap());
                 results.push(tk.blob_id);
             }
@@ -1543,6 +1555,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
             }
             let key_bytes = &scan_buf[prefix_len..key_len];
             if key_bytes.len() >= TemporalKey::SERIALIZED_SIZE {
+                // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                 let tk = TemporalKey::from_be_bytes(
                     key_bytes[..TemporalKey::SERIALIZED_SIZE]
                         .try_into()
@@ -1577,6 +1590,7 @@ impl<'txn> BfTreeReadOnlyBlobStore<'txn> {
             }
             let key_bytes = &scan_buf[prefix_len..key_len];
             if key_bytes.len() >= NamespaceKey::SERIALIZED_SIZE {
+                // SAFETY: guarded by key_bytes.len() >= SERIALIZED_SIZE above.
                 let nk = NamespaceKey::from_be_bytes(
                     key_bytes[..NamespaceKey::SERIALIZED_SIZE]
                         .try_into()

@@ -439,10 +439,10 @@ impl<const N: usize, T: Value> Value for [T; N] {
                 start = end;
             }
         }
-        // Vec always has exactly N elements; the conversion is infallible.
+        // The loop above pushes exactly N elements; the conversion is infallible.
         result
             .try_into()
-            .unwrap_or_else(|_| panic!("BUG: pushed exactly N={N} elements"))
+            .unwrap_or_else(|_| unreachable!("loop pushes exactly N elements"))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>

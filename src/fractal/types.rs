@@ -24,6 +24,9 @@ pub struct ClusterMeta {
     data: [u8; CLUSTER_META_SIZE],
 }
 
+// All methods are part of the library API for fractal tree consumers.
+// Some are only used in tests or downstream code today, but the full
+// accessor surface is intentional for a fixed-width metadata struct.
 #[allow(dead_code)]
 impl ClusterMeta {
     pub fn new(cluster_id: u32, parent_id: u32, level: u8, is_root: bool) -> Self {
@@ -36,10 +39,12 @@ impl ClusterMeta {
     }
 
     pub fn cluster_id(&self) -> u32 {
+        // SAFETY: self.data is [u8; 128], so [0..4] is always valid for [u8; 4].
         u32::from_le_bytes(self.data[0..4].try_into().unwrap())
     }
 
     pub fn parent_id(&self) -> u32 {
+        // SAFETY: self.data is [u8; 128], so [4..8] is always valid for [u8; 4].
         u32::from_le_bytes(self.data[4..8].try_into().unwrap())
     }
 
@@ -64,6 +69,7 @@ impl ClusterMeta {
     }
 
     pub fn num_children(&self) -> u16 {
+        // SAFETY: self.data is [u8; 128]; range always valid.
         u16::from_le_bytes(self.data[10..12].try_into().unwrap())
     }
 
@@ -72,6 +78,7 @@ impl ClusterMeta {
     }
 
     pub fn population(&self) -> u32 {
+        // SAFETY: self.data is [u8; 128]; range always valid.
         u32::from_le_bytes(self.data[12..16].try_into().unwrap())
     }
 
@@ -80,6 +87,7 @@ impl ClusterMeta {
     }
 
     pub fn buffer_count(&self) -> u32 {
+        // SAFETY: self.data is [u8; 128]; range always valid.
         u32::from_le_bytes(self.data[16..20].try_into().unwrap())
     }
 
@@ -88,6 +96,7 @@ impl ClusterMeta {
     }
 
     pub fn sum_variance(&self) -> f64 {
+        // SAFETY: self.data is [u8; 128]; range always valid.
         f64::from_le_bytes(self.data[24..32].try_into().unwrap())
     }
 
@@ -96,6 +105,7 @@ impl ClusterMeta {
     }
 
     pub fn oldest_hlc(&self) -> u64 {
+        // SAFETY: self.data is [u8; 128]; range always valid.
         u64::from_le_bytes(self.data[32..40].try_into().unwrap())
     }
 
@@ -104,6 +114,7 @@ impl ClusterMeta {
     }
 
     pub fn newest_hlc(&self) -> u64 {
+        // SAFETY: self.data is [u8; 128]; range always valid.
         u64::from_le_bytes(self.data[40..48].try_into().unwrap())
     }
 
@@ -112,6 +123,7 @@ impl ClusterMeta {
     }
 
     pub fn oldest_wall_ns(&self) -> u64 {
+        // SAFETY: self.data is [u8; 128]; range always valid.
         u64::from_le_bytes(self.data[48..56].try_into().unwrap())
     }
 
@@ -120,6 +132,7 @@ impl ClusterMeta {
     }
 
     pub fn newest_wall_ns(&self) -> u64 {
+        // SAFETY: self.data is [u8; 128]; range always valid.
         u64::from_le_bytes(self.data[56..64].try_into().unwrap())
     }
 

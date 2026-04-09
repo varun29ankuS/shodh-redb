@@ -174,10 +174,9 @@ impl BfTreeDatabase {
     /// Multiple write transactions can coexist and execute concurrently.
     pub fn begin_write(&self) -> BfTreeDatabaseWriteTxn {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::SeqCst);
-        assert!(
-            txn_id < u64::MAX,
-            "transaction ID counter exhausted (u64::MAX reached)"
-        );
+        // At 1 billion txns/sec, u64::MAX takes ~584 years to exhaust.
+        // A debug_assert is sufficient; panic in release is unnecessary.
+        debug_assert!(txn_id < u64::MAX, "transaction ID counter exhausted");
         let cdc_log = if self.cdc_config.enabled {
             Some(Mutex::new(Vec::new()))
         } else {
@@ -257,6 +256,7 @@ fn recover_next_txn_id(adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
         let meta_key = encode_table_key(BF_META_TABLE_NAME, TableKind::Regular, BF_META_TXN_ID_KEY);
         match adapter.read(&meta_key, &mut buf) {
             Ok(len) if len as usize >= 8 => {
+                // SAFETY: len >= 8 guarantees buf[..8] is exactly [u8; 8].
                 let persisted = u64::from_le_bytes(buf[..8].try_into().unwrap());
                 if persisted > max_next_id {
                     max_next_id = persisted;
@@ -302,6 +302,7 @@ fn recover_next_txn_id(adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
             }
             let val_bytes = &buf[key_len..key_len + val_len];
             if val_bytes.len() >= 8 {
+                // SAFETY: len >= 8 guarantees val_bytes[..8] is exactly [u8; 8].
                 let cursor_txn = u64::from_le_bytes(val_bytes[..8].try_into().unwrap());
                 let candidate = cursor_txn.saturating_add(1);
                 if candidate > max_next_id {
@@ -1057,6 +1058,7 @@ impl BfTreeDatabaseReadTxn {
         match self.adapter.read(&encoded, &mut buf) {
             Ok(len) => {
                 if len as usize >= 8 {
+                    // SAFETY: len >= 8 guarantees buf[..8] is exactly [u8; 8].
                     let txn_id = u64::from_le_bytes(buf[..8].try_into().unwrap());
                     Ok(Some(txn_id))
                 } else {

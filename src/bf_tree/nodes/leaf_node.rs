@@ -208,7 +208,7 @@ impl MiniPageNextLevel {
     }
 
     pub(crate) fn as_offset(&self) -> usize {
-        assert!(!self.is_null());
+        debug_assert!(!self.is_null());
         self.val
     }
 
@@ -941,7 +941,10 @@ impl LeafNode {
         let mut splitting_key = if merge_split_key_2.is_none() || diff_1 < diff_2 {
             &key1
         } else {
-            merge_split_key_2.as_ref().unwrap()
+            // merge_split_key_2 is guaranteed Some here (is_none() was false above)
+            merge_split_key_2
+                .as_ref()
+                .ok_or(crate::bf_tree::error::IoErrorKind::InvariantViolation)?
         };
 
         // The splitting key cannot be the low fence as it leads to invalid page
@@ -976,7 +979,7 @@ impl LeafNode {
     /// consolidating the leaf node, while the evicting callback thread is attempting a
     /// unprotected read. As such, this function guarantees no panic happens during the key read
     pub fn try_get_key_to_reach_this_node(&self) -> Result<Vec<u8>, TreeError> {
-        assert!(self.meta.is_cache_only_leaf());
+        debug_assert!(self.meta.is_cache_only_leaf());
 
         // Get the meta of the first key
         let index = 0;
@@ -1540,7 +1543,7 @@ impl LeafNode {
     /// After consolidation, every tombstone records are removed, every insert records become cache records.
     #[allow(dead_code)]
     pub(crate) fn consolidate_after_merge(&mut self) {
-        assert!(!self.is_base_page());
+        debug_assert!(!self.is_base_page());
         self.consolidate_inner(
             OpType::Cache,
             None,
@@ -1556,7 +1559,7 @@ impl LeafNode {
     /// A delete/split operation will leave holes in the data field, which is not good for space efficiency.
     /// The easiest (but not most efficient) way to do this is to first populate every key value out, then reset the node state, then insert them back.
     fn consolidate_after_split(&mut self, high_fence: &[u8]) {
-        assert!(self.meta.is_cache_only_leaf() || self.is_base_page());
+        debug_assert!(self.meta.is_cache_only_leaf() || self.is_base_page());
         self.consolidate_inner(
             OpType::Insert,
             Some(high_fence),

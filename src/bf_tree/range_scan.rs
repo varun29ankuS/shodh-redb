@@ -470,7 +470,7 @@ fn promote_or_merge_mini_page<'a>(
                 }
             }
         }
-        PageLocation::Null => panic!("promote_or_merge_mini_page on Null page"),
+        PageLocation::Null => return Err(TreeError::IoError(IoErrorKind::NullPage)),
     }
 }
 
@@ -503,7 +503,12 @@ fn move_cursor_to_leaf_mut<'a>(
 
     // we need to merge mini page.
 
-    let v = promote_or_merge_mini_page(tree, key, &mut leaf, parent.unwrap())?;
+    let v = promote_or_merge_mini_page(
+        tree,
+        key,
+        &mut leaf,
+        parent.ok_or(TreeError::IoError(IoErrorKind::InvariantViolation))?,
+    )?;
     Ok((v, leaf))
 }
 
@@ -539,7 +544,12 @@ fn move_cursor_to_leaf<'a>(
     // we need to merge mini page.
     let mut x_leaf = leaf.try_upgrade().map_err(|_e| TreeError::Locked)?;
 
-    let v = promote_or_merge_mini_page(tree, key, &mut x_leaf, parent.unwrap())?;
+    let v = promote_or_merge_mini_page(
+        tree,
+        key,
+        &mut x_leaf,
+        parent.ok_or(TreeError::IoError(IoErrorKind::InvariantViolation))?,
+    )?;
     Ok((v, ScanLock::X(x_leaf)))
 }
 

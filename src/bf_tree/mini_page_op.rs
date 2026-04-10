@@ -580,7 +580,13 @@ impl<'a> LeafEntryXLocked<'a> {
             }
             PageLocation::Mini(ptr) | PageLocation::Full(ptr) => {
                 let leaf_node = self.load_cache_page_mut(ptr);
-                let h = storage.begin_dealloc_mini_page(leaf_node).unwrap();
+                let h = match storage.begin_dealloc_mini_page(leaf_node) {
+                    Ok(h) => h,
+                    Err(_) => {
+                        debug_assert!(false, "begin_dealloc_mini_page failed in dealloc path");
+                        return;
+                    }
+                };
                 let base_page = leaf_node.next_level;
                 storage.finish_dealloc_mini_page(h);
 
@@ -653,7 +659,9 @@ impl<'a> LeafEntryXLocked<'a> {
 
                 let mini_page_ref = self.load_cache_page_mut(new_mini_ptr);
                 let insert_success = mini_page_ref.insert(key, value, op_type, 0);
-                assert!(insert_success);
+                if !insert_success {
+                    return Err(TreeError::IoError(IoErrorKind::InvariantViolation));
+                }
                 counter!(InsertCreatedMiniPage);
 
                 info!(

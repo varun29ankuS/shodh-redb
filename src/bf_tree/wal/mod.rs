@@ -104,11 +104,12 @@ impl WriteAheadLogInner {
         }
 
         self.clear_next_header();
-        // Write only the used portion of the buffer, not the entire segment.
-        // The segment may be up to 1 GiB; writing unused zero-fill is wasteful
-        // and catastrophically slow on Windows.
-        // SAFETY: buffer_cursor <= buffer_size guaranteed by alloc_buffer's debug_assert.
-        let used_slice = unsafe { self.buffer.as_slice_len(self.buffer_cursor) };
+        // Write the used portion plus the sentinel header (8 zero bytes marking
+        // end-of-entries). This ensures the reader can detect the end even when
+        // entries don't align to segment boundaries during recovery reads.
+        let write_len = (self.buffer_cursor + LogHeader::size()).min(self.buffer.buffer_size);
+        // SAFETY: write_len <= buffer_size by the min() clamp above.
+        let used_slice = unsafe { self.buffer.as_slice_len(write_len) };
         if let Err(_e) = self.file_handle.write(self.file_offset, used_slice) {
             #[cfg(feature = "std")]
             eprintln!(
@@ -258,7 +259,7 @@ impl WriteAheadLog {
             .map_err(|_| TreeError::IoError(IoErrorKind::WalAppend))?;
 
         // log header + wal size
-        let required_bytes = std::mem::size_of::<LogHeader>() + log_entry.log_size();
+        let required_bytes = LogHeader::size() + log_entry.log_size();
         let remaining = inner.buffer.buffer_size - inner.buffer_cursor;
         if required_bytes > remaining {
             // Buffer full -- flush directly (caller-side) then retry.
@@ -269,12 +270,15 @@ impl WriteAheadLog {
         }
 
         let lsn = inner.alloc_lsn();
-        let header = LogHeader::new(lsn, page_offset, required_bytes);
+        let mut header = LogHeader::new(lsn, page_offset, required_bytes);
         // SAFETY: `alloc_buffer` returns a mutable slice within the pre-allocated WAL buffer.
         // The debug_assert inside guarantees `buffer_cursor + required_bytes <= buffer_size`.
         let buffer = unsafe { inner.alloc_buffer(required_bytes) };
-        buffer[0..LogHeader::size()].copy_from_slice(header.as_slice());
+        // Write payload first so we can compute CRC over it.
         log_entry.write_to_buffer(&mut buffer[LogHeader::size()..]);
+        header.crc32 =
+            crate::bf_tree::utils::crc32::crc32(&buffer[LogHeader::size()..required_bytes]);
+        buffer[0..LogHeader::size()].copy_from_slice(&header.to_bytes());
 
         // Caller-side flush: write+fsync directly instead of waiting for
         // background thread. This eliminates condvar round-trip latency.
@@ -300,7 +304,7 @@ impl WriteAheadLog {
             .lock()
             .map_err(|_| TreeError::IoError(IoErrorKind::WalAppend))?;
 
-        let required_bytes = std::mem::size_of::<LogHeader>() + log_entry.log_size();
+        let required_bytes = LogHeader::size() + log_entry.log_size();
         let remaining = inner.buffer.buffer_size - inner.buffer_cursor;
         if required_bytes > remaining {
             // Buffer full -- flush directly (caller-side) then retry.
@@ -311,12 +315,14 @@ impl WriteAheadLog {
         }
 
         let lsn = inner.alloc_lsn();
-        let header = LogHeader::new(lsn, page_offset, required_bytes);
+        let mut header = LogHeader::new(lsn, page_offset, required_bytes);
         // SAFETY: `alloc_buffer` returns a mutable slice within the pre-allocated WAL buffer.
         // The debug_assert inside guarantees `buffer_cursor + required_bytes <= buffer_size`.
         let buffer = unsafe { inner.alloc_buffer(required_bytes) };
-        buffer[0..LogHeader::size()].copy_from_slice(header.as_slice());
         log_entry.write_to_buffer(&mut buffer[LogHeader::size()..]);
+        header.crc32 =
+            crate::bf_tree::utils::crc32::crc32(&buffer[LogHeader::size()..required_bytes]);
+        buffer[0..LogHeader::size()].copy_from_slice(&header.to_bytes());
 
         Ok(lsn)
     }
@@ -422,33 +428,81 @@ impl WalReader {
     ///
     /// Each segment contains multiple log entries,
     /// you can iterate through the log entries in each segment using the `iter` method on `WalSegment`.
+    ///
+    /// Handles entries that span segment boundaries by carrying unprocessed
+    /// tail bytes from one segment into the next.
     pub fn segment_iter(&self) -> WalSegmentIter<'_> {
         WalSegmentIter {
             reader: self,
             cursor: 0,
+            carry: Vec::new(),
         }
+    }
+
+    /// Read the entire WAL file and return all entries as a single flat list.
+    ///
+    /// This correctly handles entries that span segment/chunk boundaries.
+    /// Suitable for recovery and testing.
+    pub fn read_all_entries(&self) -> Result<Vec<(LogHeader, Vec<u8>)>, crate::bf_tree::error::IoErrorKind> {
+        // Read the entire file into memory.
+        let mut data = vec![0u8; self.file_size];
+        if self.file_size == 0 {
+            return Ok(Vec::new());
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.log_file
+                .read_exact_at(&mut data, 0)
+                .map_err(|_| crate::bf_tree::error::IoErrorKind::SnapshotRead)?;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt;
+            match self.log_file.seek_read(&mut data, 0) {
+                Ok(n) if n == self.file_size => {}
+                _ => return Err(crate::bf_tree::error::IoErrorKind::SnapshotRead),
+            }
+        }
+
+        let segment = WalSegment { data };
+        let mut entries = Vec::new();
+        for (header, payload) in segment.entry_iter() {
+            entries.push((header, payload.to_vec()));
+        }
+        Ok(entries)
     }
 }
 
 pub struct WalSegmentIter<'a> {
     reader: &'a WalReader,
     cursor: u64,
+    /// Unprocessed tail bytes from the previous segment that contained a partial
+    /// entry header. Prepended to the next segment to handle cross-boundary entries.
+    carry: Vec<u8>,
 }
 
 impl Iterator for WalSegmentIter<'_> {
     type Item = Result<WalSegment, crate::bf_tree::error::IoErrorKind>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cursor as usize >= self.reader.file_size {
+        if self.cursor as usize >= self.reader.file_size && self.carry.is_empty() {
             return None;
         }
+        if self.cursor as usize >= self.reader.file_size {
+            // Only carry bytes remain -- no more file data. If carry is too
+            // small for a header, we're done.
+            if self.carry.len() < LogHeader::size() {
+                return None;
+            }
+            let data = std::mem::take(&mut self.carry);
+            return Some(Ok(WalSegment { data }));
+        }
 
-        let mut buffer = vec![0u8; self.reader.segment_size];
         let page_offset = self.cursor;
-        // The last segment may be shorter than segment_size because the WAL
-        // writer only flushes the used portion of the buffer (buffer_cursor
-        // bytes) to avoid writing megabytes of unused zero-fill on every fsync.
         let remaining = self.reader.file_size - page_offset as usize;
         let read_len = remaining.min(self.reader.segment_size);
+        let mut file_buf = vec![0u8; read_len];
 
         #[cfg(unix)]
         {
@@ -456,7 +510,7 @@ impl Iterator for WalSegmentIter<'_> {
             if self
                 .reader
                 .log_file
-                .read_exact_at(&mut buffer[..read_len], page_offset)
+                .read_exact_at(&mut file_buf, page_offset)
                 .is_err()
             {
                 return Some(Err(crate::bf_tree::error::IoErrorKind::SnapshotRead));
@@ -468,16 +522,20 @@ impl Iterator for WalSegmentIter<'_> {
             match self
                 .reader
                 .log_file
-                .seek_read(&mut buffer[..read_len], page_offset)
+                .seek_read(&mut file_buf, page_offset)
             {
                 Ok(bytes_read) if bytes_read == read_len => {}
                 _ => return Some(Err(crate::bf_tree::error::IoErrorKind::SnapshotRead)),
             }
         }
 
-        self.cursor += self.reader.segment_size as u64;
+        self.cursor += read_len as u64;
 
-        Some(Ok(WalSegment { data: buffer }))
+        // Prepend carry from previous segment.
+        let mut data = std::mem::take(&mut self.carry);
+        data.extend_from_slice(&file_buf);
+
+        Some(Ok(WalSegment { data }))
     }
 }
 
@@ -515,19 +573,44 @@ impl<'a> Iterator for WalEntryIter<'a> {
 
         let data_start = self.cur_offset as usize + LogHeader::size();
         let data_end = data_start + header.log_len - LogHeader::size();
+
+        // Bounds check: corrupted log_len could point past segment end.
+        if data_end > self.segment.data.len() {
+            return None;
+        }
+
         let data = &self.segment.data[data_start..data_end];
+
+        // CRC verification: crc32 == 0 means no checksum (v1 backward compat).
+        if header.crc32 != 0 {
+            let computed = crate::bf_tree::utils::crc32::crc32(data);
+            if computed != header.crc32 {
+                // Corrupted entry -- stop iteration to prevent reading garbage.
+                return None;
+            }
+        }
+
         self.cur_offset += header.log_len as u64;
         Some((header, data))
     }
 }
 
-/// The header of a log entry in the wal file.
-#[repr(C)]
+/// The header of a log entry in the WAL file.
+///
+/// Layout (32 bytes, little-endian):
+///   [0..8)   log_len: usize    -- total entry size (header + payload)
+///   [8..16)  lsn: u64          -- log sequence number
+///   [16..24) page_offset: u64  -- page offset this entry applies to
+///   [24..28) crc32: u32        -- CRC-32 (IEEE) of payload bytes; 0 = no checksum (v1 compat)
+///   [28..32) _pad: u32         -- reserved, zero-filled (8-byte alignment)
 #[derive(Debug, Clone)]
 pub struct LogHeader {
     pub log_len: usize,
     pub lsn: u64,
     pub page_offset: u64,
+    /// CRC-32 of the payload (everything after the header). Zero means "no checksum"
+    /// for backward compatibility with WAL files written before checksums were added.
+    pub crc32: u32,
 }
 
 impl LogHeader {
@@ -536,30 +619,43 @@ impl LogHeader {
             log_len,
             lsn,
             page_offset,
+            crc32: 0,
         }
     }
 
-    fn as_slice(&self) -> &[u8] {
-        // SAFETY: LogHeader is #[repr(C)] with only primitive fields, self is a valid
-        // reference, and the slice length equals size_of::<LogHeader>() (24 bytes).
-        unsafe {
-            std::slice::from_raw_parts(self as *const _ as *const u8, std::mem::size_of::<Self>())
-        }
+    fn to_bytes(&self) -> [u8; 32] {
+        let mut buf = [0u8; 32];
+        buf[0..8].copy_from_slice(&self.log_len.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.lsn.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.page_offset.to_le_bytes());
+        buf[24..28].copy_from_slice(&self.crc32.to_le_bytes());
+        // [28..32] stays zero (padding)
+        buf
     }
 
     fn from_slice(buffer: &[u8]) -> Self {
         let log_len = usize::from_le_bytes(buffer[0..8].try_into().unwrap());
         let lsn = u64::from_le_bytes(buffer[8..16].try_into().unwrap());
         let page_offset = u64::from_le_bytes(buffer[16..24].try_into().unwrap());
-        Self::new(lsn, page_offset, log_len)
+        let crc32 = if buffer.len() >= 28 {
+            u32::from_le_bytes(buffer[24..28].try_into().unwrap())
+        } else {
+            0 // v1 WAL file with 24-byte headers
+        };
+        LogHeader {
+            log_len,
+            lsn,
+            page_offset,
+            crc32,
+        }
     }
 
     const fn size() -> usize {
-        std::mem::size_of::<Self>()
+        32
     }
 }
 
-const _: () = assert!(LogHeader::size() == 24);
+const _: () = assert!(LogHeader::size() == 32);
 
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
@@ -599,6 +695,8 @@ mod tests {
     fn make_test_wal(name: &str, segment_size: usize) -> Arc<WriteAheadLog> {
         let tmp_dir = std::env::temp_dir();
         let tmp_file = tmp_dir.join(name);
+        // Remove stale file from prior runs to avoid reading old-format data.
+        let _ = std::fs::remove_file(&tmp_file);
         let mut wal_config = WalConfig::new(&tmp_file);
         wal_config.segment_size(segment_size);
         wal_config.flush_interval(Duration::from_micros(1));
@@ -628,23 +726,18 @@ mod tests {
         drop(wal);
 
         let reader = WalReader::new(&tmp_file, TEST_SEGMENT_SIZE).unwrap();
-        let mut cnt = 0;
-        for segment in reader.segment_iter() {
-            let segment = segment.unwrap();
-            let seg_iter = segment.entry_iter();
-            for (header, data) in seg_iter {
-                let val = TestLogEntry::read_from_buffer(data);
-                assert_eq!(
-                    header.log_len,
-                    TestLogEntry::new(0).log_size() + LogHeader::size()
-                );
-                assert_eq!(header.lsn, cnt as u64);
-                assert_eq!(header.page_offset, cnt as u64);
-                assert_eq!(val.val, cnt);
-                cnt += 1;
-            }
+        let entries = reader.read_all_entries().unwrap();
+        for (cnt, (header, data)) in entries.iter().enumerate() {
+            let val = TestLogEntry::read_from_buffer(data);
+            assert_eq!(
+                header.log_len,
+                TestLogEntry::new(0).log_size() + LogHeader::size()
+            );
+            assert_eq!(header.lsn, cnt as u64);
+            assert_eq!(header.page_offset, cnt as u64);
+            assert_eq!(val.val, cnt);
         }
-        assert_eq!(cnt, log_entry_cnt);
+        assert_eq!(entries.len(), log_entry_cnt);
         std::fs::remove_file(tmp_file).unwrap();
     }
 
@@ -682,21 +775,16 @@ mod tests {
         drop(wal);
 
         let reader = WalReader::new(&tmp_file, TEST_SEGMENT_SIZE).unwrap();
-        let mut cnt = 0;
-        for segment in reader.segment_iter() {
-            let segment = segment.unwrap();
-            let seg_iter = segment.entry_iter();
-            for (header, data) in seg_iter {
-                let val = TestLogEntry::read_from_buffer(data);
-                assert_eq!(
-                    header.log_len,
-                    TestLogEntry::new(0).log_size() + LogHeader::size()
-                );
-                assert_eq!(val.val, header.page_offset as usize);
-                cnt += 1;
-            }
+        let entries = reader.read_all_entries().unwrap();
+        for (header, data) in &entries {
+            let val = TestLogEntry::read_from_buffer(data);
+            assert_eq!(
+                header.log_len,
+                TestLogEntry::new(0).log_size() + LogHeader::size()
+            );
+            assert_eq!(val.val, header.page_offset as usize);
         }
-        assert_eq!(cnt, log_entry_cnt * thread_cnt);
+        assert_eq!(entries.len(), log_entry_cnt * thread_cnt);
         std::fs::remove_file(tmp_file).unwrap();
     }
 
@@ -725,6 +813,108 @@ mod tests {
             }
             _ => panic!("Expected Split entry"),
         }
+    }
+
+    #[test]
+    fn crc32_roundtrip() {
+        const TEST_SEGMENT_SIZE: usize = 4096;
+        let pid = std::process::id();
+        let tid = utils::thread_id_to_u64(std::thread::current().id());
+        let wal = make_test_wal(
+            &format!("wal_crc32_roundtrip_{}_{}.log", pid, tid),
+            TEST_SEGMENT_SIZE,
+        );
+        let tmp_file = wal.config.file_path.clone();
+
+        // Write several entries.
+        for i in 0..10u64 {
+            let entry = TestLogEntry::new(i as usize);
+            wal.append_and_wait(&entry, i).unwrap();
+        }
+        wal.stop_background_job();
+        drop(wal);
+
+        // Read back and verify every entry has a non-zero CRC that matches
+        // recomputation over the payload.
+        let reader = WalReader::new(&tmp_file, TEST_SEGMENT_SIZE).unwrap();
+        let entries = reader.read_all_entries().unwrap();
+        assert_eq!(entries.len(), 10);
+        for (header, data) in &entries {
+            assert_ne!(header.crc32, 0, "CRC should be non-zero for new entries");
+            let recomputed = crate::bf_tree::utils::crc32::crc32(data);
+            assert_eq!(
+                header.crc32, recomputed,
+                "CRC mismatch: stored {} vs recomputed {}",
+                header.crc32, recomputed
+            );
+        }
+        std::fs::remove_file(tmp_file).unwrap();
+    }
+
+    #[test]
+    fn crc32_detects_corruption() {
+        const TEST_SEGMENT_SIZE: usize = 4096;
+        let pid = std::process::id();
+        let tid = utils::thread_id_to_u64(std::thread::current().id());
+        let filename = format!("wal_crc32_corrupt_{}_{}.log", pid, tid);
+        let wal = make_test_wal(&filename, TEST_SEGMENT_SIZE);
+        let tmp_file = wal.config.file_path.clone();
+
+        // Write 5 entries.
+        for i in 0..5u64 {
+            let entry = TestLogEntry::new(i as usize);
+            wal.append_and_wait(&entry, i).unwrap();
+        }
+        wal.stop_background_job();
+        drop(wal);
+
+        // Corrupt the payload of the 3rd entry (index 2) by flipping a byte.
+        // Each entry is LogHeader::size() + TestLogEntry payload size.
+        let entry_size = LogHeader::size() + TestLogEntry::new(0).log_size();
+        let corrupt_offset = entry_size * 2 + LogHeader::size() + 1; // byte inside 3rd payload
+
+        let mut raw = std::fs::read(&tmp_file).unwrap();
+        assert!(corrupt_offset < raw.len());
+        raw[corrupt_offset] ^= 0xFF; // flip all bits
+        std::fs::write(&tmp_file, &raw).unwrap();
+
+        // Reader should return only the first 2 entries (stops at corrupted one).
+        let reader = WalReader::new(&tmp_file, TEST_SEGMENT_SIZE).unwrap();
+        let entries = reader.read_all_entries().unwrap();
+        assert_eq!(
+            entries.len(),
+            2,
+            "Expected 2 valid entries before corruption, got {}",
+            entries.len()
+        );
+        std::fs::remove_file(tmp_file).unwrap();
+    }
+
+    #[test]
+    fn crc32_backward_compat_zero_checksum() {
+        // Simulate a v1 WAL entry (crc32 field = 0) and verify it's still readable.
+        let payload = b"hello_wal_v1";
+        let header = LogHeader {
+            log_len: LogHeader::size() + payload.len(),
+            lsn: 42,
+            page_offset: 7,
+            crc32: 0, // v1: no checksum
+        };
+
+        // Build a fake WAL segment buffer.
+        let total = header.log_len;
+        let mut buf = vec![0u8; total + LogHeader::size()]; // extra header-sized sentinel
+        buf[0..LogHeader::size()].copy_from_slice(&header.to_bytes());
+        buf[LogHeader::size()..LogHeader::size() + payload.len()].copy_from_slice(payload);
+        // Sentinel: zeroed header at the end (log_len=0 stops iteration).
+
+        let segment = WalSegment { data: buf };
+        let entries: Vec<_> = segment.entry_iter().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0.lsn, 42);
+        assert_eq!(entries[0].0.page_offset, 7);
+        assert_eq!(entries[0].0.crc32, 0);
+        assert_eq!(entries[0].1, payload);
     }
 
     /// As of https://github.com/awslabs/shuttle/issues/74

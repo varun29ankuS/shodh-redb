@@ -93,11 +93,12 @@ impl BfTreeWriteTxn {
     ///
     /// For in-memory databases, this is a no-op (data is not persisted).
     pub fn commit(mut self) -> Result<(), BfTreeError> {
-        self.committed = true;
         // Ensure durability for non-memory backends by forcing a snapshot.
         if !self.adapter.inner().config().is_memory_backend() {
             self.adapter.snapshot()?;
         }
+        // Mark committed only AFTER all durability steps succeed.
+        self.committed = true;
         Ok(())
     }
 
@@ -106,8 +107,10 @@ impl BfTreeWriteTxn {
     /// More expensive than `commit()` but guarantees all data is recoverable
     /// even without WAL replay.
     pub fn commit_with_snapshot(mut self) -> Result<std::path::PathBuf, BfTreeError> {
+        let path = self.adapter.snapshot()?;
+        // Mark committed only AFTER snapshot succeeds.
         self.committed = true;
-        Ok(self.adapter.snapshot()?)
+        Ok(path)
     }
 
     /// Number of insert/delete operations performed in this transaction.
@@ -125,14 +128,12 @@ impl Drop for BfTreeWriteTxn {
     fn drop(&mut self) {
         if !self.committed && self.ops_count > 0 {
             // Writes are already applied -- there's no rollback in Bf-Tree.
-            // Log a warning in debug builds.
-            #[cfg(debug_assertions)]
-            {
-                eprintln!(
-                    "bf-tree: BfTreeWriteTxn dropped without commit ({} ops applied but not durability-flushed)",
-                    self.ops_count
-                );
-            }
+            // Fire debug_assert so tests catch this, but never crash in release.
+            debug_assert!(
+                false,
+                "BfTreeWriteTxn dropped without commit ({} ops applied but not durability-flushed)",
+                self.ops_count
+            );
         }
     }
 }

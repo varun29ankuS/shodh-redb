@@ -212,21 +212,17 @@ impl Config {
     /// Constructor of Config based on a config TOML file
     /// The config file must have all fields defined in ConfigFile.
     #[cfg(feature = "std")]
-    pub fn new_with_config_file<P: AsRef<Path>>(config_file_path: P) -> Self {
-        let config_file_str = match fs::read_to_string(&config_file_path) {
-            Ok(s) => s,
-            Err(e) => panic!(
-                "failed to read config file {}: {e}",
-                config_file_path.as_ref().display()
-            ),
-        };
-        let config_file: ConfigFile = match toml::from_str(&config_file_str) {
-            Ok(c) => c,
-            Err(e) => panic!(
-                "failed to parse config file {}: {e}",
-                config_file_path.as_ref().display()
-            ),
-        };
+    pub fn new_with_config_file<P: AsRef<Path>>(
+        config_file_path: P,
+    ) -> Result<Self, crate::bf_tree::error::BfTreeError> {
+        let config_file_str = fs::read_to_string(&config_file_path)
+            .map_err(|_| crate::bf_tree::error::BfTreeError::Io(
+                crate::bf_tree::error::IoErrorKind::ConfigRead,
+            ))?;
+        let config_file: ConfigFile = toml::from_str(&config_file_str)
+            .map_err(|_| crate::bf_tree::error::BfTreeError::Io(
+                crate::bf_tree::error::IoErrorKind::ConfigParse,
+            ))?;
         let scan_promotion_rate = if cfg!(debug_assertions) {
             DEFAULT_PROMOTION_RATE_DEBUG
         } else {
@@ -238,7 +234,7 @@ impl Config {
         }
 
         // Return the config
-        Self {
+        Ok(Self {
             read_promotion_rate: AtomicUsize::new(config_file.read_promotion_rate),
             scan_promotion_rate: AtomicUsize::new(scan_promotion_rate),
             cb_size_byte: config_file.cb_size_byte,
@@ -257,7 +253,7 @@ impl Config {
             write_load_full_page: config_file.write_load_full_page,
             cache_only: config_file.cache_only,
             verify_checksums: false,
-        }
+        })
     }
 
     /// Default: Std
@@ -606,7 +602,7 @@ mod tests {
     const SAMPLE_CONFIG_FILE: &str = "src/bf_tree/sample_config.toml";
     #[test]
     fn test_new_with_config_file() {
-        let config = Config::new_with_config_file(SAMPLE_CONFIG_FILE);
+        let config = Config::new_with_config_file(SAMPLE_CONFIG_FILE).unwrap();
 
         assert_eq!(config.cb_size_byte, 8192);
         assert_eq!(config.read_promotion_rate.load(Ordering::Relaxed), 100);

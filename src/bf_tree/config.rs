@@ -215,14 +215,12 @@ impl Config {
     pub fn new_with_config_file<P: AsRef<Path>>(
         config_file_path: P,
     ) -> Result<Self, crate::bf_tree::error::BfTreeError> {
-        let config_file_str = fs::read_to_string(&config_file_path)
-            .map_err(|_| crate::bf_tree::error::BfTreeError::Io(
-                crate::bf_tree::error::IoErrorKind::ConfigRead,
-            ))?;
-        let config_file: ConfigFile = toml::from_str(&config_file_str)
-            .map_err(|_| crate::bf_tree::error::BfTreeError::Io(
-                crate::bf_tree::error::IoErrorKind::ConfigParse,
-            ))?;
+        let config_file_str = fs::read_to_string(&config_file_path).map_err(|_| {
+            crate::bf_tree::error::BfTreeError::Io(crate::bf_tree::error::IoErrorKind::ConfigRead)
+        })?;
+        let config_file: ConfigFile = toml::from_str(&config_file_str).map_err(|_| {
+            crate::bf_tree::error::BfTreeError::Io(crate::bf_tree::error::IoErrorKind::ConfigParse)
+        })?;
         let scan_promotion_rate = if cfg!(debug_assertions) {
             DEFAULT_PROMOTION_RATE_DEBUG
         } else {

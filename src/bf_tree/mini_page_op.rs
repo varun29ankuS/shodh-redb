@@ -900,7 +900,7 @@ impl<'a> LeafEntryXLocked<'a> {
                                 mini_page,
                                 storage,
                                 parent
-                                .ok_or(TreeError::IoError(IoErrorKind::InvariantViolation))?,
+                                    .ok_or(TreeError::IoError(IoErrorKind::InvariantViolation))?,
                             )?;
 
                             info!(pid = self.pid.raw(), "old mini page deallocated");

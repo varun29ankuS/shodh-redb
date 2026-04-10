@@ -288,6 +288,7 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
                     rerank: true,
                     min_hlc: 0,
                     diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
+                    filter: None,
                 });
                 fi.search(reader, query, &params)?
             } else {
@@ -302,6 +303,7 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
                     k,
                     rerank: true,
                     diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
+                    filter: None,
                 });
                 index.search(reader, query, &params)?
             };

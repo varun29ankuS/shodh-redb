@@ -1,3 +1,4 @@
+use crate::ivfpq::metadata::MetadataFilter;
 use crate::probe_select::DiversityConfig;
 use crate::vector_ops::DistanceMetric;
 use core::fmt;
@@ -230,6 +231,9 @@ pub struct FractalSearchParams {
     pub min_hlc: u64,
     /// Diversity-aware probe selection. Default: disabled (lambda=0.0).
     pub diversity: DiversityConfig,
+    /// Optional metadata filter. Candidates whose metadata does not match
+    /// are excluded before entering the top-K heap.
+    pub filter: Option<MetadataFilter>,
 }
 
 impl FractalSearchParams {
@@ -241,6 +245,7 @@ impl FractalSearchParams {
             rerank: true,
             min_hlc: 0,
             diversity: DiversityConfig { lambda: 0.0 },
+            filter: None,
         }
     }
 
@@ -265,6 +270,14 @@ impl FractalSearchParams {
         self.diversity = DiversityConfig {
             lambda: lambda.clamp(0.0, 1.0),
         };
+        self
+    }
+
+    /// Set a metadata filter. Candidates whose metadata does not match are
+    /// excluded from results.
+    #[must_use]
+    pub fn with_filter(mut self, filter: MetadataFilter) -> Self {
+        self.filter = Some(filter);
         self
     }
 }

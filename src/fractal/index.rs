@@ -6,6 +6,7 @@ use crate::error::StorageError;
 use crate::storage_traits::{ReadTable, StorageRead, StorageWrite, WriteTable};
 use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
 
+use crate::ivfpq::metadata::MetadataMap;
 use crate::ivfpq::pq::{self, Codebooks};
 use crate::ivfpq::types::PostingKey;
 
@@ -688,7 +689,38 @@ impl<'txn, T: StorageWrite> FractalIndex<'txn, T> {
             merge_cluster(self.txn, &mut self.config, cluster_id, &self.names)?;
         }
 
+        // Also remove associated metadata if present.
+        {
+            let mdef = TableDefinition::<u64, &[u8]>::new(&self.names.vector_meta);
+            let mut mt = self.txn.open_storage_table(mdef)?;
+            mt.st_remove(&vector_id)?;
+        }
+
         Ok(true)
+    }
+
+    /// Insert or replace metadata for a vector.
+    ///
+    /// The metadata is stored in a separate B-tree table keyed by `vector_id`.
+    /// This must be called after inserting the vector itself.
+    pub fn insert_metadata(
+        &mut self,
+        vector_id: u64,
+        metadata: &MetadataMap,
+    ) -> crate::Result<()> {
+        let encoded = metadata.encode();
+        let mdef = TableDefinition::<u64, &[u8]>::new(&self.names.vector_meta);
+        let mut mt = self.txn.open_storage_table(mdef)?;
+        mt.st_insert(&vector_id, &encoded.as_slice())?;
+        Ok(())
+    }
+
+    /// Remove metadata for a vector.
+    pub fn remove_metadata(&mut self, vector_id: u64) -> crate::Result<()> {
+        let mdef = TableDefinition::<u64, &[u8]>::new(&self.names.vector_meta);
+        let mut mt = self.txn.open_storage_table(mdef)?;
+        mt.st_remove(&vector_id)?;
+        Ok(())
     }
 
     /// Search the index for nearest neighbors.

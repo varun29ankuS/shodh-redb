@@ -769,6 +769,7 @@ pub(crate) struct TableNames {
     pub assignments: String,
     pub vectors: String,
     pub codebooks: String,
+    pub vector_meta: String,
 }
 
 impl TableNames {
@@ -784,6 +785,7 @@ impl TableNames {
             assignments: alloc::format!("__fractal:{name}:assignments"),
             vectors: alloc::format!("__fractal:{name}:vectors"),
             codebooks: alloc::format!("__fractal:{name}:codebooks"),
+            vector_meta: alloc::format!("__fractal:{name}:vector_meta"),
         }
     }
 }

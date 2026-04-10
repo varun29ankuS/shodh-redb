@@ -2,6 +2,8 @@ use crate::probe_select::DiversityConfig;
 use crate::vector_ops::DistanceMetric;
 use core::fmt;
 
+use super::metadata::MetadataFilter;
+
 // ---------------------------------------------------------------------------
 // IndexConfig -- persisted index configuration
 // ---------------------------------------------------------------------------
@@ -97,6 +99,9 @@ pub struct SearchParams {
     pub rerank: bool,
     /// Diversity-aware probe selection. Default: disabled (lambda=0.0).
     pub diversity: DiversityConfig,
+    /// Optional metadata filter. When set, candidates whose metadata does not
+    /// match this predicate are excluded before entering the top-K heap.
+    pub filter: Option<MetadataFilter>,
 }
 
 impl SearchParams {
@@ -108,6 +113,7 @@ impl SearchParams {
             k,
             rerank: true,
             diversity: DiversityConfig { lambda: 0.0 },
+            filter: None,
         }
     }
 
@@ -118,6 +124,14 @@ impl SearchParams {
         self.diversity = DiversityConfig {
             lambda: lambda.clamp(0.0, 1.0),
         };
+        self
+    }
+
+    /// Set a metadata filter. Candidates whose metadata does not match are
+    /// excluded from results.
+    #[must_use]
+    pub fn with_filter(mut self, filter: MetadataFilter) -> Self {
+        self.filter = Some(filter);
         self
     }
 }

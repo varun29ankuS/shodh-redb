@@ -124,7 +124,8 @@ pub use fractal::{
     ReadOnlyFractalIndex,
 };
 pub use ivfpq::{
-    Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, ReadOnlyIvfPqIndex, SearchParams,
+    Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, MetadataFilter, MetadataMap,
+    MetadataValue, ReadOnlyIvfPqIndex, SearchParams,
 };
 pub use merge::{
     BitwiseOr, BytesAppend, FloatAdd, FnMergeOperator, MergeOperator, NumericAdd, NumericMax,

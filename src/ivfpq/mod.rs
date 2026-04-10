@@ -50,6 +50,7 @@ pub(crate) mod index;
 pub mod kmeans;
 #[cfg(not(fuzzing))]
 pub(crate) mod kmeans;
+pub mod metadata;
 pub(crate) mod pq;
 #[cfg(fuzzing)]
 pub mod types;
@@ -58,4 +59,5 @@ pub(crate) mod types;
 
 pub use config::{IndexConfig, IvfPqIndexDefinition, SearchParams};
 pub use index::{IvfPqIndex, ReadOnlyIvfPqIndex};
+pub use metadata::{MetadataFilter, MetadataMap, MetadataValue};
 pub use pq::Codebooks;

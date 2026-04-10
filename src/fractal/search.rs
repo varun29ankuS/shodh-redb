@@ -9,6 +9,7 @@ use crate::storage_traits::{ReadTable, StorageRead, StorageWrite, WriteTable};
 use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
 
 use crate::ivfpq::adc::AdcTable;
+use crate::ivfpq::metadata::passes_filter;
 use crate::ivfpq::types::PostingKey;
 
 use super::cluster::TableNames;
@@ -162,6 +163,14 @@ pub(crate) fn search_write<T: StorageWrite>(
     let ptbl = idx.txn.open_storage_table(postings_def)?;
     let btbl = idx.txn.open_storage_table(buffer_def)?;
 
+    // Open metadata table only when a filter is active.
+    let meta_tbl = if params.filter.is_some() {
+        let mdef = TableDefinition::<u64, &[u8]>::new(&idx.names.vector_meta);
+        Some(idx.txn.open_storage_table(mdef)?)
+    } else {
+        None
+    };
+
     for leaf_id in &leaves {
         // Scan posting list with ADC
         let start = PostingKey::cluster_start(*leaf_id);
@@ -172,6 +181,18 @@ pub(crate) fn search_write<T: StorageWrite>(
             let vid = key.value().vector_id;
             let pq_codes = val.value();
             let dist = adc.approximate_distance(pq_codes);
+            if let Some(ref filter) = params.filter
+                && let Some(ref mt) = meta_tbl
+            {
+                match mt.st_get(&vid)? {
+                    Some(guard) => {
+                        if !passes_filter(guard.value(), filter) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
             heap.push(vid, dist);
         }
 
@@ -186,12 +207,25 @@ pub(crate) fn search_write<T: StorageWrite>(
             }
             let vec: Vec<f32> = (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
             let dist = idx.config.metric.compute(&q, &vec);
+            if let Some(ref filter) = params.filter
+                && let Some(ref mt) = meta_tbl
+            {
+                match mt.st_get(&vid)? {
+                    Some(guard) => {
+                        if !passes_filter(guard.value(), filter) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
             heap.push(vid, dist);
         }
     }
 
     drop(ptbl);
     drop(btbl);
+    drop(meta_tbl);
 
     // Rerank with raw vectors if available
     if params.rerank && idx.config.store_raw_vectors {
@@ -289,6 +323,13 @@ pub(crate) fn search_read<R: StorageRead>(
     let ptbl = txn.open_storage_table(postings_def)?;
     let btbl = txn.open_storage_table(buffer_def)?;
 
+    let meta_tbl = if params.filter.is_some() {
+        let mdef = TableDefinition::<u64, &[u8]>::new(&idx.names.vector_meta);
+        Some(txn.open_storage_table(mdef)?)
+    } else {
+        None
+    };
+
     for leaf_id in &leaves {
         let start = PostingKey::cluster_start(*leaf_id);
         let end = PostingKey::cluster_end(*leaf_id);
@@ -298,6 +339,18 @@ pub(crate) fn search_read<R: StorageRead>(
             let vid = key.value().vector_id;
             let pq_codes = val.value();
             let dist = adc.approximate_distance(pq_codes);
+            if let Some(ref filter) = params.filter
+                && let Some(ref mt) = meta_tbl
+            {
+                match mt.st_get(&vid)? {
+                    Some(guard) => {
+                        if !passes_filter(guard.value(), filter) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
             heap.push(vid, dist);
         }
 
@@ -311,12 +364,25 @@ pub(crate) fn search_read<R: StorageRead>(
             }
             let vec: Vec<f32> = (0..dim).map(|i| read_f32_le(bytes, i * 4)).collect();
             let dist = idx.config.metric.compute(&q, &vec);
+            if let Some(ref filter) = params.filter
+                && let Some(ref mt) = meta_tbl
+            {
+                match mt.st_get(&vid)? {
+                    Some(guard) => {
+                        if !passes_filter(guard.value(), filter) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
             heap.push(vid, dist);
         }
     }
 
     drop(ptbl);
     drop(btbl);
+    drop(meta_tbl);
 
     if params.rerank && idx.config.store_raw_vectors {
         let candidates = heap.into_sorted(params.candidates);

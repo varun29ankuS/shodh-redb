@@ -11,6 +11,7 @@ use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
 use super::adc::AdcTable;
 use super::config::{IndexConfig, IvfPqIndexDefinition, STATE_TRAINED, SearchParams};
 use super::kmeans;
+use super::metadata::{MetadataMap, passes_filter};
 use super::pq::{self, Codebooks};
 use super::types::{PostingKey, decode_index_config, encode_index_config};
 
@@ -35,6 +36,9 @@ fn vectors_name(name: &str) -> String {
 }
 fn assignments_name(name: &str) -> String {
     alloc::format!("__ivfpq:{name}:assignments")
+}
+fn vector_meta_name(name: &str) -> String {
+    alloc::format!("__ivfpq:{name}:vector_meta")
 }
 
 /// Validate that an index configuration is internally consistent.
@@ -465,7 +469,42 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         self.config.num_vectors = self.config.num_vectors.saturating_sub(1);
         self.config_dirty = true;
+
+        // Also remove associated metadata if present.
+        {
+            let mn = vector_meta_name(&self.name);
+            let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
+            let mut mt = self.txn.open_storage_table(mdef)?;
+            mt.st_remove(&vector_id)?;
+        }
+
         Ok(true)
+    }
+
+    /// Insert or replace metadata for a vector.
+    ///
+    /// The metadata is stored in a separate B-tree table keyed by `vector_id`.
+    /// This must be called after inserting the vector itself.
+    pub fn insert_metadata(
+        &mut self,
+        vector_id: u64,
+        metadata: &MetadataMap,
+    ) -> crate::Result<()> {
+        let encoded = metadata.encode();
+        let mn = vector_meta_name(&self.name);
+        let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
+        let mut mt = self.txn.open_storage_table(mdef)?;
+        mt.st_insert(&vector_id, &encoded.as_slice())?;
+        Ok(())
+    }
+
+    /// Remove metadata for a vector.
+    pub fn remove_metadata(&mut self, vector_id: u64) -> crate::Result<()> {
+        let mn = vector_meta_name(&self.name);
+        let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
+        let mut mt = self.txn.open_storage_table(mdef)?;
+        mt.st_remove(&vector_id)?;
+        Ok(())
     }
 
     /// Search within a write transaction.
@@ -529,13 +568,37 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
             let table = self.txn.open_storage_table(def)?;
+
+            // Open metadata table only when a filter is active.
+            let meta_table = if params.filter.is_some() {
+                let mn = vector_meta_name(&self.name);
+                let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
+                Some(self.txn.open_storage_table(mdef)?)
+            } else {
+                None
+            };
+
             for &(cid, _) in &probes {
                 let start = PostingKey::cluster_start(cid);
                 let end = PostingKey::cluster_end(cid);
                 let range_iter = table.st_range(Some(&start), Some(&end), true, true)?;
                 for entry in range_iter {
                     let (kg, vg) = entry?;
-                    heap.push(kg.value().vector_id, adc.approximate_distance(vg.value()));
+                    let vid = kg.value().vector_id;
+                    let dist = adc.approximate_distance(vg.value());
+                    if let Some(ref filter) = params.filter
+                        && let Some(ref mt) = meta_table
+                    {
+                        match mt.st_get(&vid)? {
+                            Some(guard) => {
+                                if !passes_filter(guard.value(), filter) {
+                                    continue;
+                                }
+                            }
+                            None => continue,
+                        }
+                    }
+                    heap.push(vid, dist);
                 }
             }
         }
@@ -903,13 +966,36 @@ impl ReadOnlyIvfPqIndex {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
             let table = txn.open_storage_table(def)?;
+
+            let meta_table = if params.filter.is_some() {
+                let mn = vector_meta_name(&self.name);
+                let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
+                Some(txn.open_storage_table(mdef)?)
+            } else {
+                None
+            };
+
             for &(cid, _) in &probes {
                 let start = PostingKey::cluster_start(cid);
                 let end = PostingKey::cluster_end(cid);
                 let range_iter = table.st_range(Some(&start), Some(&end), true, true)?;
                 for entry in range_iter {
                     let (kg, vg) = entry?;
-                    heap.push(kg.value().vector_id, adc.approximate_distance(vg.value()));
+                    let vid = kg.value().vector_id;
+                    let dist = adc.approximate_distance(vg.value());
+                    if let Some(ref filter) = params.filter
+                        && let Some(ref mt) = meta_table
+                    {
+                        match mt.st_get(&vid)? {
+                            Some(guard) => {
+                                if !passes_filter(guard.value(), filter) {
+                                    continue;
+                                }
+                            }
+                            None => continue,
+                        }
+                    }
+                    heap.push(vid, dist);
                 }
             }
         }

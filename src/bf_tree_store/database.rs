@@ -1071,11 +1071,15 @@ impl BfTreeDatabaseReadTxn {
         self.adapter.contains_key(&encoded_key)
     }
 
-    /// Scan all entries in the given table.
+    /// Scan all entries in the given table (low-level, untyped).
     ///
-    /// Returns an iterator yielding `(key_bytes, value_bytes)` pairs.
-    /// The caller must use `K::from_bytes()` and `V::from_bytes()` to
-    /// deserialize the returned byte slices.
+    /// Returns an iterator yielding raw `(key_bytes, value_bytes)` pairs.
+    ///
+    /// **Important:** Key bytes are returned in byte-ordered storage form.
+    /// For signed integer key types (i8, i16, i32, i64, i128), callers must
+    /// call `K::from_byte_ordered_in_place(&mut key)` before `K::from_bytes()`
+    /// to recover the original value. For a typed API that handles this
+    /// automatically, use [`scan_table_typed`](Self::scan_table_typed).
     pub fn scan_table<K: Key + 'static, V: Value + 'static>(
         &self,
         definition: &TableDefinition<K, V>,
@@ -1085,6 +1089,25 @@ impl BfTreeDatabaseReadTxn {
         let prefix_len = prefix.len();
         let iter = self.adapter.scan_range(&prefix, &prefix_end)?;
         Ok(BfTreeTableScan { iter, prefix_len })
+    }
+
+    /// Typed scan over all entries in a table.
+    ///
+    /// Unlike [`scan_table`](Self::scan_table), this automatically reverses
+    /// byte-order transformation on keys, so returned key bytes are ready
+    /// for `K::from_bytes()`.
+    pub fn scan_table_typed<K: Key + 'static, V: Value + 'static>(
+        &self,
+        definition: &TableDefinition<K, V>,
+    ) -> Result<BfTreeTypedScan<'_, K, V>, BfTreeError> {
+        let scan = self.scan_table(definition)?;
+        let max_record_size = self.adapter.inner().config().get_cb_max_record_size();
+        Ok(BfTreeTypedScan {
+            scan,
+            buf: alloc::vec![0u8; max_record_size * 2],
+            _key: core::marker::PhantomData,
+            _val: core::marker::PhantomData,
+        })
     }
 
     /// Read CDC changes committed after the given transaction ID.
@@ -1227,6 +1250,30 @@ impl BfTreeTableScan<'_> {
             // Malformed entry (key_len <= prefix_len) -- skip and try the next
             // entry instead of terminating the entire scan.
         }
+    }
+}
+
+/// Typed iterator over table entries, auto-reversing byte-order transformation.
+///
+/// Wraps [`BfTreeTableScan`] and applies `K::from_byte_ordered_in_place` to
+/// keys before returning them, so callers can pass the bytes directly to
+/// `K::from_bytes()`.
+pub struct BfTreeTypedScan<'a, K: Key + 'static, V: Value + 'static> {
+    scan: BfTreeTableScan<'a>,
+    buf: Vec<u8>,
+    _key: core::marker::PhantomData<K>,
+    _val: core::marker::PhantomData<V>,
+}
+
+impl<K: Key + 'static, V: Value + 'static> BfTreeTypedScan<'_, K, V> {
+    /// Get the next `(key_bytes, value_bytes)` entry with key bytes in
+    /// user-space form (byte-order transformation reversed).
+    pub fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+        let (key_bytes, val_bytes) = self.scan.next(&mut self.buf)?;
+        let mut key_owned = key_bytes.to_vec();
+        K::from_byte_ordered_in_place(&mut key_owned);
+        let val_owned = val_bytes.to_vec();
+        Some((key_owned, val_owned))
     }
 }
 
@@ -1817,6 +1864,211 @@ mod tests {
         assert_eq!(
             recovered, 4,
             "recovery with CDC should return next available id"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Signed key integration tests
+    // -----------------------------------------------------------------------
+
+    const SIGNED_I32: TableDefinition<i32, u64> = TableDefinition::new("signed_i32");
+    const SIGNED_I64: TableDefinition<i64, u64> = TableDefinition::new("signed_i64");
+
+    #[test]
+    fn signed_i32_range_scan_ordering() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let wtxn = db.begin_write();
+        {
+            let mut table = wtxn.open_table(SIGNED_I32).unwrap();
+            for &v in &[100i32, -1, 0, -100, 10, -10, 1] {
+                table.insert(&v, &((v as i64 + 1000) as u64)).unwrap();
+            }
+        }
+        wtxn.commit().unwrap();
+
+        let rtxn = db.begin_read();
+        let mut scan = rtxn.scan_table_typed(&SIGNED_I32).unwrap();
+        let mut recovered_keys: Vec<i32> = Vec::new();
+        while let Some((key_bytes, _val_bytes)) = scan.next() {
+            recovered_keys.push(i32::from_bytes(&key_bytes));
+        }
+        assert_eq!(
+            recovered_keys,
+            vec![-100, -10, -1, 0, 1, 10, 100],
+            "i32 keys must scan in numeric order"
+        );
+    }
+
+    #[test]
+    fn signed_i64_range_scan_ordering() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let expected: Vec<i64> = vec![i64::MIN, -1_000_000, -1, 0, 1, 1_000_000, i64::MAX];
+
+        let wtxn = db.begin_write();
+        {
+            let mut table = wtxn.open_table(SIGNED_I64).unwrap();
+            for &v in &[0i64, i64::MAX, -1, i64::MIN, 1_000_000, -1_000_000, 1] {
+                table.insert(&v, &(v.wrapping_add(5000) as u64)).unwrap();
+            }
+        }
+        wtxn.commit().unwrap();
+
+        let rtxn = db.begin_read();
+        let mut scan = rtxn.scan_table_typed(&SIGNED_I64).unwrap();
+        let mut recovered_keys: Vec<i64> = Vec::new();
+        while let Some((key_bytes, _)) = scan.next() {
+            recovered_keys.push(i64::from_bytes(&key_bytes));
+        }
+        assert_eq!(
+            recovered_keys, expected,
+            "i64 keys must scan in numeric order"
+        );
+    }
+
+    #[test]
+    fn signed_i32_boundary_values() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let boundaries = [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX];
+
+        let wtxn = db.begin_write();
+        {
+            let mut table = wtxn.open_table(SIGNED_I32).unwrap();
+            for &v in boundaries.iter().rev() {
+                table.insert(&v, &(v as u64)).unwrap();
+            }
+        }
+        wtxn.commit().unwrap();
+
+        let rtxn = db.begin_read();
+        let mut scan = rtxn.scan_table_typed(&SIGNED_I32).unwrap();
+        let mut recovered: Vec<i32> = Vec::new();
+        while let Some((key_bytes, _)) = scan.next() {
+            recovered.push(i32::from_bytes(&key_bytes));
+        }
+        assert_eq!(recovered, boundaries.to_vec());
+    }
+
+    #[test]
+    fn multimap_signed_i32_ordering() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let wtxn = db.begin_write();
+        {
+            let mut mm = wtxn.open_multimap_table::<i32, u64>("mm_signed").unwrap();
+            for &k in &[-10i32, 5, -1, 0, 10] {
+                mm.insert(&k, &(k.unsigned_abs() as u64)).unwrap();
+                mm.insert(&k, &((k.unsigned_abs() as u64) + 100)).unwrap();
+            }
+        }
+        wtxn.commit().unwrap();
+
+        let rtxn = db.begin_read();
+        let mm = rtxn.open_multimap_table::<i32, u64>("mm_signed").unwrap();
+
+        let vals_neg10 = mm.get_values(&-10i32).unwrap();
+        assert_eq!(vals_neg10.len(), 2, "should find 2 values for key -10");
+
+        let vals_neg1 = mm.get_values(&-1i32).unwrap();
+        assert_eq!(vals_neg1.len(), 2, "should find 2 values for key -1");
+
+        let vals_zero = mm.get_values(&0i32).unwrap();
+        assert_eq!(vals_zero.len(), 2, "should find 2 values for key 0");
+
+        // Verify contains works with signed keys after commit.
+        assert!(mm.contains(&-10i32, &10u64).unwrap());
+        assert!(mm.contains(&5i32, &5u64).unwrap());
+        assert!(!mm.contains(&-10i32, &999u64).unwrap());
+    }
+
+    #[test]
+    fn empty_table_scan() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let wtxn = db.begin_write();
+        {
+            let _table = wtxn.open_table(SIGNED_I32).unwrap();
+        }
+        wtxn.commit().unwrap();
+
+        let rtxn = db.begin_read();
+        let mut scan = rtxn.scan_table_typed(&SIGNED_I32).unwrap();
+        assert!(scan.next().is_none(), "empty table must yield no entries");
+    }
+
+    #[test]
+    fn single_element_signed_table() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let wtxn = db.begin_write();
+        {
+            let mut table = wtxn.open_table(SIGNED_I32).unwrap();
+            table.insert(&-1i32, &42u64).unwrap();
+        }
+        wtxn.commit().unwrap();
+
+        let mut rtxn = db.begin_read();
+        let val = rtxn.get::<i32, u64>(&SIGNED_I32, &-1i32).unwrap();
+        assert!(val.is_some(), "single key must be readable");
+        let val_bytes = val.unwrap();
+        assert_eq!(
+            u64::from_le_bytes(val_bytes.as_slice().try_into().unwrap()),
+            42,
+        );
+
+        let mut scan = rtxn.scan_table_typed(&SIGNED_I32).unwrap();
+        assert!(scan.next().is_some(), "scan must yield the single entry");
+        assert!(scan.next().is_none(), "scan must stop after one entry");
+    }
+
+    #[test]
+    fn signed_key_overwrite() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let wtxn = db.begin_write();
+        {
+            let mut table = wtxn.open_table(SIGNED_I32).unwrap();
+            table.insert(&-5i32, &10u64).unwrap();
+            table.insert(&-5i32, &20u64).unwrap();
+        }
+        wtxn.commit().unwrap();
+
+        let mut rtxn = db.begin_read();
+        let val = rtxn.get::<i32, u64>(&SIGNED_I32, &-5i32).unwrap().unwrap();
+        assert_eq!(
+            u64::from_le_bytes(val.as_slice().try_into().unwrap()),
+            20,
+            "overwritten key must return latest value"
+        );
+    }
+
+    #[test]
+    fn signed_key_delete() {
+        let db = BfTreeDatabase::create(BfTreeConfig::new_memory(4)).unwrap();
+
+        let wtxn = db.begin_write();
+        {
+            let mut table = wtxn.open_table(SIGNED_I32).unwrap();
+            table.insert(&i32::MIN, &1u64).unwrap();
+            table.insert(&0i32, &2u64).unwrap();
+            table.insert(&i32::MAX, &3u64).unwrap();
+            table.remove(&0i32).unwrap();
+        }
+        wtxn.commit().unwrap();
+
+        let mut rtxn = db.begin_read();
+        assert!(rtxn.get::<i32, u64>(&SIGNED_I32, &0i32).unwrap().is_none());
+        assert!(
+            rtxn.get::<i32, u64>(&SIGNED_I32, &i32::MIN)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            rtxn.get::<i32, u64>(&SIGNED_I32, &i32::MAX)
+                .unwrap()
+                .is_some()
         );
     }
 }

@@ -508,4 +508,56 @@ mod tests {
             );
         }
     }
+
+    /// Concurrent blob sequence allocation must produce unique sequence numbers.
+    ///
+    /// 8 threads each allocate 50 blobs via separate write transactions on the
+    /// same database. The shared `AtomicU64` counter must ensure no two blobs
+    /// receive the same sequence number.
+    #[test]
+    fn blob_sequence_no_collision() {
+        use crate::blob_store::types::ContentType;
+        use std::collections::HashSet;
+
+        let db = Arc::new(BfTreeDatabase::create(BfTreeConfig::new_memory(8)).unwrap());
+        let num_threads = 8usize;
+        let allocs_per_thread = 50usize;
+        let barrier = Arc::new(Barrier::new(num_threads));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|_| {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    let mut seqs = Vec::with_capacity(allocs_per_thread);
+                    for i in 0..allocs_per_thread {
+                        let wtxn = db.begin_write();
+                        let blob_store = wtxn.open_blob_store();
+                        let content = alloc::format!("blob-{i}");
+                        let blob_id = blob_store
+                            .store(
+                                content.as_bytes(),
+                                ContentType::OctetStream,
+                                "",
+                                Default::default(),
+                            )
+                            .unwrap();
+                        seqs.push(blob_id.sequence);
+                        wtxn.commit().unwrap();
+                    }
+                    seqs
+                })
+            })
+            .collect();
+
+        let mut all_seqs = HashSet::new();
+        for h in handles {
+            for s in h.join().unwrap() {
+                assert!(all_seqs.insert(s), "duplicate blob sequence number {s}");
+            }
+        }
+
+        assert_eq!(all_seqs.len(), num_threads * allocs_per_thread);
+    }
 }

@@ -770,3 +770,74 @@ le_signed_impl!(i64);
 le_signed_impl!(i128);
 le_value!(f32);
 le_value!(f64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+
+    macro_rules! proptest_signed_ordering {
+        ($test_name:ident, $t:ty) => {
+            #[test]
+            fn $test_name() {
+                let config = Config {
+                    cases: 10_000,
+                    ..Config::default()
+                };
+                let mut runner = TestRunner::new(config);
+                runner
+                    .run(&(any::<$t>(), any::<$t>()), |(a, b)| {
+                        let mut a_bytes = <$t as Value>::as_bytes(&a).as_ref().to_vec();
+                        let mut b_bytes = <$t as Value>::as_bytes(&b).as_ref().to_vec();
+                        <$t as Key>::to_byte_ordered_in_place(&mut a_bytes);
+                        <$t as Key>::to_byte_ordered_in_place(&mut b_bytes);
+                        prop_assert_eq!(
+                            a_bytes.cmp(&b_bytes),
+                            a.cmp(&b),
+                            "byte ordering mismatch: a={}, b={}",
+                            a,
+                            b
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+        };
+    }
+
+    proptest_signed_ordering!(proptest_i8_byte_ordering, i8);
+    proptest_signed_ordering!(proptest_i16_byte_ordering, i16);
+    proptest_signed_ordering!(proptest_i32_byte_ordering, i32);
+    proptest_signed_ordering!(proptest_i64_byte_ordering, i64);
+    proptest_signed_ordering!(proptest_i128_byte_ordering, i128);
+
+    macro_rules! proptest_signed_roundtrip {
+        ($test_name:ident, $t:ty) => {
+            #[test]
+            fn $test_name() {
+                let config = Config {
+                    cases: 10_000,
+                    ..Config::default()
+                };
+                let mut runner = TestRunner::new(config);
+                runner
+                    .run(&any::<$t>(), |v| {
+                        let mut bytes = <$t as Value>::as_bytes(&v).as_ref().to_vec();
+                        <$t as Key>::to_byte_ordered_in_place(&mut bytes);
+                        <$t as Key>::from_byte_ordered_in_place(&mut bytes);
+                        let recovered = <$t as Value>::from_bytes(&bytes);
+                        prop_assert_eq!(recovered, v, "round-trip failed");
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+        };
+    }
+
+    proptest_signed_roundtrip!(proptest_i8_roundtrip, i8);
+    proptest_signed_roundtrip!(proptest_i16_roundtrip, i16);
+    proptest_signed_roundtrip!(proptest_i32_roundtrip, i32);
+    proptest_signed_roundtrip!(proptest_i64_roundtrip, i64);
+    proptest_signed_roundtrip!(proptest_i128_roundtrip, i128);
+}

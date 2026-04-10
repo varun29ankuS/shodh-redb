@@ -197,8 +197,12 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
         value: &V::SelfType<'_>,
     ) -> Result<bool, BfTreeError> {
         let user_key = K::as_bytes(key);
+        let mut user_key_ordered = user_key.as_ref().to_vec();
+        K::to_byte_ordered_in_place(&mut user_key_ordered);
         let val_key = V::as_bytes(value);
-        let encoded = encode_multimap_key(&self.name, user_key.as_ref(), val_key.as_ref())?;
+        let mut val_key_ordered = val_key.as_ref().to_vec();
+        V::to_byte_ordered_in_place(&mut val_key_ordered);
+        let encoded = encode_multimap_key(&self.name, &user_key_ordered, &val_key_ordered)?;
 
         let mut buffer = self.buffer.lock();
         let already_exists = match buffer.get(&encoded) {
@@ -243,8 +247,12 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
         value: &V::SelfType<'_>,
     ) -> Result<bool, BfTreeError> {
         let user_key = K::as_bytes(key);
+        let mut user_key_ordered = user_key.as_ref().to_vec();
+        K::to_byte_ordered_in_place(&mut user_key_ordered);
         let val_key = V::as_bytes(value);
-        let encoded = encode_multimap_key(&self.name, user_key.as_ref(), val_key.as_ref())?;
+        let mut val_key_ordered = val_key.as_ref().to_vec();
+        V::to_byte_ordered_in_place(&mut val_key_ordered);
+        let encoded = encode_multimap_key(&self.name, &user_key_ordered, &val_key_ordered)?;
 
         let mut buffer = self.buffer.lock();
         let existed = match buffer.get(&encoded) {
@@ -279,8 +287,10 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
     /// Remove all values for a given key. Returns the number of values removed.
     pub fn remove_all(&mut self, key: &K::SelfType<'_>) -> Result<u64, BfTreeError> {
         let user_key = K::as_bytes(key);
-        let prefix = multimap_key_prefix(&self.name, user_key.as_ref())?;
-        let scan_end = multimap_scan_end(&self.name, user_key.as_ref())?;
+        let mut user_key_ordered = user_key.as_ref().to_vec();
+        K::to_byte_ordered_in_place(&mut user_key_ordered);
+        let prefix = multimap_key_prefix(&self.name, &user_key_ordered)?;
+        let scan_end = multimap_scan_end(&self.name, &user_key_ordered)?;
 
         let max_record_size = self.adapter.inner().config().get_cb_max_record_size();
 
@@ -375,8 +385,10 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
     /// Values are returned in sorted byte order.
     pub fn get_values(&self, key: &K::SelfType<'_>) -> Result<Vec<Vec<u8>>, BfTreeError> {
         let user_key = K::as_bytes(key);
-        let prefix = multimap_key_prefix(&self.name, user_key.as_ref())?;
-        let scan_end = multimap_scan_end(&self.name, user_key.as_ref())?;
+        let mut user_key_ordered = user_key.as_ref().to_vec();
+        K::to_byte_ordered_in_place(&mut user_key_ordered);
+        let prefix = multimap_key_prefix(&self.name, &user_key_ordered)?;
+        let scan_end = multimap_scan_end(&self.name, &user_key_ordered)?;
         let prefix_len = prefix.len();
         let max_record_size = self.adapter.inner().config().get_cb_max_record_size();
 
@@ -415,7 +427,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
                 BufferLookup::Tombstone => { /* hidden by tombstone, skip */ }
                 BufferLookup::Found(_) | BufferLookup::NotInBuffer => {
                     let val_key = extract_value_key(encoded_key, prefix_len);
-                    values.push(val_key.to_vec());
+                    let mut val_decoded = val_key.to_vec();
+                    V::from_byte_ordered_in_place(&mut val_decoded);
+                    values.push(val_decoded);
                 }
             }
         }
@@ -427,7 +441,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
                 for (k, v) in buffer.range_excluded_end(&prefix, end) {
                     if v.is_some() && !bftree_entries.iter().any(|bk| bk == k) {
                         let val_key = extract_value_key(k, prefix_len);
-                        values.push(val_key.to_vec());
+                        let mut val_decoded = val_key.to_vec();
+                        V::from_byte_ordered_in_place(&mut val_decoded);
+                        values.push(val_decoded);
                     }
                 }
             }
@@ -435,7 +451,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
                 for (k, v) in buffer.prefix_range(&prefix) {
                     if v.is_some() && !bftree_entries.iter().any(|bk| bk == k) {
                         let val_key = extract_value_key(k, prefix_len);
-                        values.push(val_key.to_vec());
+                        let mut val_decoded = val_key.to_vec();
+                        V::from_byte_ordered_in_place(&mut val_decoded);
+                        values.push(val_decoded);
                     }
                 }
             }
@@ -455,8 +473,12 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeMultimapTable<'txn, K, V> {
         value: &V::SelfType<'_>,
     ) -> Result<bool, BfTreeError> {
         let user_key = K::as_bytes(key);
+        let mut user_key_ordered = user_key.as_ref().to_vec();
+        K::to_byte_ordered_in_place(&mut user_key_ordered);
         let val_key = V::as_bytes(value);
-        let encoded = encode_multimap_key(&self.name, user_key.as_ref(), val_key.as_ref())?;
+        let mut val_key_ordered = val_key.as_ref().to_vec();
+        V::to_byte_ordered_in_place(&mut val_key_ordered);
+        let encoded = encode_multimap_key(&self.name, &user_key_ordered, &val_key_ordered)?;
 
         let buffer = self.buffer.lock();
         match buffer.get(&encoded) {
@@ -500,8 +522,10 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeReadOnlyMultimapTable<'txn,
     /// Get all values for a given key, as a `Vec` of raw value bytes.
     pub fn get_values(&self, key: &K::SelfType<'_>) -> Result<Vec<Vec<u8>>, BfTreeError> {
         let user_key = K::as_bytes(key);
-        let prefix = multimap_key_prefix(&self.name, user_key.as_ref())?;
-        let scan_end = multimap_scan_end(&self.name, user_key.as_ref())?;
+        let mut user_key_ordered = user_key.as_ref().to_vec();
+        K::to_byte_ordered_in_place(&mut user_key_ordered);
+        let prefix = multimap_key_prefix(&self.name, &user_key_ordered)?;
+        let scan_end = multimap_scan_end(&self.name, &user_key_ordered)?;
         let prefix_len = prefix.len();
         let max_record_size = self.adapter.inner().config().get_cb_max_record_size();
 
@@ -511,7 +535,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeReadOnlyMultimapTable<'txn,
             let mut iter = self.adapter.scan_range(&prefix, &end)?;
             while let Ok(Some((key_len, _val_len))) = iter.next(&mut buf) {
                 let val_key = extract_value_key(&buf[..key_len], prefix_len);
-                values.push(val_key.to_vec());
+                let mut val_decoded = val_key.to_vec();
+                V::from_byte_ordered_in_place(&mut val_decoded);
+                values.push(val_decoded);
             }
         } else {
             let max_end = {
@@ -524,7 +550,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeReadOnlyMultimapTable<'txn,
                 let k = &buf[..key_len];
                 if key_matches_prefix(k, &prefix) {
                     let val_key = extract_value_key(k, prefix_len);
-                    values.push(val_key.to_vec());
+                    let mut val_decoded = val_key.to_vec();
+                    V::from_byte_ordered_in_place(&mut val_decoded);
+                    values.push(val_decoded);
                 }
             }
         }
@@ -538,8 +566,12 @@ impl<'txn, K: Key + 'static, V: Key + 'static> BfTreeReadOnlyMultimapTable<'txn,
         value: &V::SelfType<'_>,
     ) -> Result<bool, BfTreeError> {
         let user_key = K::as_bytes(key);
+        let mut user_key_ordered = user_key.as_ref().to_vec();
+        K::to_byte_ordered_in_place(&mut user_key_ordered);
         let val_key = V::as_bytes(value);
-        let encoded = encode_multimap_key(&self.name, user_key.as_ref(), val_key.as_ref())?;
+        let mut val_key_ordered = val_key.as_ref().to_vec();
+        V::to_byte_ordered_in_place(&mut val_key_ordered);
+        let encoded = encode_multimap_key(&self.name, &user_key_ordered, &val_key_ordered)?;
         Ok(self.adapter.contains_key(&encoded))
     }
 

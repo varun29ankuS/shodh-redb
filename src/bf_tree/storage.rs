@@ -39,9 +39,7 @@ impl From<CircularBufferError> for TreeError {
         match value {
             CircularBufferError::WouldBlock => TreeError::Locked,
             CircularBufferError::Full => TreeError::CircularBufferFull,
-            CircularBufferError::EmptyAlloc => {
-                TreeError::IoError(IoErrorKind::InvariantViolation)
-            }
+            CircularBufferError::EmptyAlloc => TreeError::IoError(IoErrorKind::InvariantViolation),
             CircularBufferError::InvalidStateTransition { .. } => {
                 TreeError::IoError(IoErrorKind::InvariantViolation)
             }

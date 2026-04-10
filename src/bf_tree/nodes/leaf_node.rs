@@ -710,8 +710,8 @@ impl LeafNode {
 
         // Pick the splitting that achieves the smallest size difference between
         // the two halves
-        let key1 = merge_split_key_1
-            .ok_or(crate::bf_tree::error::IoErrorKind::InvariantViolation)?;
+        let key1 =
+            merge_split_key_1.ok_or(crate::bf_tree::error::IoErrorKind::InvariantViolation)?;
 
         if merge_split_key_2.is_none() || diff_1 < diff_2 {
             return Ok(key1);
@@ -930,8 +930,8 @@ impl LeafNode {
             pos_meta.mark_as_deleted();
         }
 
-        let key1 = merge_split_key_1
-            .ok_or(crate::bf_tree::error::IoErrorKind::InvariantViolation)?;
+        let key1 =
+            merge_split_key_1.ok_or(crate::bf_tree::error::IoErrorKind::InvariantViolation)?;
 
         // The two split keys must be different
         if let Some(ref key2) = merge_split_key_2 {

@@ -28,6 +28,13 @@ pub enum BfTreeError {
     ReservedTableName(String),
     /// Invalid configuration (e.g., WAL disabled on a file-backed backend).
     InvalidConfig(String),
+    /// A write transaction exceeded its configured `max_transaction_bytes` limit.
+    TransactionTooLarge {
+        /// Cumulative bytes already written in this transaction.
+        written: usize,
+        /// The configured byte limit.
+        limit: usize,
+    },
     /// A flush partially failed and the compensating rollback also failed.
     ///
     /// The database may be in an inconsistent state: some entries from the
@@ -61,6 +68,10 @@ impl fmt::Display for BfTreeError {
                  names starting with \"__\" are reserved for internal system tables"
             ),
             Self::InvalidConfig(msg) => write!(f, "invalid configuration: {msg}"),
+            Self::TransactionTooLarge { written, limit } => write!(
+                f,
+                "transaction size limit exceeded: {written} bytes written, limit is {limit} bytes"
+            ),
             Self::PartialFlushRollbackFailed {
                 flush_error,
                 rollback_failures,
@@ -151,6 +162,13 @@ impl From<BfTreeError> for crate::StorageError {
                     alloc::format!("bf-tree invalid config: {msg}"),
                 )))
             }
+            BfTreeError::TransactionTooLarge { written, limit } => {
+                crate::StorageError::Io(crate::BackendError::Io(std::io::Error::other(
+                    alloc::format!(
+                        "bf-tree transaction size limit exceeded: {written} bytes written, limit {limit}"
+                    ),
+                )))
+            }
             BfTreeError::PartialFlushRollbackFailed {
                 flush_error,
                 rollback_failures,
@@ -195,6 +213,11 @@ impl From<BfTreeError> for crate::StorageError {
             )),
             BfTreeError::InvalidConfig(msg) => {
                 crate::StorageError::Corrupted(alloc::format!("bf-tree invalid config: {msg}"))
+            }
+            BfTreeError::TransactionTooLarge { written, limit } => {
+                crate::StorageError::Corrupted(alloc::format!(
+                    "bf-tree transaction size limit exceeded: {written} bytes written, limit {limit}"
+                ))
             }
             BfTreeError::PartialFlushRollbackFailed {
                 flush_error,

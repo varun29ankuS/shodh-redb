@@ -1129,9 +1129,11 @@ mod tests {
 
         // Phase 2.5: Verify snapshot alone contains all pre-snapshot entries.
         {
-            let snap_tree =
-                BfTree::new_from_snapshot(Config::new_with_config_file(&config_path).unwrap(), None)
-                    .expect("snapshot load failed");
+            let snap_tree = BfTree::new_from_snapshot(
+                Config::new_with_config_file(&config_path).unwrap(),
+                None,
+            )
+            .expect("snapshot load failed");
             let mut snap_buf = vec![0u8; key_len];
             let mut missing_keys = Vec::new();
             for r in 0..pre_count {

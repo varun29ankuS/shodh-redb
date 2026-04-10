@@ -40,6 +40,10 @@ pub struct BfTreeWriteTxn {
     adapter: Arc<BfTreeAdapter>,
     /// Track number of operations for metrics/diagnostics.
     ops_count: u64,
+    /// Cumulative key+value bytes written in this transaction.
+    bytes_written: usize,
+    /// Maximum bytes allowed per transaction (`None` = unlimited).
+    max_bytes: Option<usize>,
     /// Whether commit has been called.
     committed: bool,
 }
@@ -51,18 +55,33 @@ impl BfTreeWriteTxn {
     // Scaffolding for the explicit-transaction API (not yet wired into
     // BfTreeDatabase, which currently exposes direct put/read methods).
     #[allow(dead_code)]
-    pub(crate) fn new(adapter: Arc<BfTreeAdapter>) -> Self {
+    pub(crate) fn new(adapter: Arc<BfTreeAdapter>, max_transaction_bytes: Option<usize>) -> Self {
         Self {
             adapter,
             ops_count: 0,
+            bytes_written: 0,
+            max_bytes: max_transaction_bytes,
             committed: false,
         }
     }
 
     /// Insert a key-value pair. Immediately visible to all readers.
+    ///
+    /// Returns `BfTreeError::TransactionTooLarge` if this insert would push the
+    /// cumulative bytes written past the configured `max_transaction_bytes` limit.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), BfTreeError> {
+        let entry_bytes = key.len() + value.len();
+        if let Some(limit) = self.max_bytes
+            && self.bytes_written + entry_bytes > limit
+        {
+            return Err(BfTreeError::TransactionTooLarge {
+                written: self.bytes_written,
+                limit,
+            });
+        }
         self.adapter.insert(key, value)?;
         self.ops_count += 1;
+        self.bytes_written += entry_bytes;
         Ok(())
     }
 
@@ -201,7 +220,7 @@ mod tests {
         let config = BfTreeConfig::new_memory(4);
         let adapter = Arc::new(BfTreeAdapter::open(config).unwrap());
 
-        let mut txn = BfTreeWriteTxn::new(adapter.clone());
+        let mut txn = BfTreeWriteTxn::new(adapter.clone(), None);
         txn.insert(b"key1", b"val1").unwrap();
         txn.insert(b"key2", b"val2").unwrap();
         assert_eq!(txn.ops_count(), 2);
@@ -225,7 +244,7 @@ mod tests {
             .map(|t| {
                 let adapter = adapter.clone();
                 thread::spawn(move || {
-                    let mut txn = BfTreeWriteTxn::new(adapter);
+                    let mut txn = BfTreeWriteTxn::new(adapter, None);
                     for i in 0..50 {
                         let key = format!("t{t}_k{i}");
                         let val = format!("t{t}_v{i}");
@@ -259,7 +278,7 @@ mod tests {
         let adapter = Arc::new(BfTreeAdapter::open(config).unwrap());
 
         // Writer inserts data.
-        let mut wtxn = BfTreeWriteTxn::new(adapter.clone());
+        let mut wtxn = BfTreeWriteTxn::new(adapter.clone(), None);
         wtxn.insert(b"visible", b"yes").unwrap();
 
         // Reader sees it immediately (before commit).
@@ -276,7 +295,7 @@ mod tests {
         let config = BfTreeConfig::new_memory(4);
         let adapter = Arc::new(BfTreeAdapter::open(config).unwrap());
 
-        let mut wtxn = BfTreeWriteTxn::new(adapter.clone());
+        let mut wtxn = BfTreeWriteTxn::new(adapter.clone(), None);
         wtxn.insert(b"gone", b"soon").unwrap();
         wtxn.delete(b"gone");
 
@@ -293,7 +312,7 @@ mod tests {
         let config = BfTreeConfig::new_memory(4);
         let adapter = Arc::new(BfTreeAdapter::open(config).unwrap());
 
-        let mut wtxn = BfTreeWriteTxn::new(adapter.clone());
+        let mut wtxn = BfTreeWriteTxn::new(adapter.clone(), None);
         wtxn.insert(b"aaa", b"1").unwrap();
         wtxn.insert(b"bbb", b"2").unwrap();
         wtxn.insert(b"ccc", b"3").unwrap();
@@ -307,5 +326,45 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn transaction_size_guard_rejects_overflow() {
+        let config = BfTreeConfig::new_memory(4);
+        let adapter = Arc::new(BfTreeAdapter::open(config).unwrap());
+
+        // Limit to 100 bytes total.
+        let mut txn = BfTreeWriteTxn::new(adapter, Some(100));
+        // 10 + 10 = 20 bytes per insert. 5 inserts = 100 bytes (at limit).
+        for i in 0..5u8 {
+            let key = [i; 10];
+            let val = [i; 10];
+            txn.insert(&key, &val).unwrap();
+        }
+        // 6th insert should fail.
+        let result = txn.insert(&[6u8; 10], &[6u8; 10]);
+        assert!(matches!(
+            result,
+            Err(BfTreeError::TransactionTooLarge {
+                written: 100,
+                limit: 100
+            })
+        ));
+        // Commit should still succeed for the 5 writes that went through.
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn transaction_no_limit_allows_unlimited() {
+        let config = BfTreeConfig::new_memory(4);
+        let adapter = Arc::new(BfTreeAdapter::open(config).unwrap());
+
+        let mut txn = BfTreeWriteTxn::new(adapter, None);
+        for i in 0..1000u16 {
+            let key = i.to_be_bytes();
+            txn.insert(&key, b"value").unwrap();
+        }
+        assert_eq!(txn.ops_count(), 1000);
+        txn.commit().unwrap();
     }
 }

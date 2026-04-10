@@ -49,6 +49,10 @@ pub struct BfTreeConfig {
     pub snapshot_interval: u64,
     /// Durability mode controlling when WAL data is fsynced. Default: `Sync`.
     pub durability: DurabilityMode,
+    /// Maximum cumulative bytes (key + value) a single write transaction may
+    /// write before further inserts are rejected with `BfTreeError::TransactionTooLarge`.
+    /// `None` means no limit. Default: `None`.
+    pub max_transaction_bytes: Option<usize>,
 }
 
 /// Controls when WAL data is fsynced to disk.
@@ -99,6 +103,7 @@ impl Default for BfTreeConfig {
             verify_mode: VerifyMode::None,
             snapshot_interval: 100,
             durability: DurabilityMode::Sync,
+            max_transaction_bytes: None,
         }
     }
 }
@@ -155,6 +160,7 @@ impl BfTreeConfig {
             verify_mode: VerifyMode::None,
             snapshot_interval: 100,
             durability: DurabilityMode::Sync,
+            max_transaction_bytes: None,
         }
     }
 

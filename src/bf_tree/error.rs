@@ -17,8 +17,12 @@ pub(crate) enum TreeError {
 /// Kept `no_std`-compatible (no `std::io::Error` dependency).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IoErrorKind {
-    VfsRead { offset: usize },
-    VfsWrite { offset: usize },
+    VfsRead {
+        offset: usize,
+    },
+    VfsWrite {
+        offset: usize,
+    },
     VfsFlush,
     WalAppend,
     WalFlush,
@@ -27,7 +31,9 @@ pub enum IoErrorKind {
     ConfigRead,
     ConfigParse,
     Corruption,
-    ChecksumMismatch { offset: usize },
+    ChecksumMismatch {
+        offset: usize,
+    },
     /// Operation attempted on a deallocated or uninitialized (Null) page.
     NullPage,
     /// Internal state machine invariant violated (indicates a bug or corruption).

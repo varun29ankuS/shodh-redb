@@ -134,7 +134,10 @@ pub(crate) trait LeafOperations {
                 let page_ptr = match self.get_page_location() {
                     PageLocation::Base(_) | PageLocation::Mini(_) => unreachable!(),
                     PageLocation::Full(ptr) => *ptr,
-                    PageLocation::Null => panic!("scan_value_by_pos on Null page"),
+                    PageLocation::Null => {
+                        debug_assert!(false, "scan_value_by_pos on Null page");
+                        return GetScanRecordByPosResult::EndOfLeaf;
+                    }
                 };
                 let full = self.load_cache_page(page_ptr);
                 full.get_record_by_pos_with_bound(*pos, out_buffer, return_field, end_key)
@@ -170,7 +173,10 @@ pub(crate) trait LeafOperations {
                 storage.mini_page_copy_on_access(mini_page)
             }
             PageLocation::Base(_) => false,
-            PageLocation::Null => panic!("cache_page_about_to_evict on Null page"),
+            PageLocation::Null => {
+                debug_assert!(false, "cache_page_about_to_evict on Null page");
+                false
+            }
         }
     }
 
@@ -431,7 +437,10 @@ impl Drop for LeafEntryXLocked<'_> {
                     offset
                 }
             }
-            PageLocation::Null => panic!("Dropping a tmp buffer of a Null page"),
+            PageLocation::Null => {
+                debug_assert!(false, "Dropping a tmp buffer of a Null page");
+                return;
+            }
         };
 
         if let Some(ref mut b) = self.tmp_buffer {
@@ -446,10 +455,11 @@ impl Drop for LeafEntryXLocked<'_> {
             }
 
             let slice = b.as_u8_slice();
-            if let Err(_e) = self.file_handle.write(write_offset, slice) {
-                #[cfg(feature = "std")]
-                eprintln!("bf-tree: VFS write failed at offset {write_offset}: {_e}");
-            }
+            // Best-effort page write during Drop. Durability is guaranteed by
+            // the WAL; this write is an optimization to avoid re-reading the WAL
+            // on recovery. If it fails, the next snapshot or WAL replay will
+            // reconstruct this page. We cannot propagate errors from Drop.
+            let _ = self.file_handle.write(write_offset, slice);
         }
     }
 }
@@ -602,7 +612,7 @@ impl<'a> LeafEntryXLocked<'a> {
         match page_loc {
             PageLocation::Base(offset) => {
                 if *cache_only {
-                    panic!("Insertion to a base page detected in cache-only mode");
+                    return Err(TreeError::IoError(IoErrorKind::CacheOnlyViolation));
                 }
 
                 // Root leaf node does not have a corresponding mini-page
@@ -626,7 +636,8 @@ impl<'a> LeafEntryXLocked<'a> {
                     value.len(),
                     mini_page_size_classes,
                     *cache_only,
-                );
+                )
+                .map_err(TreeError::IoError)?;
                 let mini_page_guard = storage.alloc_mini_page(mini_page_size)?;
 
                 LeafNode::initialize_mini_page(
@@ -653,7 +664,7 @@ impl<'a> LeafEntryXLocked<'a> {
             }
             PageLocation::Full(ptr) => {
                 if *cache_only {
-                    panic!("Insertion to a full page detected in cache-only mode");
+                    return Err(TreeError::IoError(IoErrorKind::CacheOnlyViolation));
                 }
 
                 histogram!(HitMiniPage, storage.config.leaf_page_size as u64);
@@ -790,17 +801,19 @@ impl<'a> LeafEntryXLocked<'a> {
                             // page size must be greater than or equal to half of the leaf page size as the max record size
                             // is less than half of the leaf page size. However, if that's true then the above insert must
                             // have succeeded which is a contradiction.
-                            assert!(cur_mini_page.meta.meta_count_without_fence() > 0);
+                            debug_assert!(cur_mini_page.meta.meta_count_without_fence() > 0);
 
                             // Upon reaching here, it is guaranteed that all records are INSERT and there
                             // are at two records with distinctive keys (including the new k/v pair) s.t. upon split and consolidation,
                             // there is at least one record per page.
                             let record_size = (key.len() + value.len()) as u16;
-                            let insert_split_key =
-                                cur_mini_page.get_cache_only_insert_split_key(key, &record_size);
+                            let insert_split_key = cur_mini_page
+                                .get_cache_only_insert_split_key(key, &record_size)
+                                .map_err(TreeError::IoError)?;
 
                             // Obtain version lock on self's parent
-                            let self_parent = parent.expect("Non-root leaf node has no parent !");
+                            let self_parent = parent
+                                .ok_or(TreeError::IoError(IoErrorKind::InvariantViolation))?;
                             self_parent.check_version()?;
                             let mut x_parent = self_parent.upgrade().map_err(|(_, e)| e)?;
 
@@ -843,18 +856,19 @@ impl<'a> LeafEntryXLocked<'a> {
 
                                         // Directly insert the new record into its correponding mini-page
                                         let cmp = key.cmp(&insert_split_key);
-                                        match cmp {
+                                        let ok = match cmp {
                                             core::cmp::Ordering::Greater
                                             | core::cmp::Ordering::Equal => {
-                                                let ok =
-                                                    sibling_page.insert(key, value, op_type, 0);
-                                                assert!(ok);
+                                                sibling_page.insert(key, value, op_type, 0)
                                             }
                                             core::cmp::Ordering::Less => {
-                                                let ok =
-                                                    cur_mini_page.insert(key, value, op_type, 0);
-                                                assert!(ok);
+                                                cur_mini_page.insert(key, value, op_type, 0)
                                             }
+                                        };
+                                        if !ok {
+                                            return Err(TreeError::IoError(
+                                                IoErrorKind::InvariantViolation,
+                                            ));
                                         }
 
                                         debug_assert!(
@@ -867,7 +881,9 @@ impl<'a> LeafEntryXLocked<'a> {
                                         return Ok(());
                                     }
                                     _ => {
-                                        panic!("A non mini-page is found in cache-only mode")
+                                        return Err(TreeError::IoError(
+                                            IoErrorKind::CacheOnlyViolation,
+                                        ));
                                     }
                                 }
                             } else {
@@ -883,7 +899,8 @@ impl<'a> LeafEntryXLocked<'a> {
                             self.merge_mini_page_and_dealloc(
                                 mini_page,
                                 storage,
-                                parent.expect("parent must exists here"),
+                                parent
+                                    .ok_or(TreeError::IoError(IoErrorKind::InvariantViolation))?,
                             )?;
 
                             info!(pid = self.pid.raw(), "old mini page deallocated");
@@ -911,7 +928,7 @@ impl<'a> LeafEntryXLocked<'a> {
                     }
                 }
             }
-            PageLocation::Null => panic!("mini_page_op insert into Null Page"),
+            PageLocation::Null => Err(TreeError::IoError(IoErrorKind::NullPage)),
         }
     }
 
@@ -1014,7 +1031,7 @@ impl<'a> LeafEntryXLocked<'a> {
             }
             PageLocation::Full(ptr) => {
                 let mini_page = self.load_cache_page_mut(*ptr);
-                assert!(mini_page.meta.node_size as usize == storage.config.leaf_page_size);
+                debug_assert!(mini_page.meta.node_size as usize == storage.config.leaf_page_size);
                 let h = storage.begin_dealloc_mini_page(mini_page)?;
                 let new_page =
                     storage.move_full_page_to_tail(h, mini_page.meta.node_size as usize)?;
@@ -1023,7 +1040,9 @@ impl<'a> LeafEntryXLocked<'a> {
                 PageLocation::Full(new_page.as_ptr() as *mut LeafNode)
             }
             PageLocation::Base(_) => unreachable!(),
-            PageLocation::Null => panic!("move_cache_page_to_tail on Null page"),
+            PageLocation::Null => {
+                return Err(TreeError::IoError(IoErrorKind::NullPage));
+            }
         };
         *self.raw_guard.deref_mut() = new_loc;
         Ok(())
@@ -1032,7 +1051,7 @@ impl<'a> LeafEntryXLocked<'a> {
     /// Flush a full page into its corresponding base page
     pub(crate) fn merge_full_page(&mut self, mini_page_handle: &TombstoneHandle) {
         let mini_page = self.load_cache_page_mut(mini_page_handle.as_ptr() as *mut LeafNode);
-        assert!(mini_page.meta.node_size as usize == self.tmp_buffer_size);
+        debug_assert!(mini_page.meta.node_size as usize == self.tmp_buffer_size);
 
         if !mini_page.need_actually_merge_to_disk() {
             self.change_to_base_loc();
@@ -1045,7 +1064,7 @@ impl<'a> LeafEntryXLocked<'a> {
         let buffer = self.tmp_buffer.take();
         match buffer {
             Some(mut b) => {
-                assert!(b.is_dirty);
+                debug_assert!(b.is_dirty);
 
                 // SAFETY: `mini_page_handle.as_ptr()` points to a valid full page of
                 // `node_size` bytes in the circular buffer. `b.ptr` is a separately
@@ -1118,7 +1137,9 @@ impl<'a> LeafEntryXLocked<'a> {
 
         // If there is only one distinctive key, then the merge should have succeeded before.
         // Choose a splitting key based on records in both mini-page and the correponding base page
-        let merge_split_key = base_ref.get_merge_split_key(mini_page);
+        let merge_split_key = base_ref
+            .get_merge_split_key(mini_page)
+            .map_err(TreeError::IoError)?;
 
         if x_parent.as_ref().have_space_for(&merge_split_key) {
             let (sibling_node_id, mut sibling_node) = storage.alloc_base_page_and_lock();
@@ -1155,18 +1176,8 @@ impl<'a> LeafEntryXLocked<'a> {
                         );
 
                         if !ok {
-                            let mini_record_num = mini_page.meta.meta_count_without_fence();
-                            let base_record_num = base_ref.meta.meta_count_without_fence();
-                            let sibling_record_num =
-                                sibling_node_ref.meta.meta_count_without_fence();
-
-                            panic!(
-                                "{}, {}, {}",
-                                mini_record_num, base_record_num, sibling_record_num
-                            ); // Debug
+                            return Err(TreeError::IoError(IoErrorKind::InvariantViolation));
                         }
-
-                        assert!(ok);
                     }
                     core::cmp::Ordering::Less => {
                         let ok = base_ref.insert(
@@ -1175,7 +1186,9 @@ impl<'a> LeafEntryXLocked<'a> {
                             op_type,
                             storage.config.max_fence_len,
                         );
-                        assert!(ok);
+                        if !ok {
+                            return Err(TreeError::IoError(IoErrorKind::InvariantViolation));
+                        }
                     }
                 }
             }
@@ -1228,7 +1241,8 @@ impl<'a> LeafEntryXLocked<'a> {
         let old_loc = self.raw_guard.deref().clone();
         match old_loc {
             PageLocation::Base(_) => {
-                panic!("the page is already base page!");
+                debug_assert!(false, "change_to_base_loc called on already-base page");
+                // Already base -- no-op.
             }
             PageLocation::Mini(ptr) | PageLocation::Full(ptr) => {
                 let mini_page = self.load_cache_page_mut(ptr);
@@ -1238,7 +1252,9 @@ impl<'a> LeafEntryXLocked<'a> {
                 let _old_loc = core::mem::replace(self.raw_guard.deref_mut(), base_loc);
                 // we don't need to manually flush buffer here, it will auto evict when the lock drops.
             }
-            PageLocation::Null => panic!("change_to_base_loc on Null page"),
+            PageLocation::Null => {
+                debug_assert!(false, "change_to_base_loc on Null page");
+            }
         }
     }
 
@@ -1247,15 +1263,15 @@ impl<'a> LeafEntryXLocked<'a> {
         let _old_loc = core::mem::replace(self.raw_guard.deref_mut(), PageLocation::Null);
     }
 
-    pub(crate) fn get_disk_offset(&self) -> u64 {
+    pub(crate) fn get_disk_offset(&self) -> Result<u64, TreeError> {
         let page_loc = self.raw_guard.deref();
         match page_loc {
-            PageLocation::Base(offset) => *offset as u64,
+            PageLocation::Base(offset) => Ok(*offset as u64),
             PageLocation::Mini(ptr) | PageLocation::Full(ptr) => {
                 let mini_page = self.load_cache_page(*ptr);
-                mini_page.next_level.as_offset() as u64
+                Ok(mini_page.next_level.as_offset() as u64)
             }
-            PageLocation::Null => panic!("get_disk_offset on Null page"),
+            PageLocation::Null => Err(TreeError::IoError(IoErrorKind::NullPage)),
         }
     }
 

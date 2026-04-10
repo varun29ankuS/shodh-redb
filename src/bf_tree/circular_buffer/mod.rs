@@ -114,7 +114,11 @@ impl MetaRawState {
             3 => MetaState::BeginTombStone,
             4 => MetaState::FreeListed,
             5 => MetaState::Evicted,
-            v => panic!("invalid MetaState discriminant: {v}"),
+            _ => {
+                debug_assert!(false, "invalid MetaState discriminant");
+                // Treat corrupted state as evicted (safe: prevents use of bad page)
+                MetaState::Evicted
+            }
         }
     }
 

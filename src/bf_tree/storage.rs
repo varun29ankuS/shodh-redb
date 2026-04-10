@@ -16,7 +16,7 @@ use crate::bf_tree::{
         CircularBuffer, CircularBufferError, CircularBufferMetrics, CircularBufferPtr,
         TombstoneHandle,
     },
-    error::TreeError,
+    error::{IoErrorKind, TreeError},
     fs::{MemoryVfs, VfsImpl},
     mini_page_op::{LeafEntrySLocked, LeafEntryXLocked},
     nodes::{LeafNode, PageID},
@@ -39,9 +39,9 @@ impl From<CircularBufferError> for TreeError {
         match value {
             CircularBufferError::WouldBlock => TreeError::Locked,
             CircularBufferError::Full => TreeError::CircularBufferFull,
-            CircularBufferError::EmptyAlloc => unreachable!(),
+            CircularBufferError::EmptyAlloc => TreeError::IoError(IoErrorKind::InvariantViolation),
             CircularBufferError::InvalidStateTransition { .. } => {
-                panic!("circular buffer state machine invariant violated")
+                TreeError::IoError(IoErrorKind::InvariantViolation)
             }
         }
     }
@@ -191,14 +191,10 @@ impl PageTable {
         &self,
         mini_loc: PageLocation,
     ) -> (PageID, LeafEntryXLocked<'_>) {
-        match mini_loc {
-            PageLocation::Mini(_) => {}
-            _ => {
-                panic!(
-                    "Expecting to insert a new mini-page into mapping table but got a full/base page."
-                );
-            }
-        }
+        debug_assert!(
+            matches!(mini_loc, PageLocation::Mini(_)),
+            "insert_mini_page_mapping called with non-mini PageLocation"
+        );
         let entry = RwLock::new(mini_loc);
         let (id, value) = self.table.insert(entry);
         let pid = PageID::from_id(id);

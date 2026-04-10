@@ -17,8 +17,12 @@ pub(crate) enum TreeError {
 /// Kept `no_std`-compatible (no `std::io::Error` dependency).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IoErrorKind {
-    VfsRead { offset: usize },
-    VfsWrite { offset: usize },
+    VfsRead {
+        offset: usize,
+    },
+    VfsWrite {
+        offset: usize,
+    },
     VfsFlush,
     WalAppend,
     WalFlush,
@@ -27,7 +31,17 @@ pub enum IoErrorKind {
     ConfigRead,
     ConfigParse,
     Corruption,
-    ChecksumMismatch { offset: usize },
+    ChecksumMismatch {
+        offset: usize,
+    },
+    /// Operation attempted on a deallocated or uninitialized (Null) page.
+    NullPage,
+    /// Internal state machine invariant violated (indicates a bug or corruption).
+    InvariantViolation,
+    /// Disk operation attempted on a cache-only (in-memory) tree.
+    CacheOnlyViolation,
+    /// Record exceeds the maximum size supported by a mini-page.
+    RecordTooLarge,
 }
 
 impl fmt::Display for IoErrorKind {
@@ -46,6 +60,14 @@ impl fmt::Display for IoErrorKind {
             IoErrorKind::ChecksumMismatch { offset } => {
                 write!(f, "CRC-32 checksum mismatch at disk page offset {}", offset)
             }
+            IoErrorKind::NullPage => write!(f, "operation on deallocated/uninitialized page"),
+            IoErrorKind::InvariantViolation => {
+                write!(f, "internal state machine invariant violated")
+            }
+            IoErrorKind::CacheOnlyViolation => {
+                write!(f, "disk operation on cache-only tree")
+            }
+            IoErrorKind::RecordTooLarge => write!(f, "record exceeds mini-page capacity"),
         }
     }
 }

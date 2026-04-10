@@ -97,7 +97,7 @@ impl BfTree {
         wal_segment_size: usize,
         buffer_ptr: Option<*mut u8>,
     ) -> Result<Self, BfTreeError> {
-        let bf_tree_config = Config::new_with_config_file(config_file);
+        let bf_tree_config = Config::new_with_config_file(config_file)?;
 
         // Read the snapshot metadata to get the LSN high-water mark.
         // WAL entries with lsn <= snapshot_lsn are already persisted in
@@ -255,7 +255,10 @@ impl BfTree {
             let mut inner_resolve_queue = VecDeque::from([root_page]);
             while !inner_resolve_queue.is_empty() {
                 let inner_ptr = inner_resolve_queue.pop_front().unwrap();
-                let mut inner = ReadGuard::try_read(inner_ptr).unwrap().upgrade().unwrap();
+                let mut inner = ReadGuard::try_read(inner_ptr)
+                    .map_err(|_| BfTreeError::Io(IoErrorKind::InvariantViolation))?
+                    .upgrade()
+                    .map_err(|(_, _)| BfTreeError::Io(IoErrorKind::InvariantViolation))?;
                 if inner.as_ref().meta.children_is_leaf() {
                     continue;
                 }
@@ -343,7 +346,8 @@ impl BfTree {
         for node in visitor {
             match node {
                 NodeInfo::Inner { ptr, .. } => {
-                    let inner = ReadGuard::try_read(ptr).unwrap();
+                    let inner = ReadGuard::try_read(ptr)
+                        .map_err(|_| BfTreeError::Io(IoErrorKind::InvariantViolation))?;
                     if inner.as_ref().is_valid_disk_offset() {
                         let offset = inner.as_ref().disk_offset as usize;
                         batched_writes.push((offset, inner.as_ref().as_slice().to_vec()));
@@ -351,7 +355,7 @@ impl BfTree {
                     }
                 }
                 NodeInfo::Leaf { level, .. } => {
-                    assert_eq!(level, 0);
+                    debug_assert_eq!(level, 0);
                 }
             }
         }
@@ -366,8 +370,12 @@ impl BfTree {
         let mut leaf_mapping = Vec::new();
         let page_table_iter = self.storage.page_table.iter();
         for (entry, pid) in page_table_iter {
-            assert!(pid.is_id());
-            match entry.try_read().unwrap().as_ref() {
+            debug_assert!(pid.is_id());
+            let guard = match entry.try_read() {
+                Ok(g) => g,
+                Err(_) => continue, // Page locked by concurrent writer; skip.
+            };
+            match guard.as_ref() {
                 PageLocation::Base(base) => leaf_mapping.push((pid, *base)),
                 PageLocation::Full(_) | PageLocation::Mini(_) => {
                     // Concurrent writers may have inserted into the circular
@@ -376,7 +384,12 @@ impl BfTree {
                     // them here to avoid panicking under concurrent workloads.
                     continue;
                 }
-                PageLocation::Null => panic!("Snapshot of Null page"),
+                PageLocation::Null => {
+                    // Null pages are deallocated or uninitialized; skip them
+                    // rather than crashing. The next snapshot will capture
+                    // any pages that transition to a valid state.
+                    continue;
+                }
             }
         }
 
@@ -448,7 +461,7 @@ impl BfTree {
         let disk_tree = BfTree::with_config(disk_config, None)?;
 
         if self.cache_only {
-            panic!("snapshot_memory_to_disk does not support cache_only trees");
+            return Err(BfTreeError::Io(IoErrorKind::CacheOnlyViolation));
         } else {
             Self::copy_records_via_scan(self, &disk_tree);
         }
@@ -1116,9 +1129,11 @@ mod tests {
 
         // Phase 2.5: Verify snapshot alone contains all pre-snapshot entries.
         {
-            let snap_tree =
-                BfTree::new_from_snapshot(Config::new_with_config_file(&config_path), None)
-                    .expect("snapshot load failed");
+            let snap_tree = BfTree::new_from_snapshot(
+                Config::new_with_config_file(&config_path).unwrap(),
+                None,
+            )
+            .expect("snapshot load failed");
             let mut snap_buf = vec![0u8; key_len];
             let mut missing_keys = Vec::new();
             for r in 0..pre_count {

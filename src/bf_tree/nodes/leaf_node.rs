@@ -153,13 +153,15 @@ impl LeafKVMeta {
 
     pub fn op_type(&self) -> OpType {
         let l = self.op_type_key_len_in_byte;
-        let b = (l >> OP_TYPE_SHIFT) as u8;
+        // Mask to 2 bits -- the shift leaves exactly bits 14..15 of a u16,
+        // so `& 0x3` is redundant for valid data but guards against
+        // memory corruption producing an out-of-range discriminant.
+        let b = ((l >> OP_TYPE_SHIFT) & 0x3) as u8;
         match b {
             0 => OpType::Insert,
             1 => OpType::Delete,
             2 => OpType::Cache,
-            3 => OpType::Phantom,
-            v => panic!("invalid OpType discriminant: {v}"),
+            _ => OpType::Phantom,
         }
     }
 
@@ -584,7 +586,11 @@ impl LeafNode {
     /// current node and the to-be-inserted record in half. The caller needs to guarantee that
     /// there are at least two records with different such that it won't result in an empty page
     /// after split
-    pub fn get_cache_only_insert_split_key(&self, key: &[u8], new_record_size: &u16) -> Vec<u8> {
+    pub fn get_cache_only_insert_split_key(
+        &self,
+        key: &[u8],
+        new_record_size: &u16,
+    ) -> Result<Vec<u8>, crate::bf_tree::error::IoErrorKind> {
         let mut merge_split_key_1: Option<Vec<u8>> = None;
         let mut merge_split_key_2: Option<Vec<u8>> = None;
         let mut diff_1: i16 = i16::MAX;
@@ -704,18 +710,15 @@ impl LeafNode {
 
         // Pick the splitting that achieves the smallest size difference between
         // the two halves
-        if merge_split_key_1.is_none() {
-            panic!(
-                "Fail to find a splitting key for merging mini and base page.{}, {}",
-                merged_size, split_target_size
-            );
-        }
+        let key1 =
+            merge_split_key_1.ok_or(crate::bf_tree::error::IoErrorKind::InvariantViolation)?;
 
         if merge_split_key_2.is_none() || diff_1 < diff_2 {
-            return merge_split_key_1.unwrap();
+            return Ok(key1);
         }
 
-        merge_split_key_2.unwrap()
+        // merge_split_key_2 is Some here (checked above)
+        Ok(merge_split_key_2.unwrap())
     }
 
     /// Find the splitting key that divides the merged records of
@@ -725,7 +728,10 @@ impl LeafNode {
     /// Caller needs to ensure there are at least two distinct keys among the
     /// mini page and self.
     #[allow(clippy::unnecessary_unwrap)]
-    pub(crate) fn get_merge_split_key(&mut self, mini_page: &LeafNode) -> Vec<u8> {
+    pub(crate) fn get_merge_split_key(
+        &mut self,
+        mini_page: &LeafNode,
+    ) -> Result<Vec<u8>, crate::bf_tree::error::IoErrorKind> {
         let mut merge_split_key_1: Option<Vec<u8>> = None;
         let mut merge_split_key_2: Option<Vec<u8>> = None;
         let mut diff_1: i16 = i16::MAX;
@@ -924,24 +930,16 @@ impl LeafNode {
             pos_meta.mark_as_deleted();
         }
 
-        if merge_split_key_1.is_none() {
-            unreachable!(
-                "Fail to find a splitting key for merging mini and base page.{}, {}",
-                merged_size, split_target_size
-            );
-        }
+        let key1 =
+            merge_split_key_1.ok_or(crate::bf_tree::error::IoErrorKind::InvariantViolation)?;
 
         // The two split keys must be different
-        if merge_split_key_2.is_some() {
-            let cmp = merge_split_key_1
-                .as_ref()
-                .unwrap()
-                .cmp(merge_split_key_2.as_ref().unwrap());
-            assert_ne!(cmp, core::cmp::Ordering::Equal);
+        if let Some(ref key2) = merge_split_key_2 {
+            debug_assert_ne!(key1.cmp(key2), core::cmp::Ordering::Equal);
         }
 
         let mut splitting_key = if merge_split_key_2.is_none() || diff_1 < diff_2 {
-            merge_split_key_1.as_ref().unwrap()
+            &key1
         } else {
             merge_split_key_2.as_ref().unwrap()
         };
@@ -953,7 +951,9 @@ impl LeafNode {
             let low_fence_key = self.get_low_fence_key();
             let cmp = splitting_key.cmp(&low_fence_key);
             if cmp == core::cmp::Ordering::Equal {
-                splitting_key = merge_split_key_2.as_ref().unwrap();
+                splitting_key = merge_split_key_2
+                    .as_ref()
+                    .ok_or(crate::bf_tree::error::IoErrorKind::InvariantViolation)?;
             }
         }
 
@@ -961,10 +961,10 @@ impl LeafNode {
         if !fence_meta.is_infinite_high_fence_key() {
             let high_fence_key = self.get_high_fence_key();
             let cmp = splitting_key.cmp(&high_fence_key);
-            assert_ne!(cmp, core::cmp::Ordering::Equal);
+            debug_assert_ne!(cmp, core::cmp::Ordering::Equal);
         }
 
-        splitting_key.clone()
+        Ok(splitting_key.clone())
     }
 
     pub fn get_key_to_reach_this_node(&self) -> Vec<u8> {
@@ -1728,7 +1728,7 @@ impl LeafNode {
         value_len: usize,
         page_classes: &[usize],
         cache_only: bool,
-    ) -> usize {
+    ) -> Result<usize, crate::bf_tree::error::IoErrorKind> {
         let mut initial_record_size = key_len + value_len + core::mem::size_of::<LeafKVMeta>();
         initial_record_size += core::mem::size_of::<LeafNode>();
 
@@ -1736,15 +1736,12 @@ impl LeafNode {
             .iter()
             .position(|x| initial_record_size < *x)
         {
-            return page_classes[s];
+            return Ok(page_classes[s]);
         } else if cache_only && initial_record_size <= page_classes[page_classes.len() - 1] {
-            return page_classes[page_classes.len() - 1];
+            return Ok(page_classes[page_classes.len() - 1]);
         }
 
-        panic!(
-            "Record size {} plus metadata exceeds the max mini-page size {:?}",
-            initial_record_size, page_classes
-        );
+        Err(crate::bf_tree::error::IoErrorKind::RecordTooLarge)
     }
 
     /// A mini-page is upgraded to the next size up where the record fits in without filling it full.
@@ -2145,7 +2142,7 @@ mod tests {
         }
 
         // Find the splitting key
-        let merge_split_key_byte = base.get_merge_split_key(mini);
+        let merge_split_key_byte = base.get_merge_split_key(mini).unwrap();
         let merge_splitting_key = cast_slice::<u8, usize>(&merge_split_key_byte);
 
         assert_eq!(merge_splitting_key[0], splitting_key);

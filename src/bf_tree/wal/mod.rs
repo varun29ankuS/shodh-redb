@@ -94,6 +94,10 @@ struct WriteAheadLogInner {
     next_lsn: u64,
     flushed_lsn: u64,
     need_flush: bool,
+    /// Sticky I/O error from the last flush attempt. Once set, all subsequent
+    /// operations that require durability will fail until the WAL is reset.
+    /// This prevents silent data loss when the storage layer fails.
+    last_io_error: Option<IoErrorKind>,
 }
 
 impl WriteAheadLogInner {
@@ -110,16 +114,15 @@ impl WriteAheadLogInner {
         // SAFETY: buffer_cursor <= buffer_size guaranteed by alloc_buffer's debug_assert.
         let used_slice = unsafe { self.buffer.as_slice_len(self.buffer_cursor) };
         if let Err(_e) = self.file_handle.write(self.file_offset, used_slice) {
-            #[cfg(feature = "std")]
-            eprintln!(
-                "bf-tree: WAL write failed at offset {}: {_e}",
-                self.file_offset
-            );
+            self.last_io_error = Some(IoErrorKind::VfsWrite {
+                offset: self.file_offset,
+            });
+            return;
         }
         // NOTE: fsync is required after write to guarantee WAL durability on crash.
         if let Err(_e) = self.file_handle.flush() {
-            #[cfg(feature = "std")]
-            eprintln!("bf-tree: WAL flush failed: {_e}");
+            self.last_io_error = Some(IoErrorKind::WalFlush);
+            return;
         }
 
         // Always advance -- append-only WAL. Old in-place rewrite caused
@@ -130,6 +133,15 @@ impl WriteAheadLogInner {
 
         self.flushed_lsn = self.next_lsn - 1;
         self.need_flush = false;
+    }
+
+    /// Check for and return any sticky I/O error from a previous flush.
+    fn check_io_error(&self) -> Result<(), TreeError> {
+        if let Some(ref err) = self.last_io_error {
+            Err(TreeError::IoError(err.clone()))
+        } else {
+            Ok(())
+        }
     }
 
     fn clear_next_header(&mut self) {
@@ -182,6 +194,7 @@ impl WriteAheadLog {
                 next_lsn: 0,
                 flushed_lsn: 0,
                 need_flush: false,
+                last_io_error: None,
             }),
             flushed_cond: Condvar::new(),
             need_flush_cond: Condvar::new(),
@@ -257,12 +270,16 @@ impl WriteAheadLog {
             .lock()
             .map_err(|_| TreeError::IoError(IoErrorKind::WalAppend))?;
 
+        // Fail fast if a previous flush encountered an I/O error.
+        inner.check_io_error()?;
+
         // log header + wal size
         let required_bytes = std::mem::size_of::<LogHeader>() + log_entry.log_size();
         let remaining = inner.buffer.buffer_size - inner.buffer_cursor;
         if required_bytes > remaining {
             // Buffer full -- flush directly (caller-side) then retry.
             inner.flush();
+            inner.check_io_error()?;
             self.flushed_cond.notify_all();
             drop(inner);
             return self.append_and_wait(log_entry, page_offset);
@@ -279,6 +296,7 @@ impl WriteAheadLog {
         // Caller-side flush: write+fsync directly instead of waiting for
         // background thread. This eliminates condvar round-trip latency.
         inner.flush();
+        inner.check_io_error()?;
         self.flushed_cond.notify_all();
 
         Ok(lsn)
@@ -300,11 +318,15 @@ impl WriteAheadLog {
             .lock()
             .map_err(|_| TreeError::IoError(IoErrorKind::WalAppend))?;
 
+        // Fail fast if a previous flush encountered an I/O error.
+        inner.check_io_error()?;
+
         let required_bytes = std::mem::size_of::<LogHeader>() + log_entry.log_size();
         let remaining = inner.buffer.buffer_size - inner.buffer_cursor;
         if required_bytes > remaining {
             // Buffer full -- flush directly (caller-side) then retry.
             inner.flush();
+            inner.check_io_error()?;
             self.flushed_cond.notify_all();
             drop(inner);
             return self.append_no_wait(log_entry, page_offset);
@@ -337,6 +359,9 @@ impl WriteAheadLog {
             .lock()
             .map_err(|_| TreeError::IoError(IoErrorKind::WalFlush))?;
 
+        // Fail fast if a previous flush encountered an I/O error.
+        inner.check_io_error()?;
+
         let target_lsn = inner.next_lsn.saturating_sub(1);
         if target_lsn == 0 || inner.flushed_lsn >= target_lsn {
             return Ok(inner.flushed_lsn);
@@ -346,6 +371,7 @@ impl WriteAheadLog {
         // background thread and waiting for it to wake up. This eliminates
         // ~5ms of condvar round-trip latency per commit.
         inner.flush();
+        inner.check_io_error()?;
         self.flushed_cond.notify_all();
 
         Ok(inner.flushed_lsn)
@@ -360,12 +386,16 @@ impl WriteAheadLog {
             .lock()
             .map_err(|_| TreeError::IoError(IoErrorKind::WalFlush))?;
 
+        // Fail fast if a previous flush encountered an I/O error.
+        inner.check_io_error()?;
+
         if inner.flushed_lsn >= lsn {
             return Ok(());
         }
 
         // Caller-side flush: write+fsync directly.
         inner.flush();
+        inner.check_io_error()?;
         self.flushed_cond.notify_all();
 
         Ok(())

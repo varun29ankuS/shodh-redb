@@ -341,7 +341,7 @@ impl BfTree {
     /// a config file
     #[cfg(feature = "std")]
     pub fn new_with_config_file<P: AsRef<Path>>(config_file_path: P) -> Result<Self, BfTreeError> {
-        let config = Config::new_with_config_file(config_file_path);
+        let config = Config::new_with_config_file(config_file_path)?;
         Self::with_config(config, None)
     }
 
@@ -370,7 +370,7 @@ impl BfTree {
             // Assuming CB can accommodate at least 2 leaf pages at the same time
             let mini_page_guard = (leaf_storage)
                 .alloc_mini_page(config.leaf_page_size)
-                .expect("Fail to allocate a mini-page as initial root node");
+                .map_err(|_| BfTreeError::Io(IoErrorKind::InvariantViolation))?;
             LeafNode::initialize_mini_page(
                 &mini_page_guard,
                 config.leaf_page_size,
@@ -763,7 +763,8 @@ impl BfTree {
                     write_op.value.len(),
                     &self.mini_page_size_classes,
                     self.cache_only,
-                );
+                )
+                .map_err(TreeError::IoError)?;
                 let mini_page_guard = self.storage.alloc_mini_page(mini_page_size)?;
                 LeafNode::initialize_mini_page(
                     &mini_page_guard,
@@ -808,10 +809,11 @@ impl BfTree {
                         _ => WalWriteOp::make_insert(write_op.key, write_op.value),
                     };
                     let log_entry = WalLogEntry::Write(wal_op);
+                    let disk_offset = leaf_entry.get_disk_offset()?;
                     let lsn = if wal_wait {
-                        wal.append_and_wait(&log_entry, leaf_entry.get_disk_offset())?
+                        wal.append_and_wait(&log_entry, disk_offset)?
                     } else {
-                        wal.append_no_wait(&log_entry, leaf_entry.get_disk_offset())?
+                        wal.append_no_wait(&log_entry, disk_offset)?
                     };
                     leaf_entry.update_lsn(lsn)?;
                 }

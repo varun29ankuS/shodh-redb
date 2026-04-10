@@ -83,6 +83,13 @@ pub struct BfTreeDatabase {
     snapshot_interval: u64,
     /// Durability mode for WAL fsync behavior.
     durability: super::config::DurabilityMode,
+    /// Shared blob sequence counter across all concurrent write transactions.
+    ///
+    /// Each `begin_write()` clones this `Arc` so that concurrent transactions
+    /// allocate disjoint sequence numbers via `fetch_add`, preventing blob ID
+    /// collisions that would occur if each transaction read the counter from
+    /// `BfTree` independently.
+    next_blob_seq: Arc<AtomicU64>,
 }
 
 impl BfTreeDatabase {
@@ -102,6 +109,7 @@ impl BfTreeDatabase {
             commit_count: Arc::new(AtomicU64::new(0)),
             snapshot_interval,
             durability,
+            next_blob_seq: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -113,6 +121,7 @@ impl BfTreeDatabase {
         let adapter = BfTreeAdapter::open_from_snapshot(config)?;
         // Recover the next transaction ID from the latest CDC log entry.
         let next_id = recover_next_txn_id(&adapter).unwrap_or(1);
+        let blob_seq = recover_blob_seq(&adapter);
         Ok(Self {
             adapter: Arc::new(adapter),
             cdc_config: CdcConfig::default(),
@@ -123,6 +132,7 @@ impl BfTreeDatabase {
             commit_count: Arc::new(AtomicU64::new(0)),
             snapshot_interval,
             durability,
+            next_blob_seq: Arc::new(AtomicU64::new(blob_seq)),
         })
     }
 
@@ -145,6 +155,7 @@ impl BfTreeDatabase {
             commit_count: Arc::new(AtomicU64::new(0)),
             snapshot_interval,
             durability,
+            next_blob_seq: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -155,6 +166,7 @@ impl BfTreeDatabase {
         let durability = config.durability;
         let adapter = BfTreeAdapter::open_from_snapshot(config)?;
         let next_id = recover_next_txn_id(&adapter).unwrap_or(1);
+        let blob_seq = recover_blob_seq(&adapter);
         Ok(Self {
             adapter: Arc::new(adapter),
             cdc_config,
@@ -165,6 +177,7 @@ impl BfTreeDatabase {
             commit_count: Arc::new(AtomicU64::new(0)),
             snapshot_interval,
             durability,
+            next_blob_seq: Arc::new(AtomicU64::new(blob_seq)),
         })
     }
 
@@ -196,6 +209,7 @@ impl BfTreeDatabase {
             buffer: Mutex::new(WriteBuffer::new()),
             committed: core::sync::atomic::AtomicBool::new(false),
             durability: self.durability,
+            next_blob_seq: self.next_blob_seq.clone(),
         }
     }
 
@@ -316,6 +330,26 @@ fn recover_next_txn_id(adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
     Ok(max_next_id.max(1))
 }
 
+/// Read the current blob sequence counter from `BfTree`.
+///
+/// Returns the next available sequence number (current + 1, or 1 if absent).
+fn recover_blob_seq(adapter: &BfTreeAdapter) -> u64 {
+    let seq_key = encode_table_key(
+        super::blob::BLOB_SEQ_TABLE,
+        TableKind::Regular,
+        super::blob::SEQ_KEY,
+    );
+    let max_record = adapter.inner().config().get_cb_max_record_size();
+    let mut buf = vec![0u8; max_record];
+    match adapter.read(&seq_key, &mut buf) {
+        Ok(len) if len as usize >= 8 => {
+            // SAFETY: len >= 8 guarantees buf[..8] is exactly [u8; 8].
+            u64::from_le_bytes(buf[..8].try_into().unwrap())
+        }
+        _ => 1,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal key encoding: prefix table name to key bytes for namespace isolation.
 //
@@ -382,6 +416,40 @@ pub(crate) fn encode_table_key_into(
     buf[2 + name_bytes.len()] = kind as u8;
     buf[prefix_len..total].copy_from_slice(key_bytes);
     total
+}
+
+/// Encode a user key with byte-order transformation for `BfTree` storage.
+///
+/// Signed integer types produce byte-comparable encoding via
+/// [`Key::to_byte_ordered_in_place`] so that `BfTree`'s lexicographic byte
+/// scans return entries in correct numeric order.
+pub(crate) fn encode_ordered_table_key<K: crate::types::Key>(
+    table_name: &str,
+    kind: TableKind,
+    key: &K::SelfType<'_>,
+) -> Vec<u8> {
+    let raw = K::as_bytes(key);
+    let mut ordered = raw.as_ref().to_vec();
+    K::to_byte_ordered_in_place(&mut ordered);
+    encode_table_key(table_name, kind, &ordered)
+}
+
+/// Zero-allocation variant of [`encode_ordered_table_key`].
+///
+/// Encodes the key into `buf` and applies byte-order transformation in-place.
+/// Returns the total encoded length.
+pub(crate) fn encode_ordered_table_key_into<K: crate::types::Key>(
+    buf: &mut [u8],
+    table_name: &str,
+    kind: TableKind,
+    key: &K::SelfType<'_>,
+) -> usize {
+    let raw = K::as_bytes(key);
+    let key_ref = raw.as_ref();
+    let len = encode_table_key_into(buf, table_name, kind, key_ref);
+    let prefix_len = len - key_ref.len();
+    K::to_byte_ordered_in_place(&mut buf[prefix_len..len]);
+    len
 }
 
 pub(crate) fn table_prefix(table_name: &str, kind: TableKind) -> Vec<u8> {
@@ -477,6 +545,11 @@ pub struct BfTreeDatabaseWriteTxn {
     committed: core::sync::atomic::AtomicBool,
     /// Durability mode for WAL fsync behavior.
     durability: super::config::DurabilityMode,
+    /// Shared blob sequence counter from the parent `BfTreeDatabase`.
+    ///
+    /// Concurrent transactions use `fetch_add` on this shared counter to
+    /// allocate disjoint blob sequence numbers, preventing ID collisions.
+    pub(crate) next_blob_seq: Arc<AtomicU64>,
 }
 
 impl BfTreeDatabaseWriteTxn {
@@ -545,6 +618,7 @@ impl BfTreeDatabaseWriteTxn {
             &self.buffer,
             &self.ops_count,
             self.cdc_log.as_ref(),
+            &self.next_blob_seq,
         )
     }
 
@@ -557,10 +631,8 @@ impl BfTreeDatabaseWriteTxn {
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
     ) -> Result<(), BfTreeError> {
-        let key_bytes = K::as_bytes(key);
         let val_bytes = V::as_bytes(value);
-        let encoded_key =
-            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
         self.buffer
             .lock()
             .put(encoded_key, val_bytes.as_ref().to_vec())?;
@@ -576,9 +648,7 @@ impl BfTreeDatabaseWriteTxn {
         definition: &TableDefinition<K, V>,
         key: &K::SelfType<'_>,
     ) {
-        let key_bytes = K::as_bytes(key);
-        let encoded_key =
-            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
         self.buffer.lock().delete(encoded_key);
         self.ops_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -592,9 +662,7 @@ impl BfTreeDatabaseWriteTxn {
         definition: &TableDefinition<K, V>,
         key: &K::SelfType<'_>,
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
-        let key_bytes = K::as_bytes(key);
-        let encoded_key =
-            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
 
         // Check write buffer first.
         {
@@ -625,9 +693,7 @@ impl BfTreeDatabaseWriteTxn {
         definition: &TableDefinition<K, V>,
         key: &K::SelfType<'_>,
     ) -> bool {
-        let key_bytes = K::as_bytes(key);
-        let encoded_key =
-            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
 
         // Check write buffer first.
         {
@@ -979,11 +1045,11 @@ impl BfTreeDatabaseReadTxn {
             let max_record = self.adapter.inner().config().get_cb_max_record_size();
             self.read_buf.resize(max_record, 0);
         }
-        let enc_len = encode_table_key_into(
+        let enc_len = encode_ordered_table_key_into::<K>(
             &mut self.key_buf,
             definition.name(),
             TableKind::Regular,
-            key_bytes.as_ref(),
+            key,
         );
         match self
             .adapter
@@ -1001,9 +1067,7 @@ impl BfTreeDatabaseReadTxn {
         definition: &TableDefinition<K, V>,
         key: &K::SelfType<'_>,
     ) -> bool {
-        let key_bytes = K::as_bytes(key);
-        let encoded_key =
-            encode_table_key(definition.name(), TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(definition.name(), TableKind::Regular, key);
         self.adapter.contains_key(&encoded_key)
     }
 

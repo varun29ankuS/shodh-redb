@@ -28,8 +28,8 @@ use super::buffered_txn::{
     BufferLookup, BufferedScanIter, WriteBuffer, collect_buffer_entries_for_table,
 };
 use super::database::{
-    BfTreeTableScan, TableKind, encode_table_key, encode_table_key_into, table_prefix,
-    table_prefix_end,
+    BfTreeTableScan, TableKind, encode_ordered_table_key, encode_ordered_table_key_into,
+    encode_table_key, table_prefix, table_prefix_end,
 };
 use super::error::BfTreeError;
 use super::verification::{VerifyMode, should_verify, unwrap_value, wrap_value};
@@ -119,7 +119,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     ) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
         let val_bytes = V::as_bytes(value);
-        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
 
         let checksumming = self.verify_mode.is_enabled();
         let store_bytes = if checksumming {
@@ -187,7 +187,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     /// stale CDC events or a tombstone overwriting a concurrent insert.
     pub fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
         let checksumming = self.verify_mode.is_enabled();
 
         // Hold the buffer lock across the entire read + tombstone-write to
@@ -245,12 +245,11 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     /// to `BfTree` if the key is not in the buffer. Uses pre-allocated buffers
     /// to avoid per-read heap allocations on the bf-tree fallthrough path.
     pub fn get(&mut self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
-        let key_bytes = K::as_bytes(key);
-        let enc_len = encode_table_key_into(
+        let enc_len = encode_ordered_table_key_into::<K>(
             &mut self.key_buf,
             &self.name,
             TableKind::Regular,
-            key_bytes.as_ref(),
+            key,
         );
         let encoded_key = &self.key_buf[..enc_len];
         let checksumming = self.verify_mode.is_enabled();
@@ -300,7 +299,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         operator: &dyn crate::merge::MergeOperator,
     ) -> Result<(), BfTreeError> {
         let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
         let checksumming = self.verify_mode.is_enabled();
 
         // Hold the buffer lock across the entire read-merge-write to prevent
@@ -371,8 +370,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
     ///
     /// Checks the write buffer first, falls through to `BfTree`.
     pub fn contains_key(&self, key: &K::SelfType<'_>) -> bool {
-        let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
 
         let buffer = self.buffer.lock();
         match buffer.get(&encoded_key) {
@@ -432,12 +430,11 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
     ///
     /// Uses pre-allocated buffers to avoid per-read heap allocations.
     pub fn get(&mut self, key: &K::SelfType<'_>) -> Result<Option<Vec<u8>>, BfTreeError> {
-        let key_bytes = K::as_bytes(key);
-        let enc_len = encode_table_key_into(
+        let enc_len = encode_ordered_table_key_into::<K>(
             &mut self.key_buf,
             &self.name,
             TableKind::Regular,
-            key_bytes.as_ref(),
+            key,
         );
         let checksumming = self.verify_mode.is_enabled();
         match self
@@ -460,8 +457,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
 
     /// Check if a key exists in this table.
     pub fn contains_key(&self, key: &K::SelfType<'_>) -> bool {
-        let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
         self.adapter.contains_key(&encoded_key)
     }
 
@@ -525,15 +521,13 @@ impl<K: Key + 'static, V: Value + 'static> Iterator for BfTreeRangeIter<'_, K, V
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let (key_bytes, val_bytes) = self.scan.next(&mut self.buf)?;
-            let key_owned = key_bytes.to_vec();
+            let key_ordered = key_bytes.to_vec();
             let val_owned = val_bytes.to_vec();
 
-            // Check exclusion filters (encoded key = prefix + key_bytes).
-            // We filter on the user key since that's what scan returns (prefix stripped).
-            // Only clear the filter when we see the excluded key or a key past it.
-            // Keys before exclude_start pass through without clearing the filter.
+            // Check exclusion filters using byte-ordered key representation
+            // (exclude values are already in ordered form).
             if let Some(ref excl) = self.exclude_start {
-                match key_owned.as_slice().cmp(excl.as_slice()) {
+                match key_ordered.as_slice().cmp(excl.as_slice()) {
                     core::cmp::Ordering::Equal => {
                         self.exclude_start = None;
                         continue;
@@ -549,12 +543,15 @@ impl<K: Key + 'static, V: Value + 'static> Iterator for BfTreeRangeIter<'_, K, V
             if self
                 .exclude_end
                 .as_ref()
-                .is_some_and(|excl| key_owned == *excl)
+                .is_some_and(|excl| key_ordered == *excl)
             {
                 return None; // Past the end boundary
             }
 
-            let k = OwnedKv::new(key_owned);
+            // Reverse byte-order transformation before returning to caller.
+            let mut key_user = key_ordered;
+            K::from_byte_ordered_in_place(&mut key_user);
+            let k = OwnedKv::new(key_user);
             let v = if self.verify_mode.is_enabled() {
                 let verify = should_verify(self.verify_mode.as_ref());
                 match unwrap_value(&val_owned, verify) {
@@ -587,12 +584,13 @@ fn build_bf_range_scan<'a, K: Key + 'static, V: Value + 'static>(
 
     let (scan_start, exclude_start) = match start {
         Some(s) => {
-            let s_bytes = K::as_bytes(s).as_ref().to_vec();
+            let mut s_bytes = K::as_bytes(s).as_ref().to_vec();
+            K::to_byte_ordered_in_place(&mut s_bytes);
             let encoded = encode_table_key(name, TableKind::Regular, &s_bytes);
             if start_inclusive {
                 (encoded, None)
             } else {
-                // Include in scan but filter out in iterator
+                // Exclude filter uses ordered bytes to match scan output.
                 (encoded, Some(s_bytes))
             }
         }
@@ -601,12 +599,12 @@ fn build_bf_range_scan<'a, K: Key + 'static, V: Value + 'static>(
 
     let (scan_end, exclude_end) = match end {
         Some(e) => {
-            let e_bytes = K::as_bytes(e).as_ref().to_vec();
+            let mut e_bytes = K::as_bytes(e).as_ref().to_vec();
+            K::to_byte_ordered_in_place(&mut e_bytes);
             let encoded = encode_table_key(name, TableKind::Regular, &e_bytes);
             if end_inclusive {
                 (encoded, None)
             } else {
-                // Include in scan but filter out in iterator
                 (encoded, Some(e_bytes))
             }
         }
@@ -647,7 +645,8 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
     // Exclusivity is handled at the iterator level via exclude_start/exclude_end.
     let (scan_start, exclude_start) = match start {
         Some(s) => {
-            let s_bytes = K::as_bytes(s).as_ref().to_vec();
+            let mut s_bytes = K::as_bytes(s).as_ref().to_vec();
+            K::to_byte_ordered_in_place(&mut s_bytes);
             let encoded = encode_table_key(name, TableKind::Regular, &s_bytes);
             if start_inclusive {
                 (encoded, None)
@@ -660,7 +659,8 @@ fn build_buffered_range_scan<'a, K: Key + 'static, V: Value + 'static>(
 
     let (scan_end, exclude_end) = match end {
         Some(e) => {
-            let e_bytes = K::as_bytes(e).as_ref().to_vec();
+            let mut e_bytes = K::as_bytes(e).as_ref().to_vec();
+            K::to_byte_ordered_in_place(&mut e_bytes);
             let encoded = encode_table_key(name, TableKind::Regular, &e_bytes);
             if end_inclusive {
                 (encoded, None)
@@ -708,8 +708,7 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
 
     fn st_get(&self, key: &K::SelfType<'_>) -> crate::Result<Option<OwnedKv<V>>> {
         // Trait requires `&self`; fall back to allocating read path.
-        let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
         let checksumming = self.verify_mode.is_enabled();
 
         let buffer = self.buffer.lock();
@@ -885,8 +884,7 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V
 
     fn st_get(&self, key: &K::SelfType<'_>) -> crate::Result<Option<OwnedKv<V>>> {
         // Trait requires `&self`; fall back to allocating read path.
-        let key_bytes = K::as_bytes(key);
-        let encoded_key = encode_table_key(&self.name, TableKind::Regular, key_bytes.as_ref());
+        let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
         let checksumming = self.verify_mode.is_enabled();
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];

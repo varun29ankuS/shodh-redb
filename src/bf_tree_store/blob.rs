@@ -21,8 +21,9 @@
 use crate::compat::Mutex;
 use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -48,10 +49,10 @@ const BLOB_TEMPORAL_TABLE: &str = "__bf_blob_temporal";
 const BLOB_CAUSAL_TABLE: &str = "__bf_blob_causal";
 const BLOB_TAG_TABLE: &str = "__bf_blob_tag";
 const BLOB_NS_TABLE: &str = "__bf_blob_ns";
-const BLOB_SEQ_TABLE: &str = "__bf_blob_seq";
+pub(crate) const BLOB_SEQ_TABLE: &str = "__bf_blob_seq";
 
 /// Sequence counter key within the `__bf_blob_seq` table.
-const SEQ_KEY: &[u8] = b"next_seq";
+pub(crate) const SEQ_KEY: &[u8] = b"next_seq";
 
 /// Bytes reserved for content prefix hashing (FNV-1a-64 of first N bytes).
 const PREFIX_HASH_LEN: usize = 4096;
@@ -207,39 +208,26 @@ fn scan_range_buffered(
         .collect())
 }
 
-/// Allocate the next blob sequence number, writing through the buffer.
+/// Allocate a unique blob sequence number via the shared database counter.
 ///
-/// The entire read-increment-write is performed under a single mutex acquisition
-/// to prevent concurrent callers from observing the same sequence value.
-fn next_sequence(buffer: &Mutex<WriteBuffer>, adapter: &BfTreeAdapter) -> Result<u64, BfTreeError> {
-    use super::buffered_txn::BufferLookup;
-
-    let seq_key = encode_seq_key();
-    let mut buf_guard = buffer.lock();
-
-    // Read current value from buffer first, then BfTree.
-    let current = match buf_guard.get(&seq_key) {
-        BufferLookup::Found(v) => Some(v),
-        BufferLookup::Tombstone => None,
-        BufferLookup::NotInBuffer => {
-            // Read from BfTree while still holding the buffer lock. This is safe
-            // because BfTree reads are non-blocking and don't acquire the buffer mutex.
-            read_raw(adapter, &seq_key)?
-        }
-    };
-
-    let seq = match current {
-        // SAFETY: len >= 8 guarantees bytes[..8] converts to [u8; 8].
-        Some(bytes) if bytes.len() >= 8 => u64::from_le_bytes(bytes[..8].try_into().unwrap()),
-        _ => 1,
-    };
-    let next = seq.checked_add(1).ok_or_else(|| {
-        BfTreeError::InvalidOperation(alloc::string::String::from(
+/// Uses `fetch_add` on the shared `AtomicU64` to guarantee that concurrent
+/// write transactions always get disjoint sequence numbers, regardless of
+/// buffer isolation. The updated counter is also written to the per-txn
+/// buffer so it gets persisted to `BfTree` on commit.
+fn alloc_blob_sequence(
+    shared_seq: &Arc<AtomicU64>,
+    buffer: &Mutex<WriteBuffer>,
+) -> Result<u64, BfTreeError> {
+    let seq = shared_seq.fetch_add(1, Ordering::SeqCst);
+    if seq == u64::MAX {
+        return Err(BfTreeError::InvalidOperation(alloc::string::String::from(
             "blob sequence counter exhausted (u64::MAX reached)",
-        ))
-    })?;
-    buf_guard.put(seq_key, next.to_le_bytes().to_vec())?;
-    drop(buf_guard);
+        )));
+    }
+    // Persist the updated counter so it survives restart.
+    let next = seq.wrapping_add(1);
+    let seq_key = encode_seq_key();
+    buffer.lock().put(seq_key, next.to_le_bytes().to_vec())?;
     Ok(seq)
 }
 
@@ -291,6 +279,8 @@ pub struct BfTreeBlobStore<'txn> {
     buffer: &'txn Mutex<WriteBuffer>,
     ops_count: &'txn AtomicU64,
     cdc_log: Option<&'txn Mutex<Vec<crate::cdc::types::CdcEvent>>>,
+    /// Shared blob sequence counter from the parent database.
+    next_blob_seq: &'txn Arc<AtomicU64>,
 }
 
 impl<'txn> BfTreeBlobStore<'txn> {
@@ -299,12 +289,14 @@ impl<'txn> BfTreeBlobStore<'txn> {
         buffer: &'txn Mutex<WriteBuffer>,
         ops_count: &'txn AtomicU64,
         cdc_log: Option<&'txn Mutex<Vec<crate::cdc::types::CdcEvent>>>,
+        next_blob_seq: &'txn Arc<AtomicU64>,
     ) -> Self {
         Self {
             adapter,
             buffer,
             ops_count,
             cdc_log,
+            next_blob_seq,
         }
     }
 
@@ -350,7 +342,7 @@ impl<'txn> BfTreeBlobStore<'txn> {
         label: &str,
         opts: StoreOptions,
     ) -> Result<BfTreeBlobWriter<'_, 'txn>, BfTreeError> {
-        let sequence = next_sequence(self.buffer, self.adapter)?;
+        let sequence = alloc_blob_sequence(self.next_blob_seq, self.buffer)?;
         Ok(BfTreeBlobWriter {
             store: self,
             sequence,

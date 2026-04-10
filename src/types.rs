@@ -160,6 +160,24 @@ impl MutInPlaceValue for &[u8] {
 pub trait Key: Value {
     /// Compare data1 with data2
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
+
+    /// Transform key bytes in-place to byte-comparable form.
+    ///
+    /// Byte-ordered storage engines (e.g., `BfTree`) compare keys lexicographically
+    /// on raw bytes. For types where `as_bytes()` output does not preserve semantic
+    /// ordering under byte comparison (e.g., signed integers in little-endian
+    /// encoding), this method transforms the bytes so that lexicographic byte
+    /// comparison matches `Self::compare()` ordering.
+    ///
+    /// The default implementation is a no-op (correct for unsigned integers,
+    /// strings, and other types whose byte representation already sorts correctly).
+    fn to_byte_ordered_in_place(_data: &mut [u8]) {}
+
+    /// Reverse the transformation applied by [`to_byte_ordered_in_place`].
+    ///
+    /// Called when reading key bytes back from a byte-ordered storage engine
+    /// before passing them to `from_bytes()`.
+    fn from_byte_ordered_in_place(_data: &mut [u8]) {}
 }
 
 impl Value for () {
@@ -704,15 +722,51 @@ macro_rules! le_impl {
     };
 }
 
+/// Implement `Key` for signed integer types with byte-order transformation.
+///
+/// Signed integers in two's-complement little-endian encoding do not sort
+/// correctly under lexicographic byte comparison (negative values have high
+/// bytes and sort after positive values). The transformation flips the sign
+/// bit and reverses to big-endian, producing a byte sequence where
+/// lexicographic order matches numeric order.
+macro_rules! le_signed_impl {
+    ($t:ty) => {
+        le_value!($t);
+
+        impl Key for $t {
+            fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+                Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
+            }
+
+            fn to_byte_ordered_in_place(data: &mut [u8]) {
+                // Flip the sign bit (MSB in LE = last byte) then reverse to
+                // big-endian. This maps i_MIN to 0x00..00, 0 to 0x80..00,
+                // i_MAX to 0xFF..FF, preserving numeric order under byte comparison.
+                if let Some(last) = data.last_mut() {
+                    *last ^= 0x80;
+                }
+                data.reverse();
+            }
+
+            fn from_byte_ordered_in_place(data: &mut [u8]) {
+                data.reverse();
+                if let Some(last) = data.last_mut() {
+                    *last ^= 0x80;
+                }
+            }
+        }
+    };
+}
+
 le_impl!(u8);
 le_impl!(u16);
 le_impl!(u32);
 le_impl!(u64);
 le_impl!(u128);
-le_impl!(i8);
-le_impl!(i16);
-le_impl!(i32);
-le_impl!(i64);
-le_impl!(i128);
+le_signed_impl!(i8);
+le_signed_impl!(i16);
+le_signed_impl!(i32);
+le_signed_impl!(i64);
+le_signed_impl!(i128);
 le_value!(f32);
 le_value!(f64);

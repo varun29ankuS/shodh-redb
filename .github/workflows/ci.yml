@@ -113,7 +113,6 @@ jobs:
           test -f Cargo.lock || cargo generate-lockfile
           command="cargo check -p $(cargo pkgid) -p shodh-redb-derive --target wasm32-unknown-unknown"
           $command
-          # bf_tree requires native targets (threads, filesystem) — skip it for wasm32
           $command --features std,logging,cache_metrics,compression_lz4,compression_zstd
           $command --no-default-features
 

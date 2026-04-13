@@ -424,6 +424,7 @@ fn run_bftree_benchmark(
         IVFPQ_SUBVECTORS,
         metric,
     )
+    .with_raw_vectors()
     .with_nprobe(10);
 
     // Build index -- split into train + batched insert to stay within the
@@ -465,14 +466,15 @@ fn run_bftree_benchmark(
     let build_time = build_start.elapsed();
     println!("  Build time: {:.2}s", build_time.as_secs_f64());
 
-    // PQ-only configs (no raw vectors stored, so rerank uses PQ distances only).
-    // Sweep nprobe to show the accuracy-speed tradeoff.
+    // Full benchmark configs matching B-tree: PQ-only, reranked, and k=10.
     let configs: Vec<(&str, u32, usize, bool, Option<usize>)> = vec![
-        ("PQ-only", 1, GROUND_TRUTH_K, false, None),
         ("PQ-only", 10, GROUND_TRUTH_K, false, None),
-        ("PQ-only", 50, GROUND_TRUTH_K, false, None),
-        ("k10", 10, 10, false, None),
-        ("k10", 50, 10, false, None),
+        ("rerank", 1, GROUND_TRUTH_K, true, None),
+        ("rerank", 10, GROUND_TRUTH_K, true, None),
+        ("rerank", 50, GROUND_TRUTH_K, true, None),
+        ("k10", 10, 10, true, None),
+        ("k10-200c", 10, 10, true, Some(200)),
+        ("k10-500c", 10, 10, true, Some(500)),
     ];
 
     println!(

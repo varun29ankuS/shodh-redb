@@ -817,9 +817,10 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                 ))
             })?;
             let raw = guard.value();
-            if raw.len() % 4 != 0 {
+            let expected_bytes = dim * 4;
+            if raw.len() != expected_bytes {
                 return Err(StorageError::Corrupted(alloc::format!(
-                    "IVF-PQ '{}': centroid {c} has misaligned byte length {} (not a multiple of 4)",
+                    "IVF-PQ '{}': centroid {c} byte length {} != expected {expected_bytes} (dim={dim})",
                     self.name,
                     raw.len(),
                 )));

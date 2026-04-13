@@ -2124,7 +2124,7 @@ impl WriteTransaction {
         temporal_table.remove(&temporal_key)?;
         drop(temporal_table);
 
-        // Remove incoming causal edge (parent → this blob).
+        // Remove incoming causal edge (parent -> this blob).
         if let Some(parent) = meta.causal_parent {
             let mut edges_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
             edges_table.remove(&CausalEdgeKey::new(parent, *blob_id))?;
@@ -2141,7 +2141,7 @@ impl WriteTransaction {
             drop(legacy_table);
         }
 
-        // Remove outgoing causal edges (this blob → children). Without this,
+        // Remove outgoing causal edges (this blob -> children). Without this,
         // deleting a parent blob leaves dangling edge entries that waste space
         // and could confuse causal graph traversals.
         {
@@ -2619,7 +2619,7 @@ impl WriteTransaction {
             cdc_table.insert(&key, &record)?;
         }
 
-        // Retention pruning — respect active consumer cursors to prevent
+        // Retention pruning -- respect active consumer cursors to prevent
         // silent data loss. The effective cutoff is the LARGER of (txn_id -
         // retention_max_txns) and the oldest cursor position, so we never
         // prune events that a registered consumer hasn't consumed yet.
@@ -2643,7 +2643,7 @@ impl WriteTransaction {
                 oldest
             };
 
-            // Don't prune past the oldest cursor — a slow consumer would
+            // Don't prune past the oldest cursor -- a slow consumer would
             // silently miss mutations if we deleted entries it hasn't read.
             let effective_cutoff = match oldest_cursor {
                 Some(cursor_pos) => retention_cutoff.max(cursor_pos),

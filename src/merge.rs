@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn float_add_no_existing() {
         let op = FloatAdd;
-        let operand = 3.14f32.to_le_bytes();
+        let operand = 7.5f32.to_le_bytes();
         let result = op.merge(KEY, None, &operand).unwrap();
         assert_eq!(result, operand);
     }

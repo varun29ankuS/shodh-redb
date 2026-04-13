@@ -446,8 +446,10 @@ fn run_bftree_benchmark(
         write_txn.commit().unwrap();
     }
     {
-        // Insert vectors in batches of 500K to avoid write buffer overflow
-        const BATCH_SIZE: usize = 500_000;
+        // Insert in smaller batches: with raw vectors + blob indirection, each
+        // cluster blob grows large and creates many chunk entries in the write
+        // buffer. 50K vectors keeps cumulative buffer entries well under 1M.
+        const BATCH_SIZE: usize = 50_000;
         for chunk_start in (0..base_vecs.len()).step_by(BATCH_SIZE) {
             let chunk_end = (chunk_start + BATCH_SIZE).min(base_vecs.len());
             let write_txn = db.begin_write();

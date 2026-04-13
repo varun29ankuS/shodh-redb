@@ -6,13 +6,13 @@
 [![CI](https://github.com/varun29ankuS/shodh-redb/actions/workflows/ci.yml/badge.svg)](https://github.com/varun29ankuS/shodh-redb/actions)
 [![no_std](https://img.shields.io/badge/no__std-compatible-green)](https://doc.rust-lang.org/reference/names/preludes.html#the-no_std-attribute)
 
-**The embedded database for AI agents.** Vector search, blob storage, TTL, causal tracking, CDC, concurrent multi-writer -- all ACID, single binary, zero external dependencies.
+**The embedded database for AI agents.** Vector search, blob storage, TTL, causal tracking, CDC -- all ACID, single binary, zero external dependencies.
 
 Give your agents persistent memory, semantic retrieval, and structured state -- without spinning up Postgres, Redis, or a vector database.
 
 ```toml
 [dependencies]
-shodh-redb = { version = "0.3", features = ["bf_tree"] }
+shodh-redb = "0.3"
 ```
 
 ---
@@ -34,27 +34,25 @@ shodh-redb does all of this in a single embedded library.
 ## Quick start
 
 ```rust
-use shodh_redb::bf_tree_store::{BfTreeDatabase, BfTreeConfig};
-use shodh_redb::TableDefinition;
+use shodh_redb::{Database, TableDefinition, ReadableDatabase, ReadableTable};
 
 const TABLE: TableDefinition<&str, u64> = TableDefinition::new("agent_state");
 
-let db = BfTreeDatabase::create(BfTreeConfig::new_file("agent.bftree", 32)).unwrap();
+let db = Database::create("agent.redb").unwrap();
 
-// Multiple agents can write concurrently
-let wtxn = db.begin_write();
-let mut table = wtxn.open_table(TABLE);
-table.insert(&"task_count", &42u64).unwrap();
-let _ = table;
+let wtxn = db.begin_write().unwrap();
+{
+    let mut table = wtxn.open_table(TABLE).unwrap();
+    table.insert("task_count", &42u64).unwrap();
+}
 wtxn.commit().unwrap(); // atomic -- all or nothing
 
-// Readers never block writers
-let rtxn = db.begin_read();
-let table = rtxn.open_table(TABLE);
-let val = table.get(&"task_count").unwrap();
+let rtxn = db.begin_read().unwrap();
+let table = rtxn.open_table(TABLE).unwrap();
+assert_eq!(table.get("task_count").unwrap().unwrap().value(), 42);
 ```
 
-Concurrent writers, lock-free readers, buffered atomic transactions. Built on [BfTree](https://www.microsoft.com/en-us/research/publication/bf-tree/) (Microsoft Research, VLDB 2024).
+Copy-on-write B-trees with full ACID guarantees, crash-safe by default.
 
 ---
 
@@ -96,7 +94,7 @@ const SQ: TableDefinition<u64, ScalarQuantized<384>> = TableDefinition::new("sq_
 const BQ: TableDefinition<u64, BinaryQuantized<48>> = TableDefinition::new("bq_memory");
 ```
 
-Indexing: **IVF-PQ** (inverted file with product quantization) and **Fractal** (hierarchical cluster index).
+Indexing: **IVF-PQ** (inverted file with product quantization) for scalable approximate nearest neighbor search.
 
 ### Blob store
 
@@ -182,28 +180,6 @@ Multi-signal ranked fusion: semantic similarity + temporal recency + causal rele
 
 ## Performance
 
-### Database benchmarks
-
-Measured on x86_64 (12 cores), key=24B, value=150B. All engines use fsync per commit unless noted.
-
-| Workload | BfTree (sync) | BfTree (periodic) | RocksDB | BTree (redb) |
-|---|---|---|---|---|
-| Write throughput (50K keys) | 660K ops/s | **1.24M ops/s** | 252K ops/s | 25K ops/s |
-| Write throughput (10K keys) | 515K ops/s | **1.51M ops/s** | 302K ops/s | 33K ops/s |
-| Single-thread writes | **593K ops/s** | -- | 338K ops/s | -- |
-| Point read p50 | 0.8 us | -- | 0.6 us | -- |
-| Range scan p50 (10 keys) | **0.7 us** | -- | 1.4 us | -- |
-| Mixed 4R+1W p99 latency | 42.9 us | 37.2 us | 6.7 us | -- |
-| Read-only p99 latency | 1.1 us | 1.2 us | 1.7 us | -- |
-| Recovery time (10K keys) | **1.0 ms** | -- | 68.4 ms | -- |
-| Write amplification | 1.22x | -- | 1.03x | -- |
-
-**Where BfTree wins**: write throughput (6.2x RocksDB at 50K periodic), single-writer latency, recovery time (68x faster), range scans, concurrent multi-writer (lock-free readers, no single-writer bottleneck), embedded simplicity (no background compaction, no LSM write amplification).
-
-**Where RocksDB wins**: point-read p50 (mature block cache, bloom filters), mixed p99 latency (optimized for read-heavy OLTP), multi-threaded scaling at 4+ threads, lower write amplification.
-
-**Trade-off**: BfTree is designed for AI agent workloads -- write-heavy, concurrent, embedded. RocksDB is a general-purpose LSM with 10+ years of optimization.
-
 ### SIMD acceleration
 
 Distance functions (`dot_product`, `euclidean_distance_sq`, `cosine_similarity`, `manhattan_distance`, `hamming_distance`) use hand-written AVX2 intrinsics on x86_64 with runtime feature detection and scalar fallback.
@@ -232,7 +208,6 @@ The core library compiles with `#![no_std]` (disable the `std` feature). Vector 
 
 | Flag | Default | Description |
 |---|---|---|
-| `bf_tree` | No | BfTree concurrent multi-writer engine |
 | `std` | Yes | File backends, group commit, TTL, runtime SIMD dispatch |
 | `logging` | No | `log` crate integration |
 | `cache_metrics` | No | Cache hit/miss counters |
@@ -247,7 +222,7 @@ The core library compiles with `#![no_std]` (disable the `std` feature). Vector 
 ```
                     +--------------------+
                     |   Database API     |
-                    |  (typed, unified)  |
+                    |  (typed, ACID)     |
                     +--------+-----------+
                              |
               +--------------+--------------+
@@ -255,18 +230,17 @@ The core library compiles with `#![no_std]` (disable the `std` feature). Vector 
         +-----+------+ +----+-----+ +------+------+
         | Key-Value  | | Blob     | | Vector      |
         | Tables     | | Store    | | Index       |
-        | TTL, Merge | | CDC,     | | IVF-PQ,     |
-        | Multimap   | | dedup,   | | Fractal     |
+        | TTL, Merge | | CDC,     | | IVF-PQ      |
+        | Multimap   | | dedup,   | |             |
         |            | | causal   | |             |
         +-----+------+ +----+-----+ +------+------+
               |              |              |
               +--------------+--------------+
                              |
                    +---------+---------+
-                   | BfTree Engine     |
-                   | (multi-writer,    |
-                   |  CAS, WAL,       |
-                   |  lock-free reads) |
+                   | B-tree Engine     |
+                   | (copy-on-write,   |
+                   |  MVCC, crash-safe)|
                    +-------------------+
 ```
 
@@ -274,7 +248,7 @@ The core library compiles with `#![no_std]` (disable the `std` feature). Vector 
 
 ## Credits
 
-BfTree engine based on [bf-tree](https://www.microsoft.com/en-us/research/publication/bf-tree/) (Microsoft Research, VLDB 2024), vendored and adapted for `no_std`/edition 2024. Core page cache and crash recovery inherited from [redb](https://github.com/cberner/redb). All extensions -- vectors, blobs, TTL, merge operators, HLC, CDC, composite queries, group commit -- are original work.
+Core page cache and crash recovery inherited from [redb](https://github.com/cberner/redb). All extensions -- vectors, blobs, TTL, merge operators, HLC, CDC, composite queries, group commit -- are original work.
 
 ## License
 

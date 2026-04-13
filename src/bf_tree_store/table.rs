@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::TableHandle;
 use crate::cdc::types::{CdcEvent, ChangeOp};
@@ -32,6 +32,7 @@ use super::database::{
     encode_table_key, table_prefix, table_prefix_end,
 };
 use super::error::BfTreeError;
+use super::value_indirection::{self, BlobHandle, is_blob_handle};
 use super::verification::{VerifyMode, should_verify, unwrap_value, wrap_value};
 
 /// A writable table handle backed by Bf-Tree.
@@ -60,6 +61,10 @@ pub struct BfTreeTable<'txn, K: Key + 'static, V: Value + 'static> {
     read_buf: Vec<u8>,
     /// Reusable buffer for encoded key, avoiding per-read heap allocation.
     key_buf: Vec<u8>,
+    /// Shared counter for value-indirection blob IDs.
+    blob_id_counter: &'txn Arc<AtomicU32>,
+    /// Threshold in bytes above which values are chunked out-of-line.
+    blob_threshold: usize,
     _key: PhantomData<K>,
     _val: PhantomData<V>,
 }
@@ -73,6 +78,7 @@ impl<K: Key + 'static, V: Value + 'static> TableHandle for BfTreeTable<'_, K, V>
 }
 
 impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         name: &str,
         adapter: &'txn Arc<BfTreeAdapter>,
@@ -80,6 +86,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         cdc_log: Option<&'txn Mutex<Vec<CdcEvent>>>,
         buffer: &'txn Mutex<WriteBuffer>,
         verify_mode: &'txn Arc<VerifyMode>,
+        blob_id_counter: &'txn Arc<AtomicU32>,
+        blob_threshold: usize,
     ) -> Self {
         let max_record = adapter.inner().config().get_cb_max_record_size();
         let key_buf_size = adapter.max_key_len() + 64;
@@ -92,6 +100,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
             verify_mode,
             read_buf: vec![0u8; max_record],
             key_buf: vec![0u8; key_buf_size],
+            blob_id_counter,
+            blob_threshold,
             _key: PhantomData,
             _val: PhantomData,
         }
@@ -127,6 +137,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         } else {
             val_bytes.as_ref().to_vec()
         };
+        let blob_enabled = self.blob_threshold > 0;
 
         // Hold the buffer lock across the entire read-modify-write to prevent
         // TOCTOU races where a concurrent writer could interleave between the
@@ -146,15 +157,46 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                     }
                 }
             };
-            buffer.put(encoded_key, store_bytes)?;
-            // Strip checksum wrapper from the previous value before returning.
-            match prev_raw {
+
+            // Resolve the previous value: reassemble blobs and clean up old chunks.
+            let previous = match prev_raw {
+                Some(raw) if blob_enabled && is_blob_handle(&raw) => {
+                    let handle = BlobHandle::decode(&raw).ok_or_else(|| {
+                        BfTreeError::InvalidKV(alloc::string::String::from(
+                            "corrupt blob handle on insert overwrite",
+                        ))
+                    })?;
+                    let reassembled =
+                        value_indirection::read_blob(&handle, &buffer, self.adapter)?;
+                    value_indirection::delete_chunks(&mut buffer, &handle);
+                    if checksumming {
+                        let verify = should_verify(self.verify_mode.as_ref());
+                        Some(unwrap_value(&reassembled, verify)?.to_vec())
+                    } else {
+                        Some(reassembled)
+                    }
+                }
                 Some(raw) if checksumming => {
                     let verify = should_verify(self.verify_mode.as_ref());
                     Some(unwrap_value(&raw, verify)?.to_vec())
                 }
                 other => other,
-            }
+            };
+
+            // Chunk the new value if above threshold.
+            let final_bytes = if blob_enabled && store_bytes.len() > self.blob_threshold {
+                let handle = value_indirection::write_chunks(
+                    &mut buffer,
+                    self.blob_id_counter,
+                    &store_bytes,
+                )?;
+                handle.encode().to_vec()
+            } else {
+                store_bytes
+            };
+
+            buffer.put(encoded_key, final_bytes)?;
+            previous
         };
 
         self.ops_count.fetch_add(1, Ordering::Relaxed);
@@ -189,6 +231,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
         let checksumming = self.verify_mode.is_enabled();
+        let blob_enabled = self.blob_threshold > 0;
 
         // Hold the buffer lock across the entire read + tombstone-write to
         // prevent TOCTOU races where a concurrent writer could insert between
@@ -208,17 +251,36 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                     }
                 }
             };
-            if prev_raw.is_some() {
-                buffer.delete(encoded_key);
-            }
-            // Strip checksum wrapper from the previous value before returning.
-            match prev_raw {
+
+            // Resolve previous value: reassemble blobs and clean up chunks.
+            let previous = match prev_raw {
+                Some(raw) if blob_enabled && is_blob_handle(&raw) => {
+                    let handle = BlobHandle::decode(&raw).ok_or_else(|| {
+                        BfTreeError::InvalidKV(alloc::string::String::from(
+                            "corrupt blob handle on remove",
+                        ))
+                    })?;
+                    let reassembled =
+                        value_indirection::read_blob(&handle, &buffer, self.adapter)?;
+                    value_indirection::delete_chunks(&mut buffer, &handle);
+                    if checksumming {
+                        let verify = should_verify(self.verify_mode.as_ref());
+                        Some(unwrap_value(&reassembled, verify)?.to_vec())
+                    } else {
+                        Some(reassembled)
+                    }
+                }
                 Some(raw) if checksumming => {
                     let verify = should_verify(self.verify_mode.as_ref());
                     Some(unwrap_value(&raw, verify)?.to_vec())
                 }
                 other => other,
+            };
+
+            if previous.is_some() {
+                buffer.delete(encoded_key);
             }
+            previous
         };
 
         if previous.is_some() {
@@ -253,15 +315,27 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         );
         let encoded_key = &self.key_buf[..enc_len];
         let checksumming = self.verify_mode.is_enabled();
+        let blob_enabled = self.blob_threshold > 0;
 
         let buffer = self.buffer.lock();
         match buffer.get(encoded_key) {
             BufferLookup::Found(v) => {
+                let data = if blob_enabled && is_blob_handle(&v) {
+                    let handle = BlobHandle::decode(&v).ok_or_else(|| {
+                        BfTreeError::InvalidKV(alloc::string::String::from(
+                            "corrupt blob handle in buffer",
+                        ))
+                    })?;
+                    value_indirection::read_blob(&handle, &buffer, self.adapter)?
+                } else {
+                    v
+                };
+                drop(buffer);
                 return if checksumming {
                     let verify = should_verify(self.verify_mode.as_ref());
-                    Ok(Some(unwrap_value(&v, verify)?.to_vec()))
+                    Ok(Some(unwrap_value(&data, verify)?.to_vec()))
                 } else {
-                    Ok(Some(v))
+                    Ok(Some(data))
                 };
             }
             BufferLookup::Tombstone => return Ok(None),
@@ -272,7 +346,20 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         match self.adapter.read(encoded_key, &mut self.read_buf) {
             Ok(len) => {
                 let raw = &self.read_buf[..len as usize];
-                if checksumming {
+                if blob_enabled && is_blob_handle(raw) {
+                    let handle = BlobHandle::decode(raw).ok_or_else(|| {
+                        BfTreeError::InvalidKV(alloc::string::String::from(
+                            "corrupt blob handle in BfTree",
+                        ))
+                    })?;
+                    let data = value_indirection::read_blob_readonly(&handle, self.adapter)?;
+                    if checksumming {
+                        let verify = should_verify(self.verify_mode.as_ref());
+                        Ok(Some(unwrap_value(&data, verify)?.to_vec()))
+                    } else {
+                        Ok(Some(data))
+                    }
+                } else if checksumming {
                     let verify = should_verify(self.verify_mode.as_ref());
                     Ok(Some(unwrap_value(raw, verify)?.to_vec()))
                 } else {
@@ -301,6 +388,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
         let key_bytes = K::as_bytes(key);
         let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
         let checksumming = self.verify_mode.is_enabled();
+        let blob_enabled = self.blob_threshold > 0;
 
         // Hold the buffer lock across the entire read-merge-write to prevent
         // TOCTOU races where a concurrent merge could read the same stale
@@ -320,8 +408,24 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                     }
                 }
             };
-            // Unwrap checksum before passing to merge operator.
+            // Resolve blob handle and unwrap checksum before passing to merge operator.
             let existing = match existing_raw {
+                Some(ref raw) if blob_enabled && is_blob_handle(raw) => {
+                    let handle = BlobHandle::decode(raw).ok_or_else(|| {
+                        BfTreeError::InvalidKV(alloc::string::String::from(
+                            "corrupt blob handle on merge",
+                        ))
+                    })?;
+                    let reassembled =
+                        value_indirection::read_blob(&handle, &buffer, self.adapter)?;
+                    value_indirection::delete_chunks(&mut buffer, &handle);
+                    if checksumming {
+                        let verify = should_verify(self.verify_mode.as_ref());
+                        Some(unwrap_value(&reassembled, verify)?.to_vec())
+                    } else {
+                        Some(reassembled)
+                    }
+                }
                 Some(ref raw) if checksumming => {
                     let verify = should_verify(self.verify_mode.as_ref());
                     Some(unwrap_value(raw, verify)?.to_vec())
@@ -336,7 +440,19 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeTable<'txn, K, V> {
                     } else {
                         new_val.clone()
                     };
-                    buffer.put(encoded_key, store)?;
+                    // Chunk the merged result if above threshold.
+                    let final_bytes =
+                        if blob_enabled && store.len() > self.blob_threshold {
+                            let handle = value_indirection::write_chunks(
+                                &mut buffer,
+                                self.blob_id_counter,
+                                &store,
+                            )?;
+                            handle.encode().to_vec()
+                        } else {
+                            store
+                        };
+                    buffer.put(encoded_key, final_bytes)?;
                 }
                 None => buffer.delete(encoded_key),
             }
@@ -395,6 +511,8 @@ pub struct BfTreeReadOnlyTable<'txn, K: Key + 'static, V: Value + 'static> {
     read_buf: Vec<u8>,
     /// Reusable buffer for encoded key, avoiding per-read heap allocation.
     key_buf: Vec<u8>,
+    /// Threshold for blob indirection (0 = disabled).
+    blob_threshold: usize,
     _key: PhantomData<K>,
     _val: PhantomData<V>,
 }
@@ -412,6 +530,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
         name: &str,
         adapter: &'txn Arc<BfTreeAdapter>,
         verify_mode: &'txn Arc<VerifyMode>,
+        blob_threshold: usize,
     ) -> Self {
         let max_record = adapter.inner().config().get_cb_max_record_size();
         let key_buf_size = adapter.max_key_len() + 64;
@@ -421,6 +540,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
             verify_mode,
             read_buf: vec![0u8; max_record],
             key_buf: vec![0u8; key_buf_size],
+            blob_threshold,
             _key: PhantomData,
             _val: PhantomData,
         }
@@ -437,13 +557,27 @@ impl<'txn, K: Key + 'static, V: Value + 'static> BfTreeReadOnlyTable<'txn, K, V>
             key,
         );
         let checksumming = self.verify_mode.is_enabled();
+        let blob_enabled = self.blob_threshold > 0;
         match self
             .adapter
             .read(&self.key_buf[..enc_len], &mut self.read_buf)
         {
             Ok(len) => {
                 let raw = &self.read_buf[..len as usize];
-                if checksumming {
+                if blob_enabled && is_blob_handle(raw) {
+                    let handle = BlobHandle::decode(raw).ok_or_else(|| {
+                        BfTreeError::InvalidKV(alloc::string::String::from(
+                            "corrupt blob handle in readonly get",
+                        ))
+                    })?;
+                    let data = value_indirection::read_blob_readonly(&handle, self.adapter)?;
+                    if checksumming {
+                        let verify = should_verify(self.verify_mode.as_ref());
+                        Ok(Some(unwrap_value(&data, verify)?.to_vec()))
+                    } else {
+                        Ok(Some(data))
+                    }
+                } else if checksumming {
                     let verify = should_verify(self.verify_mode.as_ref());
                     Ok(Some(unwrap_value(raw, verify)?.to_vec()))
                 } else {
@@ -710,15 +844,27 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
         // Trait requires `&self`; fall back to allocating read path.
         let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
         let checksumming = self.verify_mode.is_enabled();
+        let blob_enabled = self.blob_threshold > 0;
 
         let buffer = self.buffer.lock();
         match buffer.get(&encoded_key) {
             BufferLookup::Found(v) => {
+                let data = if blob_enabled && is_blob_handle(&v) {
+                    let handle = BlobHandle::decode(&v).ok_or_else(|| {
+                        BfTreeError::InvalidKV(alloc::string::String::from(
+                            "corrupt blob handle in st_get buffer",
+                        ))
+                    })?;
+                    value_indirection::read_blob(&handle, &buffer, self.adapter)?
+                } else {
+                    v
+                };
+                drop(buffer);
                 return if checksumming {
                     let verify = should_verify(self.verify_mode.as_ref());
-                    Ok(Some(OwnedKv::new(unwrap_value(&v, verify)?.to_vec())))
+                    Ok(Some(OwnedKv::new(unwrap_value(&data, verify)?.to_vec())))
                 } else {
-                    Ok(Some(OwnedKv::new(v)))
+                    Ok(Some(OwnedKv::new(data)))
                 };
             }
             BufferLookup::Tombstone => return Ok(None),
@@ -731,7 +877,20 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::WriteTable<K, 
         match self.adapter.read(&encoded_key, &mut buf) {
             Ok(len) => {
                 let raw = &buf[..len as usize];
-                if checksumming {
+                if blob_enabled && is_blob_handle(raw) {
+                    let handle = BlobHandle::decode(raw).ok_or_else(|| {
+                        BfTreeError::InvalidKV(alloc::string::String::from(
+                            "corrupt blob handle in st_get BfTree",
+                        ))
+                    })?;
+                    let data = value_indirection::read_blob_readonly(&handle, self.adapter)?;
+                    if checksumming {
+                        let verify = should_verify(self.verify_mode.as_ref());
+                        Ok(Some(OwnedKv::new(unwrap_value(&data, verify)?.to_vec())))
+                    } else {
+                        Ok(Some(OwnedKv::new(data)))
+                    }
+                } else if checksumming {
                     let verify = should_verify(self.verify_mode.as_ref());
                     Ok(Some(OwnedKv::new(unwrap_value(raw, verify)?.to_vec())))
                 } else {
@@ -886,12 +1045,26 @@ impl<K: Key + 'static, V: Value + 'static> crate::storage_traits::ReadTable<K, V
         // Trait requires `&self`; fall back to allocating read path.
         let encoded_key = encode_ordered_table_key::<K>(&self.name, TableKind::Regular, key);
         let checksumming = self.verify_mode.is_enabled();
+        let blob_enabled = self.blob_threshold > 0;
         let max_val = self.adapter.inner().config().get_cb_max_record_size();
         let mut buf = vec![0u8; max_val];
         match self.adapter.read(&encoded_key, &mut buf) {
             Ok(len) => {
                 let raw = &buf[..len as usize];
-                if checksumming {
+                if blob_enabled && is_blob_handle(raw) {
+                    let handle = BlobHandle::decode(raw).ok_or_else(|| {
+                        BfTreeError::InvalidKV(alloc::string::String::from(
+                            "corrupt blob handle in readonly st_get",
+                        ))
+                    })?;
+                    let data = value_indirection::read_blob_readonly(&handle, self.adapter)?;
+                    if checksumming {
+                        let verify = should_verify(self.verify_mode.as_ref());
+                        Ok(Some(OwnedKv::new(unwrap_value(&data, verify)?.to_vec())))
+                    } else {
+                        Ok(Some(OwnedKv::new(data)))
+                    }
+                } else if checksumming {
                     let verify = should_verify(self.verify_mode.as_ref());
                     Ok(Some(OwnedKv::new(unwrap_value(raw, verify)?.to_vec())))
                 } else {
@@ -936,7 +1109,18 @@ impl crate::storage_traits::StorageWrite for super::database::BfTreeDatabaseWrit
         &self,
         definition: crate::TableDefinition<K, V>,
     ) -> crate::Result<Self::Table<'_, K, V>> {
-        Ok(self.open_table(definition)?)
+        // Bypass table name validation: internal modules (IVF-PQ) use "__" prefixed
+        // tables legitimately. The public `open_table()` retains the check.
+        Ok(BfTreeTable::new(
+            definition.name(),
+            &self.adapter,
+            &self.ops_count,
+            self.cdc_log.as_ref(),
+            &self.buffer,
+            &self.verify_mode,
+            &self.next_value_blob_id,
+            self.blob_threshold,
+        ))
     }
 }
 
@@ -954,7 +1138,14 @@ impl crate::storage_traits::StorageRead for super::database::BfTreeDatabaseReadT
         &self,
         definition: crate::TableDefinition<K, V>,
     ) -> crate::Result<Self::Table<'_, K, V>> {
-        Ok(self.open_table(definition)?)
+        // Bypass table name validation: internal modules (IVF-PQ) use "__" prefixed
+        // tables legitimately. The public `open_table()` retains the check.
+        Ok(BfTreeReadOnlyTable::new(
+            definition.name(),
+            &self.adapter,
+            &self.verify_mode,
+            self.blob_threshold,
+        ))
     }
 }
 
@@ -1292,5 +1483,111 @@ mod tests {
         let rtxn = db.begin_read();
         let mut ro_table = rtxn.open_table(ITEMS).unwrap();
         assert!(ro_table.get(&"doomed").unwrap().is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // Blob indirection tests
+    // -------------------------------------------------------------------
+
+    const BLOB_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("blobs");
+
+    fn blob_config() -> BfTreeConfig {
+        let mut cfg = BfTreeConfig::new_memory(8);
+        cfg.blob_threshold = 64;
+        cfg
+    }
+
+    #[test]
+    fn blob_insert_read_roundtrip() {
+        let db = BfTreeDatabase::create(blob_config()).unwrap();
+        let big_val: Vec<u8> = (0u8..=255).cycle().take(10_000).collect();
+
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(BLOB_TABLE).unwrap();
+        let prev = table.insert(&"big", &big_val.as_slice()).unwrap();
+        assert!(prev.is_none());
+
+        // Read-your-writes within the same txn (from buffer).
+        let got = table.get(&"big").unwrap().unwrap();
+        assert_eq!(got, big_val);
+        drop(table);
+        wtxn.commit().unwrap();
+
+        // Read from a fresh read txn (from BfTree).
+        let rtxn = db.begin_read();
+        let mut ro = rtxn.open_table(BLOB_TABLE).unwrap();
+        let got2 = ro.get(&"big").unwrap().unwrap();
+        assert_eq!(got2, big_val);
+    }
+
+    #[test]
+    fn blob_overwrite_returns_previous() {
+        let db = BfTreeDatabase::create(blob_config()).unwrap();
+        let val1: Vec<u8> = vec![0xAA; 5_000];
+        let val2: Vec<u8> = vec![0xBB; 8_000];
+
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(BLOB_TABLE).unwrap();
+        table.insert(&"k", &val1.as_slice()).unwrap();
+        let prev = table.insert(&"k", &val2.as_slice()).unwrap();
+        assert_eq!(prev.unwrap(), val1);
+
+        let got = table.get(&"k").unwrap().unwrap();
+        assert_eq!(got, val2);
+        drop(table);
+        wtxn.commit().unwrap();
+    }
+
+    #[test]
+    fn blob_remove_returns_value_and_deletes() {
+        let db = BfTreeDatabase::create(blob_config()).unwrap();
+        let big: Vec<u8> = vec![0xCC; 3_000];
+
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(BLOB_TABLE).unwrap();
+        table.insert(&"del", &big.as_slice()).unwrap();
+        let removed = table.remove(&"del").unwrap();
+        assert_eq!(removed.unwrap(), big);
+        assert!(table.get(&"del").unwrap().is_none());
+        drop(table);
+        wtxn.commit().unwrap();
+    }
+
+    #[test]
+    fn blob_small_values_not_chunked() {
+        let db = BfTreeDatabase::create(blob_config()).unwrap();
+        let small: Vec<u8> = vec![0x01; 32];
+
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(BLOB_TABLE).unwrap();
+        table.insert(&"tiny", &small.as_slice()).unwrap();
+        let got = table.get(&"tiny").unwrap().unwrap();
+        assert_eq!(got, small);
+        drop(table);
+        wtxn.commit().unwrap();
+
+        let rtxn = db.begin_read();
+        let mut ro = rtxn.open_table(BLOB_TABLE).unwrap();
+        assert_eq!(ro.get(&"tiny").unwrap().unwrap(), small);
+    }
+
+    #[test]
+    fn blob_read_after_commit_readonly() {
+        let db = BfTreeDatabase::create(blob_config()).unwrap();
+        let val: Vec<u8> = vec![0xDD; 100_000];
+
+        // Commit a 100KB blob.
+        let wtxn = db.begin_write();
+        let mut table = wtxn.open_table(BLOB_TABLE).unwrap();
+        table.insert(&"huge", &val.as_slice()).unwrap();
+        drop(table);
+        wtxn.commit().unwrap();
+
+        // Read-only txn should reassemble correctly.
+        let rtxn = db.begin_read();
+        let mut ro = rtxn.open_table(BLOB_TABLE).unwrap();
+        let got = ro.get(&"huge").unwrap().unwrap();
+        assert_eq!(got.len(), 100_000);
+        assert_eq!(got, val);
     }
 }

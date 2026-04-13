@@ -736,10 +736,7 @@ mod tests {
             }
         });
         assert!(op.merge(KEY, Some(b"val"), b"DELETE").is_none());
-        assert_eq!(
-            op.merge(KEY, Some(b"val"), b"keep").unwrap(),
-            b"keep"
-        );
+        assert_eq!(op.merge(KEY, Some(b"val"), b"keep").unwrap(), b"keep");
     }
 
     #[test]

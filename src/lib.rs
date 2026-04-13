@@ -142,10 +142,6 @@ pub use vector_ops::{
 pub type Result<T = (), E = StorageError> = core::result::Result<T, E>;
 
 pub mod backends;
-#[cfg(feature = "bf_tree")]
-pub(crate) mod bf_tree;
-#[cfg(feature = "bf_tree")]
-pub mod bf_tree_store;
 pub mod blob_store;
 pub mod cdc;
 mod compat;

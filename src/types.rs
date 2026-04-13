@@ -163,7 +163,7 @@ pub trait Key: Value {
 
     /// Transform key bytes in-place to byte-comparable form.
     ///
-    /// Byte-ordered storage engines (e.g., `BfTree`) compare keys lexicographically
+    /// Byte-ordered storage engines compare keys lexicographically
     /// on raw bytes. For types where `as_bytes()` output does not preserve semantic
     /// ordering under byte comparison (e.g., signed integers in little-endian
     /// encoding), this method transforms the bytes so that lexicographic byte

@@ -21,12 +21,12 @@ use super::types::{
 /// pre-filtering by namespace and tags.
 ///
 /// The type parameter `P` is the blob query provider -- typically a
-/// `ReadTransaction` (legacy B-tree) or `BfTreeReadOnlyBlobStore` (`BfTree`).
+/// `ReadTransaction`.
 ///
 /// The type parameter `R` is the storage reader used for vector index search
-/// (IVF-PQ). Both `ReadTransaction` and `BfTreeDatabaseReadTxn` implement
-/// `StorageRead`. When the provider is also the storage reader (the common
-/// legacy case), use [`CompositeQuery::new()`] which sets both.
+/// (IVF-PQ). `ReadTransaction` implements `StorageRead`. When the provider
+/// is also the storage reader (the common case), use [`CompositeQuery::new()`]
+/// which sets both.
 ///
 /// # Example
 ///
@@ -49,8 +49,7 @@ pub struct CompositeQuery<
     provider: &'a P,
 
     /// Storage reader for vector index search (IVF-PQ). Generic over
-    /// `StorageRead` so that both legacy `ReadTransaction` and `BfTree` backends
-    /// can be used. `None` when no semantic signal is needed.
+    /// `StorageRead`. `None` when no semantic signal is needed.
     storage_reader: Option<&'a R>,
 
     // Semantic signal (IVF-PQ)

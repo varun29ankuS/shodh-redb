@@ -123,7 +123,7 @@ impl BlobId {
 
     /// Serialize to 16 bytes big-endian.
     /// Big-endian ensures lexicographic byte order matches numeric order,
-    /// which is required for correct `BfTree` / B-tree range scans.
+    /// which is required for correct B-tree range scans.
     #[allow(clippy::big_endian_bytes)]
     pub fn to_be_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
         let mut buf = [0u8; Self::SERIALIZED_SIZE];

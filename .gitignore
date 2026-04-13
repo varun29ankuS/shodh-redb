@@ -29,7 +29,7 @@ NUL
 # proptest regression files (auto-generated)
 **/proptest-regressions/
 
-# nested build artifacts (bf-tree crate)
+# nested build artifacts (workspace crates)
 crates/*/target/
 
 .vscode/settings.json

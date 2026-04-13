@@ -2,6 +2,8 @@ use crate::probe_select::DiversityConfig;
 use crate::vector_ops::DistanceMetric;
 use core::fmt;
 
+use super::metadata::MetadataFilter;
+
 // ---------------------------------------------------------------------------
 // IndexConfig -- persisted index configuration
 // ---------------------------------------------------------------------------
@@ -29,12 +31,20 @@ pub struct IndexConfig {
     pub(crate) state: u8,
     /// Total number of vectors currently in the index.
     pub num_vectors: u64,
+    /// Storage format version. 0 = legacy per-entry posting lists,
+    /// 1 = contiguous cluster blobs.
+    pub format_version: u8,
 }
 
 /// Training state: index has not been trained yet.
 pub const STATE_UNTRAINED: u8 = 0;
 /// Training state: index is trained and ready for inserts/queries.
 pub const STATE_TRAINED: u8 = 1;
+
+/// Format version: legacy per-entry posting lists (deprecated).
+pub const FORMAT_V0_LEGACY: u8 = 0;
+/// Format version: contiguous cluster blobs.
+pub const FORMAT_V1_BLOBS: u8 = 1;
 
 impl IndexConfig {
     /// Returns the training state (0 = untrained, 1 = trained).
@@ -63,8 +73,8 @@ impl IndexConfig {
 
 impl fmt::Debug for IndexConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IndexConfig")
-            .field("dim", &self.dim)
+        let mut s = f.debug_struct("IndexConfig");
+        s.field("dim", &self.dim)
             .field("num_clusters", &self.num_clusters)
             .field("num_subvectors", &self.num_subvectors)
             .field("num_codewords", &self.num_codewords)
@@ -73,6 +83,7 @@ impl fmt::Debug for IndexConfig {
             .field("nprobe", &self.default_nprobe)
             .field("state", &self.state)
             .field("num_vectors", &self.num_vectors)
+            .field("format_version", &self.format_version)
             .finish()
     }
 }
@@ -97,6 +108,9 @@ pub struct SearchParams {
     pub rerank: bool,
     /// Diversity-aware probe selection. Default: disabled (lambda=0.0).
     pub diversity: DiversityConfig,
+    /// Optional metadata filter. When set, candidates whose metadata does not
+    /// match this predicate are excluded before entering the top-K heap.
+    pub filter: Option<MetadataFilter>,
 }
 
 impl SearchParams {
@@ -108,6 +122,7 @@ impl SearchParams {
             k,
             rerank: true,
             diversity: DiversityConfig { lambda: 0.0 },
+            filter: None,
         }
     }
 
@@ -118,6 +133,14 @@ impl SearchParams {
         self.diversity = DiversityConfig {
             lambda: lambda.clamp(0.0, 1.0),
         };
+        self
+    }
+
+    /// Set a metadata filter. Candidates whose metadata does not match are
+    /// excluded from results.
+    #[must_use]
+    pub fn with_filter(mut self, filter: MetadataFilter) -> Self {
+        self.filter = Some(filter);
         self
     }
 }
@@ -208,6 +231,7 @@ impl IvfPqIndexDefinition {
             default_nprobe: self.default_nprobe,
             state: STATE_UNTRAINED,
             num_vectors: 0,
+            format_version: FORMAT_V1_BLOBS,
         }
     }
 }
@@ -216,8 +240,9 @@ impl fmt::Debug for IvfPqIndexDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "IvfPqIndexDefinition({:?}, dim={}, clusters={}, subvecs={}, {:?})",
+            "IvfPqIndexDefinition({:?}, dim={}, clusters={}, subvecs={}, {:?}",
             self.name, self.dim, self.num_clusters, self.num_subvectors, self.metric,
-        )
+        )?;
+        write!(f, ")")
     }
 }

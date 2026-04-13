@@ -44,12 +44,15 @@
 //! ```
 
 pub(crate) mod adc;
+#[allow(dead_code)] // Wired into index.rs in upcoming commit.
+pub(crate) mod cluster_blob;
 pub mod config;
 pub(crate) mod index;
 #[cfg(fuzzing)]
 pub mod kmeans;
 #[cfg(not(fuzzing))]
 pub(crate) mod kmeans;
+pub mod metadata;
 pub(crate) mod pq;
 #[cfg(fuzzing)]
 pub mod types;
@@ -58,4 +61,6 @@ pub(crate) mod types;
 
 pub use config::{IndexConfig, IvfPqIndexDefinition, SearchParams};
 pub use index::{IvfPqIndex, ReadOnlyIvfPqIndex};
+pub use metadata::{MetadataFilter, MetadataMap, MetadataValue};
+
 pub use pq::Codebooks;

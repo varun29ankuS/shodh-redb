@@ -11,7 +11,7 @@ authors.workspace = true
 
 # Common test/bench dependencies
 [dev-dependencies]
-shodh-redb = { path = "../..", features = ["bf_tree"] }
+shodh-redb = { path = "../.." }
 rand = "0.9"
 tempfile = "3.5.0"
 walkdir = "2.5.0"
@@ -71,5 +71,5 @@ name = "vector_ops_benchmark"
 harness = false
 
 [[bench]]
-name = "bftree_benchmark"
+name = "recall_benchmark"
 harness = false

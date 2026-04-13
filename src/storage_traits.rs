@@ -1,8 +1,7 @@
 //! Backend-agnostic storage traits for shodh-redb.
 //!
 //! These traits abstract the storage engine so that higher-level modules
-//! (`IvfPq`, Fractal index, CDC) can work with any backend -- legacy B-tree
-//! or Bf-Tree -- without code duplication.
+//! (`IvfPq`, CDC) can work with any backend without code duplication.
 //!
 //! # Trait Hierarchy
 //!
@@ -24,9 +23,8 @@
 //! # Design Notes
 //!
 //! - All returned values are **owned** (`Vec<u8>`) -- no zero-copy page references.
-//!   This is the common denominator between B-tree (page-backed) and Bf-Tree
-//!   (copy-to-buffer). The `OwnedKv` wrapper provides `.value()` extraction
-//!   matching the `AccessGuard` ergonomics.
+//!   The `OwnedKv` wrapper provides `.value()` extraction matching the
+//!   `AccessGuard` ergonomics.
 //!
 //! - Error type is `StorageError` throughout, matching existing index code that
 //!   converts `TableError -> StorageError` via helper functions.
@@ -49,7 +47,7 @@ use crate::types::{Key, Value};
 ///
 /// Provides the `.value()` method that `AccessGuard` exposes, but backed by
 /// an owned `Vec<u8>` instead of a page reference. This enables the same
-/// `guard.value()` pattern used throughout the `IvfPq` and Fractal index code.
+/// `guard.value()` pattern used throughout the `IvfPq` index code.
 pub struct OwnedKv<T: Value + 'static> {
     data: Vec<u8>,
     _type: PhantomData<T>,
@@ -96,8 +94,8 @@ impl<T: Value + 'static> core::fmt::Debug for OwnedKv<T> {
 
 /// A writable table handle that can get, insert, remove, range-scan, and drain.
 ///
-/// Both `Table<'txn, K, V>` (legacy) and `BfTreeTable<'txn, K, V>` implement
-/// this trait, allowing IvfPq/Fractal code to be generic over the backend.
+/// `Table<'txn, K, V>` implements this trait, allowing `IvfPq` code to be
+/// generic over the backend.
 pub trait WriteTable<K: Key + 'static, V: Value + 'static> {
     /// Range iterator type returned by `range()`.
     type RangeIter<'a>: Iterator<Item = crate::Result<(OwnedKv<K>, OwnedKv<V>)>>
@@ -138,8 +136,7 @@ pub trait WriteTable<K: Key + 'static, V: Value + 'static> {
 
 /// A read-only table handle.
 ///
-/// Both `ReadOnlyTable<K, V>` (legacy) and `BfTreeReadOnlyTable<K, V>` implement
-/// this trait.
+/// `ReadOnlyTable<K, V>` implements this trait.
 pub trait ReadTable<K: Key + 'static, V: Value + 'static> {
     /// Range iterator type.
     type RangeIter<'a>: Iterator<Item = crate::Result<(OwnedKv<K>, OwnedKv<V>)>>
@@ -170,7 +167,7 @@ pub trait ReadTable<K: Key + 'static, V: Value + 'static> {
 
 /// A write transaction that can open typed table handles.
 ///
-/// Both `WriteTransaction` (legacy) and `BfTreeDatabaseWriteTxn` implement this.
+/// `WriteTransaction` implements this trait.
 ///
 /// The `'txn` lifetime on the associated type allows the returned table handle
 /// to borrow from the transaction (e.g., `Table<'txn, K, V>` holds a `&'txn WriteTransaction`).
@@ -198,7 +195,7 @@ pub trait StorageWrite {
 
 /// A read transaction that can open typed read-only table handles.
 ///
-/// Both `ReadTransaction` (legacy) and `BfTreeDatabaseReadTxn` implement this.
+/// `ReadTransaction` implements this trait.
 pub trait StorageRead {
     /// The read-only table type returned by `open_storage_table`.
     ///

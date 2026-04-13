@@ -16,9 +16,7 @@ Embedded multi-modal database engine in Rust. B-tree page store with vector inde
 
 # Architecture
 - `src/tree_store/` -- B-tree core, page store, buddy allocator, flash FTL
-- `src/bf_tree_store/` -- Bf-Tree concurrent engine (feature: `bf_tree`)
 - `src/ivfpq/` -- IVF-PQ vector indexing (kmeans, codebooks)
-- `src/fractal/` -- Fractal tree index (cluster hierarchy)
 - `src/blob_store/` -- Content-addressed blob storage with causal tracking
 - `src/vector.rs`, `src/vector_ops.rs` -- Vector types, distance metrics, quantization
 

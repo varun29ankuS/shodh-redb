@@ -119,12 +119,9 @@ pub use blob_store::{
 };
 pub use cdc::{CdcConfig, ChangeOp, ChangeStream};
 pub use composite::{BlobQueryProvider, CompositeQuery, ScoredBlob, SignalScores, SignalWeights};
-pub use fractal::{
-    FractalIndex, FractalIndexConfig, FractalIndexDefinition, FractalSearchParams,
-    ReadOnlyFractalIndex,
-};
 pub use ivfpq::{
-    Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, ReadOnlyIvfPqIndex, SearchParams,
+    Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, MetadataFilter, MetadataMap,
+    MetadataValue, ReadOnlyIvfPqIndex, SearchParams,
 };
 pub use merge::{
     BitwiseOr, BytesAppend, FloatAdd, FnMergeOperator, MergeOperator, NumericAdd, NumericMax,
@@ -145,10 +142,6 @@ pub use vector_ops::{
 pub type Result<T = (), E = StorageError> = core::result::Result<T, E>;
 
 pub mod backends;
-#[cfg(feature = "bf_tree")]
-pub(crate) mod bf_tree;
-#[cfg(feature = "bf_tree")]
-pub mod bf_tree_store;
 pub mod blob_store;
 pub mod cdc;
 mod compat;
@@ -156,7 +149,6 @@ mod complex_types;
 pub mod composite;
 mod db;
 pub mod error;
-pub mod fractal;
 #[cfg(feature = "std")]
 pub mod group_commit;
 #[cfg(feature = "std")]

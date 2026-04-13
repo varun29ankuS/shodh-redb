@@ -15,9 +15,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
 
-use shodh_redb::{
-    Database, DistanceMetric, IvfPqIndexDefinition, ReadableDatabase, SearchParams,
-};
+use shodh_redb::{Database, DistanceMetric, IvfPqIndexDefinition, ReadableDatabase, SearchParams};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -49,7 +47,10 @@ impl Rng {
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         self.state
     }
 
@@ -99,8 +100,8 @@ fn generate_vectors(
 
 /// Read an fvecs file: each record is [dim: i32 LE][data: f32 x dim LE].
 fn read_fvecs(path: &Path) -> Vec<Vec<f32>> {
-    let mut file = std::fs::File::open(path)
-        .unwrap_or_else(|e| panic!("Cannot open {}: {e}", path.display()));
+    let mut file =
+        std::fs::File::open(path).unwrap_or_else(|e| panic!("Cannot open {}: {e}", path.display()));
     let mut buf4 = [0u8; 4];
     let mut vecs = Vec::new();
     loop {
@@ -123,8 +124,8 @@ fn read_fvecs(path: &Path) -> Vec<Vec<f32>> {
 /// Read an ivecs file: each record is [dim: i32 LE][data: i32 x dim LE].
 /// Returns Vec<Vec<i32>> (ground-truth neighbor IDs).
 fn read_ivecs(path: &Path) -> Vec<Vec<i32>> {
-    let mut file = std::fs::File::open(path)
-        .unwrap_or_else(|e| panic!("Cannot open {}: {e}", path.display()));
+    let mut file =
+        std::fs::File::open(path).unwrap_or_else(|e| panic!("Cannot open {}: {e}", path.display()));
     let mut buf4 = [0u8; 4];
     let mut vecs = Vec::new();
     loop {
@@ -324,14 +325,22 @@ fn run_ivfpq_benchmark(
         ("rerank", 10, GROUND_TRUTH_K, true, None),
         ("rerank", 50, GROUND_TRUTH_K, true, None),
         // Reranked k=10 — realistic use case
-        ("k10", 10, 10, true, None),       // default 100 candidates
-        ("k10-200c", 10, 10, true, Some(200)),  // 200 candidates
-        ("k10-500c", 10, 10, true, Some(500)),  // 500 candidates
+        ("k10", 10, 10, true, None),           // default 100 candidates
+        ("k10-200c", 10, 10, true, Some(200)), // 200 candidates
+        ("k10-500c", 10, 10, true, Some(500)), // 500 candidates
     ];
 
     println!(
         "  {:>10} {:>6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "mode", "nprobe", "recall@1", "recall@10", "recall@100", "QPS", "p50(ms)", "p95(ms)", "p99(ms)"
+        "mode",
+        "nprobe",
+        "recall@1",
+        "recall@10",
+        "recall@100",
+        "QPS",
+        "p50(ms)",
+        "p95(ms)",
+        "p99(ms)"
     );
 
     for &(label, nprobe, k, rerank, cand_override) in &configs {
@@ -386,4 +395,3 @@ fn run_ivfpq_benchmark(
         );
     }
 }
-

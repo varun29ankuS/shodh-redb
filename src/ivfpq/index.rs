@@ -1,5 +1,6 @@
 use alloc::collections::BinaryHeap;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
 
@@ -11,8 +12,7 @@ use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
 use super::adc::IntAdcTable;
 use super::cluster_blob::{ClusterBlobRef, merge_into_blob, remove_from_blob};
 use super::config::{
-    FORMAT_V0_LEGACY, IndexConfig, IvfPqIndexDefinition, STATE_TRAINED,
-    SearchParams,
+    FORMAT_V0_LEGACY, IndexConfig, IvfPqIndexDefinition, STATE_TRAINED, SearchParams,
 };
 use super::kmeans;
 use super::metadata::{MetadataMap, passes_filter};
@@ -380,14 +380,11 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
             let existing_blob = table.st_get(&cluster_id)?;
             let existing_ref = match existing_blob {
-                Some(ref guard) => {
-                    Some(ClusterBlobRef::new(guard.value(), pq_len, dim)?)
-                }
+                Some(ref guard) => Some(ClusterBlobRef::new(guard.value(), pq_len, dim)?),
                 None => None,
             };
 
-            let mut new_entries: Vec<OwnedBlobEntry> =
-                vec![(vector_id, pq_codes, None)];
+            let mut new_entries: Vec<OwnedBlobEntry> = vec![(vector_id, pq_codes, None)];
             let merged = merge_into_blob(existing_ref.as_ref(), &mut new_entries, pq_len);
             drop(existing_blob);
             table.st_insert(&cluster_id, &merged.as_slice())?;
@@ -395,8 +392,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         // Store raw vector separately for reranking.
         if self.config.store_raw_vectors {
-            let raw_bytes: Vec<u8> =
-                vec_ref.iter().flat_map(|f| f.to_le_bytes()).collect();
+            let raw_bytes: Vec<u8> = vec_ref.iter().flat_map(|f| f.to_le_bytes()).collect();
             let vn = vectors_name(&self.name);
             let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
             let mut vt = self.txn.open_storage_table(vdef)?;
@@ -523,9 +519,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
                 let existing_blob = table.st_get(&cid_u32)?;
                 let existing_ref = match existing_blob {
-                    Some(ref guard) => {
-                        Some(ClusterBlobRef::new(guard.value(), pq_len, dim)?)
-                    }
+                    Some(ref guard) => Some(ClusterBlobRef::new(guard.value(), pq_len, dim)?),
                     None => None,
                 };
 
@@ -594,11 +588,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     ///
     /// The metadata is stored in a separate B-tree table keyed by `vector_id`.
     /// This must be called after inserting the vector itself.
-    pub fn insert_metadata(
-        &mut self,
-        vector_id: u64,
-        metadata: &MetadataMap,
-    ) -> crate::Result<()> {
+    pub fn insert_metadata(&mut self, vector_id: u64, metadata: &MetadataMap) -> crate::Result<()> {
         let encoded = metadata.encode();
         let mn = vector_meta_name(&self.name);
         let mdef = TableDefinition::<u64, &[u8]>::new(&mn);

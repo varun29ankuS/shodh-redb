@@ -76,4 +76,3 @@ impl BlobQueryProvider for crate::transactions::ReadTransaction {
         self.causal_children(blob_id)
     }
 }
-

@@ -23,8 +23,8 @@
 //!   Row-major f32 LE — only present if flags bit 0 set
 //! ```
 
-use alloc::vec::Vec;
 use crate::error::StorageError;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -56,10 +56,7 @@ type OwnedBlobEntry = (u64, Vec<u8>, Option<Vec<u8>>);
 /// If any entry has a raw vector, ALL entries must have one (the blob format
 /// is uniform). The caller is responsible for enforcing this.
 #[allow(clippy::cast_possible_truncation)]
-pub fn encode_cluster_blob(
-    entries: &[BlobEntryF32<'_>],
-    pq_len: u16,
-) -> Vec<u8> {
+pub fn encode_cluster_blob(entries: &[BlobEntryF32<'_>], pq_len: u16) -> Vec<u8> {
     let n = entries.len();
     let has_raw = !entries.is_empty() && entries[0].2.is_some();
     let raw_dim_bytes = if has_raw {
@@ -113,10 +110,7 @@ pub fn encode_cluster_blob(
 ///
 /// Used by merge/remove helpers that work with blob-sourced raw data (already LE bytes).
 #[allow(clippy::cast_possible_truncation)]
-fn encode_cluster_blob_raw_bytes(
-    entries: &[BlobEntryBytes<'_>],
-    pq_len: u16,
-) -> Vec<u8> {
+fn encode_cluster_blob_raw_bytes(entries: &[BlobEntryBytes<'_>], pq_len: u16) -> Vec<u8> {
     let n = entries.len();
     let has_raw = !entries.is_empty() && entries[0].2.is_some();
     let raw_vec_bytes = if has_raw {
@@ -125,10 +119,8 @@ fn encode_cluster_blob_raw_bytes(
         0
     };
 
-    let total_size = HEADER_SIZE
-        + n * 8
-        + n * pq_len as usize
-        + if has_raw { n * raw_vec_bytes } else { 0 };
+    let total_size =
+        HEADER_SIZE + n * 8 + n * pq_len as usize + if has_raw { n * raw_vec_bytes } else { 0 };
 
     let mut buf = Vec::with_capacity(total_size);
 
@@ -416,11 +408,7 @@ pub fn merge_into_blob(
 
 /// Remove a vector from a cluster blob. Returns the new blob bytes,
 /// or `None` if the cluster is now empty or the vector was not found.
-pub fn remove_from_blob(
-    blob: &ClusterBlobRef<'_>,
-    vector_id: u64,
-    pq_len: u16,
-) -> Option<Vec<u8>> {
+pub fn remove_from_blob(blob: &ClusterBlobRef<'_>, vector_id: u64, pq_len: u16) -> Option<Vec<u8>> {
     let idx = blob.find_vector(vector_id)?;
     let n = blob.count();
     if n == 1 {
@@ -482,10 +470,8 @@ mod tests {
     fn round_trip_with_raw() {
         let raw0: Vec<f32> = vec![1.0, 2.0];
         let raw1: Vec<f32> = vec![3.0, 4.0];
-        let entries: Vec<BlobEntryF32<'_>> = vec![
-            (5, &[10, 20], Some(&raw0)),
-            (15, &[30, 40], Some(&raw1)),
-        ];
+        let entries: Vec<BlobEntryF32<'_>> =
+            vec![(5, &[10, 20], Some(&raw0)), (15, &[30, 40], Some(&raw1))];
         let blob = encode_cluster_blob(&entries, 2);
         let view = ClusterBlobRef::new(&blob, 2, 2).unwrap();
 
@@ -535,10 +521,8 @@ mod tests {
 
     #[test]
     fn pq_codes_block_contiguous() {
-        let entries: Vec<BlobEntryF32<'_>> = vec![
-            (1, &[10, 20, 30], None),
-            (2, &[40, 50, 60], None),
-        ];
+        let entries: Vec<BlobEntryF32<'_>> =
+            vec![(1, &[10, 20, 30], None), (2, &[40, 50, 60], None)];
         let blob = encode_cluster_blob(&entries, 3);
         let view = ClusterBlobRef::new(&blob, 3, 0).unwrap();
 
@@ -555,9 +539,7 @@ mod tests {
 
     #[test]
     fn corrupted_truncated() {
-        let entries: Vec<BlobEntryF32<'_>> = vec![
-            (1, &[0, 1], None),
-        ];
+        let entries: Vec<BlobEntryF32<'_>> = vec![(1, &[0, 1], None)];
         let blob = encode_cluster_blob(&entries, 2);
         // Truncate to lose the PQ codes.
         let truncated = &blob[..HEADER_SIZE + 8 - 1];
@@ -566,9 +548,7 @@ mod tests {
 
     #[test]
     fn wrong_pq_len() {
-        let entries: Vec<BlobEntryF32<'_>> = vec![
-            (1, &[0, 1, 2, 3], None),
-        ];
+        let entries: Vec<BlobEntryF32<'_>> = vec![(1, &[0, 1, 2, 3], None)];
         let blob = encode_cluster_blob(&entries, 4);
         assert!(ClusterBlobRef::new(&blob, 8, 0).is_err()); // expects 8, blob has 4
     }
@@ -598,10 +578,8 @@ mod tests {
         let existing_blob = encode_cluster_blob(&entries, 2);
         let existing_ref = ClusterBlobRef::new(&existing_blob, 2, 0).unwrap();
 
-        let mut new_entries: Vec<(u64, Vec<u8>, Option<Vec<u8>>)> = vec![
-            (15, vec![9, 9], None),
-            (20, vec![8, 8], None),
-        ];
+        let mut new_entries: Vec<(u64, Vec<u8>, Option<Vec<u8>>)> =
+            vec![(15, vec![9, 9], None), (20, vec![8, 8], None)];
         let merged_blob = merge_into_blob(Some(&existing_ref), &mut new_entries, 2);
         let view = ClusterBlobRef::new(&merged_blob, 2, 0).unwrap();
 
@@ -633,9 +611,7 @@ mod tests {
 
     #[test]
     fn remove_last_vector() {
-        let entries: Vec<BlobEntryF32<'_>> = vec![
-            (10, &[1, 1], None),
-        ];
+        let entries: Vec<BlobEntryF32<'_>> = vec![(10, &[1, 1], None)];
         let blob = encode_cluster_blob(&entries, 2);
         let view = ClusterBlobRef::new(&blob, 2, 0).unwrap();
         assert!(remove_from_blob(&view, 10, 2).is_none()); // empty -> None
@@ -643,9 +619,7 @@ mod tests {
 
     #[test]
     fn remove_nonexistent() {
-        let entries: Vec<BlobEntryF32<'_>> = vec![
-            (10, &[1, 1], None),
-        ];
+        let entries: Vec<BlobEntryF32<'_>> = vec![(10, &[1, 1], None)];
         let blob = encode_cluster_blob(&entries, 2);
         let view = ClusterBlobRef::new(&blob, 2, 0).unwrap();
         assert!(remove_from_blob(&view, 999, 2).is_none());

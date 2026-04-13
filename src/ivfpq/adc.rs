@@ -308,8 +308,7 @@ mod tests {
                 training.push(f32::from(i) * 0.5 + f32::from(d) * 0.1);
             }
         }
-        let codebooks =
-            train_codebooks(&training, 8, 2, 25, DistanceMetric::EuclideanSq).unwrap();
+        let codebooks = train_codebooks(&training, 8, 2, 25, DistanceMetric::EuclideanSq).unwrap();
         let query = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 
         let float_adc = AdcTable::build(&query, &codebooks, DistanceMetric::EuclideanSq);
@@ -350,8 +349,7 @@ mod tests {
                 training.push(f32::from(i) * 1.5 + f32::from(d) * 0.3);
             }
         }
-        let codebooks =
-            train_codebooks(&training, 8, 2, 25, DistanceMetric::EuclideanSq).unwrap();
+        let codebooks = train_codebooks(&training, 8, 2, 25, DistanceMetric::EuclideanSq).unwrap();
         let query = vec![2.0, 3.0, 1.0, 4.0, 0.5, 2.5, 3.5, 1.5];
 
         let float_adc = AdcTable::build(&query, &codebooks, DistanceMetric::EuclideanSq);

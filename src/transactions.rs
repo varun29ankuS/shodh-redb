@@ -1643,12 +1643,18 @@ impl WriteTransaction {
             None
         };
 
-        let blob_ref = if let Some(existing) = dedup_hit {
-            // Reuse existing physical data -- skip writing to blob region
+        let blob_ref = if let Some(existing) = dedup_hit
+            && existing.checksum == checksum
+            && existing.length == data.len() as u64
+        {
+            // Reuse existing physical data -- SHA-256 matched AND xxh3-128
+            // checksum + length confirmed. Without the secondary check a
+            // SHA-256 collision (or corrupted dedup index entry) would
+            // silently bind the new blob_id to wrong physical data.
             BlobRef {
                 offset: existing.offset,
                 length: existing.length,
-                checksum: existing.checksum,
+                checksum,
                 ref_count: 1,
                 content_type: content_type.as_byte(),
                 compression: 0,
@@ -2118,7 +2124,7 @@ impl WriteTransaction {
         temporal_table.remove(&temporal_key)?;
         drop(temporal_table);
 
-        // Remove from causal edges index using composite key (parent, child).
+        // Remove incoming causal edge (parent → this blob).
         if let Some(parent) = meta.causal_parent {
             let mut edges_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
             edges_table.remove(&CausalEdgeKey::new(parent, *blob_id))?;
@@ -2133,6 +2139,31 @@ impl WriteTransaction {
                 legacy_table.remove(&parent)?;
             }
             drop(legacy_table);
+        }
+
+        // Remove outgoing causal edges (this blob → children). Without this,
+        // deleting a parent blob leaves dangling edge entries that waste space
+        // and could confuse causal graph traversals.
+        {
+            let edges_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
+            let start = CausalEdgeKey::new(*blob_id, BlobId::MIN);
+            let end = CausalEdgeKey::new(*blob_id, BlobId::MAX);
+            let mut outgoing = Vec::new();
+            if let Ok(range) = edges_table.range(start..=end) {
+                for entry in range {
+                    let (key_guard, _) = entry?;
+                    outgoing.push(key_guard.value());
+                }
+            }
+            drop(edges_table);
+
+            if !outgoing.is_empty() {
+                let mut edges_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
+                for key in &outgoing {
+                    edges_table.remove(key)?;
+                }
+                drop(edges_table);
+            }
         }
 
         // Remove tag index entries -- scan for all TagKeys that reference this blob
@@ -2588,12 +2619,43 @@ impl WriteTransaction {
             cdc_table.insert(&key, &record)?;
         }
 
-        // Retention pruning
+        // Retention pruning — respect active consumer cursors to prevent
+        // silent data loss. The effective cutoff is the LARGER of (txn_id -
+        // retention_max_txns) and the oldest cursor position, so we never
+        // prune events that a registered consumer hasn't consumed yet.
         if self.cdc_config.retention_max_txns > 0 && txn_id > self.cdc_config.retention_max_txns {
-            let cutoff_txn = txn_id - self.cdc_config.retention_max_txns;
-            let end_key = CdcKey::new(cutoff_txn, u32::MAX);
-            for entry in cdc_table.extract_from_if(..=end_key, |_, _| true)? {
-                entry?;
+            let retention_cutoff = txn_id - self.cdc_config.retention_max_txns;
+
+            // Drop cdc_table to release the borrow on system_tables before
+            // opening the cursor table.
+            drop(cdc_table);
+
+            // Find the oldest active cursor position (if any cursors exist)
+            let oldest_cursor = {
+                let cursor_table = system_tables.open_system_table(self, CDC_CURSOR_TABLE)?;
+                let mut oldest: Option<u64> = None;
+                for entry in cursor_table.range::<&str>(..)? {
+                    let (_, val_guard) = entry?;
+                    let pos = val_guard.value();
+                    oldest = Some(oldest.map_or(pos, |o: u64| o.min(pos)));
+                }
+                drop(cursor_table);
+                oldest
+            };
+
+            // Don't prune past the oldest cursor — a slow consumer would
+            // silently miss mutations if we deleted entries it hasn't read.
+            let effective_cutoff = match oldest_cursor {
+                Some(cursor_pos) => retention_cutoff.max(cursor_pos),
+                None => retention_cutoff,
+            };
+
+            if effective_cutoff > 0 {
+                let mut cdc_table = system_tables.open_system_table(self, CDC_LOG_TABLE)?;
+                let end_key = CdcKey::new(effective_cutoff, u32::MAX);
+                for entry in cdc_table.extract_from_if(..=end_key, |_, _| true)? {
+                    entry?;
+                }
             }
         }
 

@@ -474,10 +474,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
             let pq_codes = codebooks.encode(&residual);
             if store_raw {
-                raw_vectors.push((
-                    vector_id,
-                    f32_slice_to_le_bytes(&vec),
-                ));
+                raw_vectors.push((vector_id, f32_slice_to_le_bytes(&vec)));
             }
 
             // Check for existing assignment.

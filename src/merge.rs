@@ -535,10 +535,7 @@ mod tests {
         let a = u64::MAX.to_le_bytes();
         let b = 1u64.to_le_bytes();
         let result = op.merge(KEY, Some(&a), &b).unwrap();
-        assert_eq!(
-            u64::from_le_bytes(result.try_into().unwrap()),
-            u64::MAX
-        );
+        assert_eq!(u64::from_le_bytes(result.try_into().unwrap()), u64::MAX);
     }
 
     // -----------------------------------------------------------------------

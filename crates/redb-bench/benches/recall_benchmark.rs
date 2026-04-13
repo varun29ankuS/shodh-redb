@@ -401,27 +401,22 @@ fn run_bftree_benchmark(
 ) {
     println!("--- IVF-PQ Index (Bf-Tree) ---");
 
-    // Configure Bf-Tree with 512KB pages. SIFT1M k-means produces extremely skewed
-    // clusters (12x+ avg in the fat tail), so we need large pages and a generous
-    // max_record to absorb outliers. 512KB pages with min_record=128 stays at the
-    // 4096-entry limit. max_record=250KB handles even the worst clusters.
+    // Configure Bf-Tree with default page sizes + blob indirection. Values above
+    // blob_threshold are split into 1024B chunks in a system table, so even 150KB+
+    // cluster blobs work with standard 4KB pages and 1568B max_record.
     let config = BfTreeConfig {
         circular_buffer_size: 256 * 1024 * 1024, // 256 MiB
-        min_record_size: 128,      // 524288/128 = 4096 entries per page (at limit)
-        max_record_size: 250_000,  // ~244KB -- handles 12x-avg cluster outliers
-        leaf_page_size: 524_288,   // 512KB pages
         enable_wal: false,
         durability: DurabilityMode::NoSync,
+        blob_threshold: 1024,
         ..BfTreeConfig::default()
     };
 
     let db = BfTreeDatabase::create(config).unwrap();
 
-    // Use 2048 clusters to keep per-cluster blobs well within the 126KB max_record limit.
-    // k-means produces very skewed clusters (6x+ avg in fat tail), so more clusters
-    // reduces the maximum blob size. avg ~488 vecs/cluster, max ~75KB.
-    // No raw vectors: PQ-only search is the speed path for Bf-Tree.
-    let bf_clusters: u32 = 2048;
+    // Use 1024 clusters (same as B-tree benchmark). Blob indirection handles
+    // arbitrarily large cluster blobs transparently.
+    let bf_clusters: u32 = 1024;
     let index_def = IvfPqIndexDefinition::new(
         "bench_ivfpq_bf",
         DIM as u32,

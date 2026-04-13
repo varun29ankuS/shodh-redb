@@ -18,7 +18,7 @@ rand_distr = "0.4.3"
 [dependencies.redb]
 package = "shodh-redb"
 path = ".."
-features = ["bf_tree"]
+features = []
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -54,8 +54,3 @@ path = "fuzz_targets/fuzz_ivfpq_kmeans.rs"
 test = false
 doc = false
 
-[[bin]]
-name = "fuzz_bftree"
-path = "fuzz_targets/fuzz_bftree.rs"
-test = false
-doc = false

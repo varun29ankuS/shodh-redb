@@ -49,12 +49,6 @@ test = false
 doc = false
 
 [[bin]]
-name = "fuzz_fractal_types"
-path = "fuzz_targets/fuzz_fractal_types.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "fuzz_ivfpq_kmeans"
 path = "fuzz_targets/fuzz_ivfpq_kmeans.rs"
 test = false

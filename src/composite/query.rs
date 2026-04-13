@@ -1,7 +1,6 @@
 use crate::StorageError;
 use crate::blob_store::types::BlobId;
 use crate::compat::HashMap;
-use crate::fractal::{FractalSearchParams, ReadOnlyFractalIndex};
 use crate::ivfpq::{ReadOnlyIvfPqIndex, SearchParams};
 use crate::storage_traits::StorageRead;
 use crate::transactions::ReadTransaction;
@@ -25,9 +24,9 @@ use super::types::{
 /// `ReadTransaction` (legacy B-tree) or `BfTreeReadOnlyBlobStore` (`BfTree`).
 ///
 /// The type parameter `R` is the storage reader used for vector index search
-/// (IVF-PQ / Fractal). Both `ReadTransaction` and `BfTreeDatabaseReadTxn`
-/// implement `StorageRead`. When the provider is also the storage reader (the
-/// common legacy case), use [`CompositeQuery::new()`] which sets both.
+/// (IVF-PQ). Both `ReadTransaction` and `BfTreeDatabaseReadTxn` implement
+/// `StorageRead`. When the provider is also the storage reader (the common
+/// legacy case), use [`CompositeQuery::new()`] which sets both.
 ///
 /// # Example
 ///
@@ -49,17 +48,15 @@ pub struct CompositeQuery<
 > {
     provider: &'a P,
 
-    /// Storage reader for vector index search (IVF-PQ / Fractal). Generic over
+    /// Storage reader for vector index search (IVF-PQ). Generic over
     /// `StorageRead` so that both legacy `ReadTransaction` and `BfTree` backends
     /// can be used. `None` when no semantic signal is needed.
     storage_reader: Option<&'a R>,
 
-    // Semantic signal (IVF-PQ or Fractal)
+    // Semantic signal (IVF-PQ)
     vector_index: Option<&'a ReadOnlyIvfPqIndex>,
-    fractal_index: Option<&'a ReadOnlyFractalIndex>,
     query_vector: Option<&'a [f32]>,
     search_params: Option<SearchParams>,
-    fractal_search_params: Option<FractalSearchParams>,
     semantic_candidates: Option<usize>,
 
     // Temporal signal
@@ -89,10 +86,8 @@ impl<'a> CompositeQuery<'a, ReadTransaction, ReadTransaction> {
             provider: txn,
             storage_reader: Some(txn),
             vector_index: None,
-            fractal_index: None,
             query_vector: None,
             search_params: None,
-            fractal_search_params: None,
             semantic_candidates: None,
             time_range: None,
             causal_root: None,
@@ -115,10 +110,8 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
             provider,
             storage_reader: None,
             vector_index: None,
-            fractal_index: None,
             query_vector: None,
             search_params: None,
-            fractal_search_params: None,
             semantic_candidates: None,
             time_range: None,
             causal_root: None,
@@ -132,8 +125,8 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
 
     /// Attach a `StorageRead` implementation for vector index search.
     ///
-    /// Required when semantic search is enabled, since IVF-PQ and Fractal
-    /// indices need a `StorageRead` to access their on-disk tables.
+    /// Required when semantic search is enabled, since IVF-PQ indices
+    /// need a `StorageRead` to access their on-disk tables.
     #[must_use]
     pub fn with_storage_reader(mut self, reader: &'a R) -> Self {
         self.storage_reader = Some(reader);
@@ -168,30 +161,6 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
     #[must_use]
     pub fn semantic_candidates(mut self, n: usize) -> Self {
         self.semantic_candidates = Some(n);
-        self
-    }
-
-    /// Set the semantic signal using a fractal vector index.
-    ///
-    /// Alternative to [`semantic()`](Self::semantic) -- uses the adaptive
-    /// fractal index instead of IVF-PQ. If both are set, fractal takes priority.
-    #[must_use]
-    pub fn semantic_fractal(
-        mut self,
-        index: &'a ReadOnlyFractalIndex,
-        query: &'a [f32],
-        weight: f32,
-    ) -> Self {
-        self.fractal_index = Some(index);
-        self.query_vector = Some(query);
-        self.weights.semantic = weight.max(0.0);
-        self
-    }
-
-    /// Override fractal search parameters.
-    #[must_use]
-    pub fn fractal_search_params(mut self, params: FractalSearchParams) -> Self {
-        self.fractal_search_params = Some(params);
         self
     }
 
@@ -264,7 +233,7 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
         // Phase 1: Collect candidates
         let mut candidates: HashMap<BlobId, CandidateEntry> = HashMap::new();
 
-        // 1a: Semantic candidates (fractal index takes priority over IVF-PQ)
+        // 1a: Semantic candidates (IVF-PQ)
         if sem_active {
             let query = self.query_vector.ok_or_else(|| {
                 StorageError::Corrupted(
@@ -280,33 +249,20 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
                 )
             })?;
 
-            let results = if let Some(fi) = self.fractal_index {
-                let params = self.fractal_search_params.unwrap_or(FractalSearchParams {
-                    nprobe: 8,
-                    candidates: k * 2,
-                    k,
-                    rerank: true,
-                    min_hlc: 0,
-                    diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
-                    filter: None,
-                });
-                fi.search(reader, query, &params)?
-            } else {
-                let index = self.vector_index.ok_or_else(|| {
-                    StorageError::Corrupted(
-                        "semantic search enabled but no vector index provided".to_string(),
-                    )
-                })?;
-                let params = self.search_params.unwrap_or(SearchParams {
-                    nprobe: 16,
-                    candidates: k * 2,
-                    k,
-                    rerank: true,
-                    diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
-                    filter: None,
-                });
-                index.search(reader, query, &params)?
-            };
+            let index = self.vector_index.ok_or_else(|| {
+                StorageError::Corrupted(
+                    "semantic search enabled but no vector index provided".to_string(),
+                )
+            })?;
+            let params = self.search_params.unwrap_or(SearchParams {
+                nprobe: 16,
+                candidates: k * 2,
+                k,
+                rerank: true,
+                diversity: crate::probe_select::DiversityConfig { lambda: 0.0 },
+                filter: None,
+            });
+            let results = index.search(reader, query, &params)?;
 
             for neighbor in &results {
                 if let Some((id, meta)) = self
@@ -505,12 +461,9 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
                 "CompositeQuery: semantic signal requires a query vector".to_string(),
             ));
         }
-        if self.weights.semantic > 0.0
-            && self.vector_index.is_none()
-            && self.fractal_index.is_none()
-        {
+        if self.weights.semantic > 0.0 && self.vector_index.is_none() {
             return Err(StorageError::Corrupted(
-                "CompositeQuery: semantic signal requires an index (IVF-PQ or fractal)".to_string(),
+                "CompositeQuery: semantic signal requires an IVF-PQ index".to_string(),
             ));
         }
         if self.weights.semantic > 0.0 && self.storage_reader.is_none() {

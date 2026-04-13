@@ -273,10 +273,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             for c in 0..actual_k {
-                let bytes: Vec<u8> = centroid_data[c * dim..(c + 1) * dim]
-                    .iter()
-                    .flat_map(|f| f.to_le_bytes())
-                    .collect();
+                let bytes = f32_slice_to_le_bytes(&centroid_data[c * dim..(c + 1) * dim]);
                 #[allow(clippy::cast_possible_truncation)]
                 table.st_insert(&(c as u32), &bytes.as_slice())?;
             }
@@ -392,7 +389,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         // Store raw vector separately for reranking.
         if self.config.store_raw_vectors {
-            let raw_bytes: Vec<u8> = vec_ref.iter().flat_map(|f| f.to_le_bytes()).collect();
+            let raw_bytes = f32_slice_to_le_bytes(vec_ref);
             let vn = vectors_name(&self.name);
             let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
             let mut vt = self.txn.open_storage_table(vdef)?;
@@ -479,7 +476,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             if store_raw {
                 raw_vectors.push((
                     vector_id,
-                    vec.iter().flat_map(|f| f.to_le_bytes()).collect(),
+                    f32_slice_to_le_bytes(&vec),
                 ));
             }
 
@@ -1259,6 +1256,37 @@ impl CandidateHeap {
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
+
+/// Encode a slice of f32s into LE bytes.
+///
+/// On little-endian targets this is a direct memcpy; on big-endian it
+/// converts each float individually.
+#[inline]
+fn f32_slice_to_le_bytes(floats: &[f32]) -> Vec<u8> {
+    let byte_len = floats.len() * 4;
+    let mut out = vec![0u8; byte_len];
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: On LE targets f32 memory layout matches LE byte order.
+        // `floats` has `floats.len() * 4` bytes, `out` has the same size.
+        // Both pointers are valid and non-overlapping (Vec owns its buffer).
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                floats.as_ptr().cast::<u8>(),
+                out.as_mut_ptr(),
+                byte_len,
+            );
+        }
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        for (i, &f) in floats.iter().enumerate() {
+            let b = f.to_le_bytes();
+            out[i * 4..i * 4 + 4].copy_from_slice(&b);
+        }
+    }
+    out
+}
 
 /// Decode LE f32s from `bytes` into the pre-allocated `buf`.
 /// Caller must ensure `bytes.len() == buf.len() * 4`.

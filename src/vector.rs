@@ -53,32 +53,37 @@ impl<const N: usize> Value for FixedVec<N> {
         Self: 'a,
     {
         let expected = N * core::mem::size_of::<f32>();
-        assert!(
+        debug_assert!(
             data.len() >= expected,
             "FixedVec<{N}>::from_bytes: truncated data ({} < {expected}); \
              this indicates on-disk corruption or a dimension mismatch \
              between the table definition and stored data",
             data.len(),
         );
+        // Clamp to available bytes (zero-pad if truncated) to avoid panicking
+        // on corrupted data. The result will be a degraded vector but the
+        // database remains operational.
+        let usable = data.len().min(expected);
         let mut result = [0.0f32; N];
         #[cfg(target_endian = "little")]
         {
             // SAFETY: On little-endian targets, f32 byte representation matches
-            // memory layout. Source has >= N*4 bytes (asserted above), dest is
-            // [f32; N] with size N*4. Both pointers are valid and non-overlapping.
+            // memory layout. `usable` <= data.len() and usable <= N*4, so both
+            // source and dest have sufficient bytes. Pointers are non-overlapping.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     data.as_ptr(),
                     result.as_mut_ptr().cast::<u8>(),
-                    N * 4,
+                    usable,
                 );
             }
         }
         #[cfg(not(target_endian = "little"))]
         {
-            for (i, val) in result.iter_mut().enumerate() {
+            let full_floats = usable / 4;
+            for i in 0..full_floats {
                 let start = i * 4;
-                *val = f32::from_le_bytes([
+                result[i] = f32::from_le_bytes([
                     data[start],
                     data[start + 1],
                     data[start + 2],

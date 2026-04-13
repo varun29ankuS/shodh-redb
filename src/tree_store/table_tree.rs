@@ -986,7 +986,10 @@ impl Drop for TableTreeMut<'_> {
         if is_panicking {
             return;
         }
-        assert!(self.allocated_pages.lock().is_empty());
+        debug_assert!(
+            self.allocated_pages.lock().is_empty(),
+            "TableTree dropped with unreleased allocated pages"
+        );
     }
 }
 

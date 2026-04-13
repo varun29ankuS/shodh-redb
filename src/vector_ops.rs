@@ -728,9 +728,7 @@ pub fn read_f32_le(src: &[u8]) -> Vec<f32> {
         for i in 0..count {
             let start = i * 4;
             // Infallible: start + 4 <= usable <= src.len() by loop bounds.
-            let bytes: [u8; 4] = src[start..start + 4]
-                .try_into()
-                .unwrap_or([0u8; 4]);
+            let bytes: [u8; 4] = src[start..start + 4].try_into().unwrap_or([0u8; 4]);
             result.push(f32::from_le_bytes(bytes));
         }
         result

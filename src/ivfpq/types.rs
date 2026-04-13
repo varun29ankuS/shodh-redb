@@ -13,12 +13,14 @@ use core::fmt;
 /// single cluster a contiguous B-tree region.
 ///
 /// Fixed width: 12 bytes (4 + 8).
+#[allow(dead_code)] // Retained for potential migration tooling.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PostingKey {
     pub cluster_id: u32,
     pub vector_id: u64,
 }
 
+#[allow(dead_code)]
 impl PostingKey {
     pub const SERIALIZED_SIZE: usize = 12;
 
@@ -228,7 +230,8 @@ pub fn encode_index_config(cfg: &super::config::IndexConfig) -> [u8; INDEX_CONFI
     buf[20] = cfg.state;
     // bytes 21..24 padding
     buf[24..32].copy_from_slice(&cfg.num_vectors.to_le_bytes());
-    // bytes 32..48 reserved
+    buf[32] = cfg.format_version;
+    // bytes 33..48 reserved
     buf
 }
 
@@ -293,6 +296,8 @@ pub fn decode_index_config(data: &[u8]) -> super::config::IndexConfig {
     let default_nprobe = read_u32_le(data, 16);
     let state = read_byte(data, 20);
     let num_vectors = read_u64_le(data, 24);
+    let format_version = read_byte(data, 32);
+    // bytes 33..48 reserved
 
     IndexConfig {
         dim,
@@ -304,5 +309,6 @@ pub fn decode_index_config(data: &[u8]) -> super::config::IndexConfig {
         default_nprobe,
         state,
         num_vectors,
+        format_version,
     }
 }

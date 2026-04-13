@@ -8,12 +8,20 @@ use crate::error::StorageError;
 use crate::storage_traits::{ReadTable, StorageRead, StorageWrite, WriteTable};
 use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
 
-use super::adc::AdcTable;
-use super::config::{IndexConfig, IvfPqIndexDefinition, STATE_TRAINED, SearchParams};
+use super::adc::IntAdcTable;
+use super::cluster_blob::{ClusterBlobRef, merge_into_blob, remove_from_blob};
+use super::config::{
+    FORMAT_V0_LEGACY, IndexConfig, IvfPqIndexDefinition, STATE_TRAINED,
+    SearchParams,
+};
 use super::kmeans;
 use super::metadata::{MetadataMap, passes_filter};
+
 use super::pq::{self, Codebooks};
-use super::types::{PostingKey, decode_index_config, encode_index_config};
+use super::types::{decode_index_config, encode_index_config};
+
+/// Owned entry for cluster blob operations: `(vector_id, pq_codes, optional_raw_bytes)`.
+type OwnedBlobEntry = (u64, Vec<u8>, Option<Vec<u8>>);
 
 // ---------------------------------------------------------------------------
 // Table name helpers
@@ -28,8 +36,8 @@ fn centroids_name(name: &str) -> String {
 fn codebooks_name(name: &str) -> String {
     alloc::format!("__ivfpq:{name}:codebooks")
 }
-fn postings_name(name: &str) -> String {
-    alloc::format!("__ivfpq:{name}:postings")
+fn clusters_name(name: &str) -> String {
+    alloc::format!("__ivfpq:{name}:clusters")
 }
 fn vectors_name(name: &str) -> String {
     alloc::format!("__ivfpq:{name}:vectors")
@@ -115,20 +123,25 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             config
         };
 
+        // Reject legacy format -- re-training is required.
+        if config.format_version == FORMAT_V0_LEGACY && config.state != 0 {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "IVF-PQ '{name}': legacy format v0 -- re-train required for blob format v1",
+            )));
+        }
+
         // Eagerly create the other tables.
         {
             let cn = centroids_name(&name);
             let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&cn))?;
             let cb = codebooks_name(&name);
             let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&cb))?;
-            let pn = postings_name(&name);
-            let _ = txn.open_storage_table(TableDefinition::<PostingKey, &[u8]>::new(&pn))?;
+            let cl = clusters_name(&name);
+            let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&cl))?;
+            let vn = vectors_name(&name);
+            let _ = txn.open_storage_table(TableDefinition::<u64, &[u8]>::new(&vn))?;
             let an = assignments_name(&name);
             let _ = txn.open_storage_table(TableDefinition::<u64, u32>::new(&an))?;
-            if config.store_raw_vectors {
-                let vn = vectors_name(&name);
-                let _ = txn.open_storage_table(TableDefinition::<u64, &[u8]>::new(&vn))?;
-            }
         }
 
         let requested_num_clusters = definition.num_clusters();
@@ -221,17 +234,40 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             self.config.num_clusters = actual_k as u32;
         }
 
-        // 2. Train PQ codebooks.
-        let codebooks =
-            pq::train_codebooks(&flat, dim, num_subvectors, max_iter, self.config.metric)?;
+        // 2. Compute residuals (vector - assigned centroid) for PQ training.
+        //    Residual encoding is the standard Faiss IVFADC approach: PQ
+        //    codebooks learn to quantize the *offset from the centroid* rather
+        //    than the raw vector. This concentrates PQ precision on the
+        //    intra-cluster structure, dramatically improving recall.
+        let mut residuals = Vec::with_capacity(flat.len());
+        for i in 0..n {
+            let vec_slice = &flat[i * dim..(i + 1) * dim];
+            let (cid, _) = kmeans::assign_nearest(
+                vec_slice,
+                &centroid_data,
+                dim,
+                actual_k,
+                self.config.metric,
+            );
+            let c_offset = cid as usize * dim;
+            for d in 0..dim {
+                residuals.push(vec_slice[d] - centroid_data[c_offset + d]);
+            }
+        }
 
-        // 3. Clear stale data from a previous training cycle.
-        //    Old centroids beyond actual_k, old postings, assignments, and raw
-        //    vectors must be removed -- they reference stale cluster IDs from the
-        //    previous centroid set.
+        // 3. Train PQ codebooks on residuals.
+        let codebooks_trained = pq::train_codebooks(
+            &residuals,
+            dim,
+            num_subvectors,
+            max_iter,
+            self.config.metric,
+        )?;
+
+        // 4. Clear stale data from a previous training cycle.
         self.clear_stale_training_data(old_k, actual_k)?;
 
-        // 4. Persist new centroids.
+        // 5. Persist new centroids.
         {
             let tn = centroids_name(&self.name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
@@ -246,26 +282,26 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             }
         }
 
-        // 5. Persist new PQ codebooks.
+        // 6. Persist PQ codebooks.
         {
             let tn = codebooks_name(&self.name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             for m in 0..num_subvectors {
-                let bytes = codebooks.serialize_codebook(m);
+                let bytes = codebooks_trained.serialize_codebook(m);
                 #[allow(clippy::cast_possible_truncation)]
                 table.st_insert(&(m as u32), &bytes.as_slice())?;
             }
         }
 
-        // 6. Update config -- persist immediately since training is a major event.
+        // 7. Update config -- persist immediately since training is a major event.
         self.config.state = STATE_TRAINED;
         self.config.num_vectors = 0;
         self.persist_config_inner()?;
         self.config_dirty = false;
 
         self.centroids = Some(centroid_data);
-        self.codebooks = Some(codebooks);
+        self.codebooks = Some(codebooks_trained);
 
         Ok(())
     }
@@ -278,6 +314,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     ///
     /// If `vector_id` already exists, the old entry is replaced (upsert semantics).
     /// Returns an error if the vector contains NaN or Inf values.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn insert(&mut self, vector_id: u64, vector: &[f32]) -> crate::Result<()> {
         self.ensure_trained()?;
         let dim = self.config.dim as usize;
@@ -300,7 +337,6 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         };
 
         let centroids = self.load_centroids()?;
-        let codebooks = self.load_codebooks()?;
 
         let (cluster_id, _) = kmeans::assign_nearest(
             vec_ref,
@@ -309,9 +345,17 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             self.config.num_clusters as usize,
             self.config.metric,
         );
-        let pq_codes = codebooks.encode(vec_ref);
+        let c_offset = cluster_id as usize * dim;
+        let residual: Vec<f32> = vec_ref
+            .iter()
+            .enumerate()
+            .map(|(d, &v)| v - centroids[c_offset + d])
+            .collect();
 
-        // Check if this vector_id already exists (H5/H6: handle duplicates).
+        let codebooks = self.load_codebooks()?;
+        let pq_codes = codebooks.encode(&residual);
+
+        // Check if this vector_id already exists.
         let old_cluster = {
             let tn = assignments_name(&self.name);
             let def = TableDefinition::<u64, u32>::new(&tn);
@@ -319,39 +363,54 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             table.st_get(&vector_id)?.map(|g| g.value())
         };
 
-        // Remove old posting entry if the vector existed in a different (or same) cluster.
-        if let Some(old_cid) = old_cluster {
-            let tn = postings_name(&self.name);
-            let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
-            let mut table = self.txn.open_storage_table(def)?;
-            table.st_remove(&PostingKey::new(old_cid, vector_id))?;
+        let pq_len = self.config.num_subvectors as u16;
+
+        // Remove from old cluster blob if moving clusters.
+        if let Some(old_cid) = old_cluster
+            && old_cid != cluster_id
+        {
+            self.remove_from_cluster_blob(old_cid, vector_id, pq_len)?;
         }
 
-        // Insert the new posting entry.
+        // Merge into target cluster blob (PQ-only, no raw vectors).
         {
-            let tn = postings_name(&self.name);
-            let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
+            let tn = clusters_name(&self.name);
+            let def = TableDefinition::<u32, &[u8]>::new(&tn);
             let mut table = self.txn.open_storage_table(def)?;
-            table.st_insert(
-                &PostingKey::new(cluster_id, vector_id),
-                &pq_codes.as_slice(),
-            )?;
+
+            let existing_blob = table.st_get(&cluster_id)?;
+            let existing_ref = match existing_blob {
+                Some(ref guard) => {
+                    Some(ClusterBlobRef::new(guard.value(), pq_len, dim)?)
+                }
+                None => None,
+            };
+
+            let mut new_entries: Vec<OwnedBlobEntry> =
+                vec![(vector_id, pq_codes, None)];
+            let merged = merge_into_blob(existing_ref.as_ref(), &mut new_entries, pq_len);
+            drop(existing_blob);
+            table.st_insert(&cluster_id, &merged.as_slice())?;
         }
+
+        // Store raw vector separately for reranking.
+        if self.config.store_raw_vectors {
+            let raw_bytes: Vec<u8> =
+                vec_ref.iter().flat_map(|f| f.to_le_bytes()).collect();
+            let vn = vectors_name(&self.name);
+            let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
+            let mut vt = self.txn.open_storage_table(vdef)?;
+            vt.st_insert(&vector_id, &raw_bytes.as_slice())?;
+        }
+
+        // Update assignment.
         {
             let tn = assignments_name(&self.name);
             let def = TableDefinition::<u64, u32>::new(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             table.st_insert(&vector_id, &cluster_id)?;
         }
-        if self.config.store_raw_vectors {
-            let tn = vectors_name(&self.name);
-            let def = TableDefinition::<u64, &[u8]>::new(&tn);
-            let mut table = self.txn.open_storage_table(def)?;
-            let bytes: Vec<u8> = vec_ref.iter().flat_map(|f| f.to_le_bytes()).collect();
-            table.st_insert(&vector_id, &bytes.as_slice())?;
-        }
 
-        // Only increment count for genuinely new vectors.
         if old_cluster.is_none() {
             self.config.num_vectors = self.config.num_vectors.saturating_add(1);
             self.config_dirty = true;
@@ -361,7 +420,11 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
     /// Bulk insert vectors.
     ///
+    /// Groups vectors by cluster and performs one blob read-modify-write per
+    /// cluster touched, regardless of how many vectors go into it.
+    ///
     /// If a `vector_id` already exists, the old entry is replaced (upsert semantics).
+    #[allow(clippy::cast_possible_truncation)]
     pub fn insert_batch<I>(&mut self, vectors: I) -> crate::Result<u64>
     where
         I: Iterator<Item = (u64, Vec<f32>)>,
@@ -369,30 +432,28 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         self.ensure_trained()?;
         let dim = self.config.dim as usize;
         let centroids = self.load_centroids()?;
-        let codebooks = self.load_codebooks()?;
         let num_clusters = self.config.num_clusters as usize;
         let metric = self.config.metric;
         let store_raw = self.config.store_raw_vectors;
+        let pq_len = self.config.num_subvectors as u16;
 
-        let pn = postings_name(&self.name);
-        let pd = TableDefinition::<PostingKey, &[u8]>::new(&pn);
-        let mut pt = self.txn.open_storage_table(pd)?;
+        let codebooks = self.load_codebooks()?;
+
+        // Phase 1: Compute cluster assignments and PQ codes for all vectors.
+        // grouped[cluster_id] = Vec<(vector_id, pq_codes, None)>  -- PQ only
+        let mut grouped: Vec<Vec<OwnedBlobEntry>> = Vec::new();
+        grouped.resize_with(num_clusters, Vec::new);
+
+        // Raw vectors stored separately (vector_id, raw_bytes).
+        let mut raw_vectors: Vec<(u64, Vec<u8>)> = Vec::new();
 
         let an = assignments_name(&self.name);
         let ad = TableDefinition::<u64, u32>::new(&an);
         let mut at = self.txn.open_storage_table(ad)?;
 
-        // Open vectors table once outside loop (M2 fix).
-        let vn;
-        let mut vt_opt = if store_raw {
-            vn = vectors_name(&self.name);
-            let vd = TableDefinition::<u64, &[u8]>::new(&vn);
-            Some(self.txn.open_storage_table(vd)?)
-        } else {
-            None
-        };
-
-        let mut count = 0u64;
+        // Track old cluster assignments for upsert cleanup.
+        let mut old_assignments: Vec<(u64, u32)> = Vec::new();
+        let mut new_count = 0u64;
 
         for (vector_id, mut vec) in vectors {
             if vec.len() != dim {
@@ -410,38 +471,89 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
             let (cluster_id, _) =
                 kmeans::assign_nearest(&vec, &centroids, dim, num_clusters, metric);
-            let pq_codes = codebooks.encode(&vec);
 
-            // Check for existing assignment (handle duplicates).
+            let c_offset = cluster_id as usize * dim;
+            let residual: Vec<f32> = vec
+                .iter()
+                .enumerate()
+                .map(|(d, &v)| v - centroids[c_offset + d])
+                .collect();
+
+            let pq_codes = codebooks.encode(&residual);
+            if store_raw {
+                raw_vectors.push((
+                    vector_id,
+                    vec.iter().flat_map(|f| f.to_le_bytes()).collect(),
+                ));
+            }
+
+            // Check for existing assignment.
             let old_cluster = at.st_get(&vector_id)?.map(|g| g.value());
             if let Some(old_cid) = old_cluster {
-                pt.st_remove(&PostingKey::new(old_cid, vector_id))?;
+                if old_cid != cluster_id {
+                    old_assignments.push((vector_id, old_cid));
+                }
+            } else {
+                new_count += 1;
             }
 
-            pt.st_insert(
-                &PostingKey::new(cluster_id, vector_id),
-                &pq_codes.as_slice(),
-            )?;
             at.st_insert(&vector_id, &cluster_id)?;
+            grouped[cluster_id as usize].push((vector_id, pq_codes, None));
+        }
+        drop(at);
 
-            if let Some(ref mut vt) = vt_opt {
-                let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
-                vt.st_insert(&vector_id, &bytes.as_slice())?;
-            }
-
-            if old_cluster.is_none() {
-                count += 1;
+        // Phase 2: Remove vectors that moved to different clusters.
+        if !old_assignments.is_empty() {
+            for &(vid, old_cid) in &old_assignments {
+                self.remove_from_cluster_blob(old_cid, vid, pq_len)?;
             }
         }
 
-        if count > 0 {
-            self.config.num_vectors = self.config.num_vectors.saturating_add(count);
+        // Phase 3: For each cluster touched, read-modify-write the PQ blob.
+        {
+            let tn = clusters_name(&self.name);
+            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let mut table = self.txn.open_storage_table(def)?;
+
+            for (cid, mut entries) in grouped.into_iter().enumerate() {
+                if entries.is_empty() {
+                    continue;
+                }
+                let cid_u32 = cid as u32;
+
+                let existing_blob = table.st_get(&cid_u32)?;
+                let existing_ref = match existing_blob {
+                    Some(ref guard) => {
+                        Some(ClusterBlobRef::new(guard.value(), pq_len, dim)?)
+                    }
+                    None => None,
+                };
+
+                let merged = merge_into_blob(existing_ref.as_ref(), &mut entries, pq_len);
+                drop(existing_blob);
+                table.st_insert(&cid_u32, &merged.as_slice())?;
+            }
+        }
+
+        // Phase 4: Write raw vectors to separate table.
+        if !raw_vectors.is_empty() {
+            let vn = vectors_name(&self.name);
+            let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
+            let mut vt = self.txn.open_storage_table(vdef)?;
+            for (vid, raw) in &raw_vectors {
+                vt.st_insert(vid, &raw.as_slice())?;
+            }
+        }
+
+        if new_count > 0 {
+            self.config.num_vectors = self.config.num_vectors.saturating_add(new_count);
             self.config_dirty = true;
         }
-        Ok(count)
+        Ok(new_count)
     }
 
     /// Remove a vector from the index. Returns `true` if found and removed.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn remove(&mut self, vector_id: u64) -> crate::Result<bool> {
         let cluster_id = {
             let tn = assignments_name(&self.name);
@@ -453,18 +565,15 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             }
         };
 
-        {
-            let tn = postings_name(&self.name);
-            let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
-            let mut table = self.txn.open_storage_table(def)?;
-            table.st_remove(&PostingKey::new(cluster_id, vector_id))?;
-        }
+        let pq_len = self.config.num_subvectors as u16;
+        self.remove_from_cluster_blob(cluster_id, vector_id, pq_len)?;
 
+        // Remove raw vector if stored.
         if self.config.store_raw_vectors {
-            let tn = vectors_name(&self.name);
-            let def = TableDefinition::<u64, &[u8]>::new(&tn);
-            let mut table = self.txn.open_storage_table(def)?;
-            table.st_remove(&vector_id)?;
+            let vn = vectors_name(&self.name);
+            let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
+            let mut vt = self.txn.open_storage_table(vdef)?;
+            vt.st_remove(&vector_id)?;
         }
 
         self.config.num_vectors = self.config.num_vectors.saturating_sub(1);
@@ -508,13 +617,13 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     }
 
     /// Search within a write transaction.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn search(
         &mut self,
         query: &[f32],
         params: &SearchParams,
     ) -> crate::Result<Vec<Neighbor<u64>>> {
         self.ensure_trained()?;
-        // Flush pending config before search so reads are consistent.
         self.flush()?;
         let dim = self.config.dim as usize;
         if query.len() != dim {
@@ -526,15 +635,11 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             )));
         }
 
-        // Lazy-load centroids and codebooks from disk if not cached (C1 fix).
         let centroids = self.load_centroids()?;
         let codebooks = self.load_codebooks()?;
 
         let query_owned;
         let q = if self.config.metric == DistanceMetric::Cosine {
-            // Zero-norm query in cosine space is undefined (division by zero
-            // in the distance computation). Return empty results rather than
-            // producing arbitrary rankings.
             if crate::vector_ops::l2_norm(query) == 0.0 {
                 return Ok(Vec::new());
             }
@@ -555,8 +660,6 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             params.diversity,
         );
 
-        let adc = AdcTable::build(q, &codebooks, self.config.metric);
-
         let cap = if params.rerank && self.config.store_raw_vectors {
             params.candidates.max(params.k)
         } else {
@@ -564,12 +667,15 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         };
         let mut heap = CandidateHeap::new(cap);
 
+        let pq_len = self.config.num_subvectors as u16;
+        let metric = self.config.metric;
+        let want_rerank = params.rerank && self.config.store_raw_vectors;
+
         {
-            let tn = postings_name(&self.name);
-            let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
+            let tn = clusters_name(&self.name);
+            let def = TableDefinition::<u32, &[u8]>::new(&tn);
             let table = self.txn.open_storage_table(def)?;
 
-            // Open metadata table only when a filter is active.
             let meta_table = if params.filter.is_some() {
                 let mn = vector_meta_name(&self.name);
                 let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
@@ -578,14 +684,26 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                 None
             };
 
+            let mut query_residual = vec![0.0f32; dim];
             for &(cid, _) in &probes {
-                let start = PostingKey::cluster_start(cid);
-                let end = PostingKey::cluster_end(cid);
-                let range_iter = table.st_range(Some(&start), Some(&end), true, true)?;
-                for entry in range_iter {
-                    let (kg, vg) = entry?;
-                    let vid = kg.value().vector_id;
-                    let dist = adc.approximate_distance(vg.value());
+                let c_offset = cid as usize * dim;
+                for d in 0..dim {
+                    query_residual[d] = q[d] - centroids[c_offset + d];
+                }
+
+                let Some(blob_data) = table.st_get(&cid)? else {
+                    continue;
+                };
+                let blob = ClusterBlobRef::new(blob_data.value(), pq_len, dim)?;
+                let adc = IntAdcTable::build(&query_residual, &codebooks, metric);
+
+                let pq_block = blob.pq_codes_block();
+                let m = pq_len as usize;
+                for i in 0..blob.count() {
+                    let codes = &pq_block[i as usize * m..(i as usize + 1) * m];
+                    let dist = adc.to_f32(adc.approximate_distance(codes));
+                    let vid = blob.vector_id(i);
+
                     if let Some(ref filter) = params.filter
                         && let Some(ref mt) = meta_table
                     {
@@ -603,8 +721,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             }
         }
 
-        if params.rerank && self.config.store_raw_vectors {
-            self.rerank_write(q, &heap.into_sorted(), params.k)
+        if want_rerank {
+            let sorted = heap.into_sorted();
+            rerank_from_vectors_table_write(self.txn, q, &sorted, &self.name, dim, metric, params.k)
         } else {
             Ok(heap.into_sorted().into_iter().take(params.k).collect())
         }
@@ -629,10 +748,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     /// Remove stale data from a previous training cycle.
     ///
     /// Deletes orphaned centroid rows (indices `new_k..old_k`) and clears all
-    /// postings, assignments, and raw vectors -- they reference cluster IDs from
+    /// cluster blobs and assignments -- they reference cluster IDs from
     /// the previous centroid set and are invalid after re-training.
     fn clear_stale_training_data(&self, old_k: usize, new_k: usize) -> crate::Result<()> {
-        // Remove orphaned centroid rows if cluster count shrank.
         if old_k > new_k {
             let tn = centroids_name(&self.name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
@@ -643,26 +761,26 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             }
         }
 
-        // Clear all postings -- they reference stale cluster assignments.
+        // Clear all cluster blobs.
         {
-            let tn = postings_name(&self.name);
-            let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
+            let tn = clusters_name(&self.name);
+            let def = TableDefinition::<u32, &[u8]>::new(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             table.st_drain_all()?;
+        }
+
+        // Clear all raw vectors.
+        {
+            let vn = vectors_name(&self.name);
+            let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
+            let mut vt = self.txn.open_storage_table(vdef)?;
+            vt.st_drain_all()?;
         }
 
         // Clear all assignments.
         {
             let tn = assignments_name(&self.name);
             let def = TableDefinition::<u64, u32>::new(&tn);
-            let mut table = self.txn.open_storage_table(def)?;
-            table.st_drain_all()?;
-        }
-
-        // Clear raw vectors if stored.
-        if self.config.store_raw_vectors {
-            let tn = vectors_name(&self.name);
-            let def = TableDefinition::<u64, &[u8]>::new(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             table.st_drain_all()?;
         }
@@ -766,36 +884,39 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         })
     }
 
-    fn rerank_write(
+    /// Remove a vector from a cluster blob. Helper for insert upsert + remove.
+    #[allow(clippy::cast_possible_truncation)]
+    fn remove_from_cluster_blob(
         &self,
-        query: &[f32],
-        candidates: &[Neighbor<u64>],
-        k: usize,
-    ) -> crate::Result<Vec<Neighbor<u64>>> {
-        let tn = vectors_name(&self.name);
-        let def = TableDefinition::<u64, &[u8]>::new(&tn);
-        let table = self.txn.open_storage_table(def)?;
-        let metric = self.config.metric;
+        cluster_id: u32,
+        vector_id: u64,
+        pq_len: u16,
+    ) -> crate::Result<()> {
+        let dim = self.config.dim as usize;
+        let tn = clusters_name(&self.name);
+        let def = TableDefinition::<u32, &[u8]>::new(&tn);
+        let mut table = self.txn.open_storage_table(def)?;
 
-        let dim = query.len();
-        let mut results: Vec<Neighbor<u64>> = Vec::with_capacity(candidates.len());
-        for cand in candidates {
-            if let Some(guard) = table.st_get(&cand.key)? {
-                let vec = bytes_to_f32_vec(guard.value());
-                // Skip truncated/corrupted vectors -- fall back to excluding
-                // them rather than computing a misleading distance.
-                if vec.len() != dim {
-                    continue;
+        let new_blob_or_empty = {
+            let existing = table.st_get(&cluster_id)?;
+            if let Some(guard) = existing {
+                let blob = ClusterBlobRef::new(guard.value(), pq_len, dim)?;
+                Some(remove_from_blob(&blob, vector_id, pq_len))
+            } else {
+                None
+            }
+        };
+        if let Some(result) = new_blob_or_empty {
+            match result {
+                Some(new_blob) => {
+                    table.st_insert(&cluster_id, &new_blob.as_slice())?;
                 }
-                results.push(Neighbor {
-                    key: cand.key,
-                    distance: metric.compute(query, &vec),
-                });
+                None => {
+                    table.st_remove(&cluster_id)?;
+                }
             }
         }
-        results.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
-        results.truncate(k);
-        Ok(results)
+        Ok(())
     }
 }
 
@@ -809,6 +930,61 @@ impl<T: StorageWrite> Drop for IvfPqIndex<'_, T> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Shared reranking from cluster blobs (on-demand reads)
+// ---------------------------------------------------------------------------
+
+/// Rerank candidates by reading raw vectors from the separate vectors table.
+///
+/// Optimizations over naive per-candidate lookup:
+/// 1. Sort candidates by `vector_id` for B-tree page cache locality.
+/// 2. Reuse a single f32 buffer via `bytes_to_f32_buf` (one allocation total).
+macro_rules! impl_rerank_from_vectors {
+    ($fn_name:ident, $trait_bound:path) => {
+        #[allow(clippy::too_many_arguments)]
+        fn $fn_name<S: $trait_bound>(
+            txn: &S,
+            query: &[f32],
+            candidates: &[Neighbor<u64>],
+            index_name: &str,
+            dim: usize,
+            metric: DistanceMetric,
+            k: usize,
+        ) -> crate::Result<Vec<Neighbor<u64>>> {
+            let vn = vectors_name(index_name);
+            let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
+            let vt = txn.open_storage_table(vdef)?;
+
+            // Sort by vector_id for sequential B-tree access.
+            let mut sorted_cands: Vec<&Neighbor<u64>> = candidates.iter().collect();
+            sorted_cands.sort_unstable_by_key(|c| c.key);
+
+            let expected_bytes = dim * 4;
+            let mut raw_buf = vec![0.0f32; dim];
+            let mut results: Vec<Neighbor<u64>> = Vec::with_capacity(sorted_cands.len());
+            for cand in &sorted_cands {
+                if let Some(guard) = vt.st_get(&cand.key)? {
+                    let raw = guard.value();
+                    if raw.len() == expected_bytes {
+                        bytes_to_f32_buf(raw, &mut raw_buf);
+                        results.push(Neighbor {
+                            key: cand.key,
+                            distance: metric.compute(query, &raw_buf),
+                        });
+                    }
+                }
+            }
+
+            results.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
+            results.truncate(k);
+            Ok(results)
+        }
+    };
+}
+
+impl_rerank_from_vectors!(rerank_from_vectors_table, StorageRead);
+impl_rerank_from_vectors!(rerank_from_vectors_table_write, StorageWrite);
 
 // ---------------------------------------------------------------------------
 // ReadOnlyIvfPqIndex -- read-only index handle
@@ -868,9 +1044,10 @@ impl ReadOnlyIvfPqIndex {
             flat
         };
 
-        let num_subvectors = config.num_subvectors as usize;
-        let sub_dim = config.sub_dim();
+        // Load PQ codebooks.
         let codebooks = {
+            let num_subvectors = config.num_subvectors as usize;
+            let sub_dim = config.sub_dim();
             let tn = codebooks_name(&name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
             let table = txn.open_storage_table(def)?;
@@ -905,6 +1082,7 @@ impl ReadOnlyIvfPqIndex {
     }
 
     /// Search for approximate nearest neighbors.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn search<R: StorageRead>(
         &self,
         txn: &R,
@@ -930,9 +1108,6 @@ impl ReadOnlyIvfPqIndex {
 
         let query_owned;
         let q = if self.config.metric == DistanceMetric::Cosine {
-            // Zero-norm query in cosine space is undefined (division by zero
-            // in the distance computation). Return empty results rather than
-            // producing arbitrary rankings.
             if crate::vector_ops::l2_norm(query) == 0.0 {
                 return Ok(Vec::new());
             }
@@ -953,8 +1128,6 @@ impl ReadOnlyIvfPqIndex {
             params.diversity,
         );
 
-        let adc = AdcTable::build(q, &self.codebooks, self.config.metric);
-
         let cap = if params.rerank && self.config.store_raw_vectors {
             params.candidates.max(params.k)
         } else {
@@ -962,9 +1135,13 @@ impl ReadOnlyIvfPqIndex {
         };
         let mut heap = CandidateHeap::new(cap);
 
+        let pq_len = self.config.num_subvectors as u16;
+        let metric = self.config.metric;
+        let want_rerank = params.rerank && self.config.store_raw_vectors;
+
         {
-            let tn = postings_name(&self.name);
-            let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
+            let tn = clusters_name(&self.name);
+            let def = TableDefinition::<u32, &[u8]>::new(&tn);
             let table = txn.open_storage_table(def)?;
 
             let meta_table = if params.filter.is_some() {
@@ -975,14 +1152,26 @@ impl ReadOnlyIvfPqIndex {
                 None
             };
 
+            let mut query_residual = vec![0.0f32; dim];
             for &(cid, _) in &probes {
-                let start = PostingKey::cluster_start(cid);
-                let end = PostingKey::cluster_end(cid);
-                let range_iter = table.st_range(Some(&start), Some(&end), true, true)?;
-                for entry in range_iter {
-                    let (kg, vg) = entry?;
-                    let vid = kg.value().vector_id;
-                    let dist = adc.approximate_distance(vg.value());
+                let c_offset = cid as usize * dim;
+                for d in 0..dim {
+                    query_residual[d] = q[d] - self.centroids[c_offset + d];
+                }
+
+                let Some(blob_data) = table.st_get(&cid)? else {
+                    continue;
+                };
+                let blob = ClusterBlobRef::new(blob_data.value(), pq_len, dim)?;
+                let adc = IntAdcTable::build(&query_residual, &self.codebooks, metric);
+
+                let pq_block = blob.pq_codes_block();
+                let m = pq_len as usize;
+                for i in 0..blob.count() {
+                    let codes = &pq_block[i as usize * m..(i as usize + 1) * m];
+                    let dist = adc.to_f32(adc.approximate_distance(codes));
+                    let vid = blob.vector_id(i);
+
                     if let Some(ref filter) = params.filter
                         && let Some(ref mt) = meta_table
                     {
@@ -1000,31 +1189,9 @@ impl ReadOnlyIvfPqIndex {
             }
         }
 
-        if params.rerank && self.config.store_raw_vectors {
-            let tn = vectors_name(&self.name);
-            let def = TableDefinition::<u64, &[u8]>::new(&tn);
-            let table = txn.open_storage_table(def)?;
-            let metric = self.config.metric;
-
+        if want_rerank {
             let sorted = heap.into_sorted();
-            let mut results: Vec<Neighbor<u64>> = Vec::with_capacity(sorted.len());
-            for cand in &sorted {
-                if let Some(guard) = table.st_get(&cand.key)? {
-                    let vec = bytes_to_f32_vec(guard.value());
-                    // Skip truncated/corrupted vectors -- fall back to excluding
-                    // them rather than computing a misleading distance.
-                    if vec.len() != dim {
-                        continue;
-                    }
-                    results.push(Neighbor {
-                        key: cand.key,
-                        distance: metric.compute(q, &vec),
-                    });
-                }
-            }
-            results.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
-            results.truncate(params.k);
-            Ok(results)
+            rerank_from_vectors_table(txn, q, &sorted, &self.name, dim, metric, params.k)
         } else {
             Ok(heap.into_sorted().into_iter().take(params.k).collect())
         }
@@ -1103,9 +1270,12 @@ impl CandidateHeap {
 // Utility
 // ---------------------------------------------------------------------------
 
-fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .filter_map(|c| c.try_into().ok().map(f32::from_le_bytes))
-        .collect()
+/// Decode LE f32s from `bytes` into the pre-allocated `buf`.
+/// Caller must ensure `bytes.len() == buf.len() * 4`.
+#[inline]
+fn bytes_to_f32_buf(bytes: &[u8], buf: &mut [f32]) {
+    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
+        // chunks_exact guarantees exactly 4 bytes per chunk.
+        buf[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
 }

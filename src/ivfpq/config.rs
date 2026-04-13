@@ -31,12 +31,20 @@ pub struct IndexConfig {
     pub(crate) state: u8,
     /// Total number of vectors currently in the index.
     pub num_vectors: u64,
+    /// Storage format version. 0 = legacy per-entry posting lists,
+    /// 1 = contiguous cluster blobs.
+    pub format_version: u8,
 }
 
 /// Training state: index has not been trained yet.
 pub const STATE_UNTRAINED: u8 = 0;
 /// Training state: index is trained and ready for inserts/queries.
 pub const STATE_TRAINED: u8 = 1;
+
+/// Format version: legacy per-entry posting lists (deprecated).
+pub const FORMAT_V0_LEGACY: u8 = 0;
+/// Format version: contiguous cluster blobs.
+pub const FORMAT_V1_BLOBS: u8 = 1;
 
 impl IndexConfig {
     /// Returns the training state (0 = untrained, 1 = trained).
@@ -65,8 +73,8 @@ impl IndexConfig {
 
 impl fmt::Debug for IndexConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IndexConfig")
-            .field("dim", &self.dim)
+        let mut s = f.debug_struct("IndexConfig");
+        s.field("dim", &self.dim)
             .field("num_clusters", &self.num_clusters)
             .field("num_subvectors", &self.num_subvectors)
             .field("num_codewords", &self.num_codewords)
@@ -75,6 +83,7 @@ impl fmt::Debug for IndexConfig {
             .field("nprobe", &self.default_nprobe)
             .field("state", &self.state)
             .field("num_vectors", &self.num_vectors)
+            .field("format_version", &self.format_version)
             .finish()
     }
 }
@@ -222,6 +231,7 @@ impl IvfPqIndexDefinition {
             default_nprobe: self.default_nprobe,
             state: STATE_UNTRAINED,
             num_vectors: 0,
+            format_version: FORMAT_V1_BLOBS,
         }
     }
 }
@@ -230,8 +240,9 @@ impl fmt::Debug for IvfPqIndexDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "IvfPqIndexDefinition({:?}, dim={}, clusters={}, subvecs={}, {:?})",
+            "IvfPqIndexDefinition({:?}, dim={}, clusters={}, subvecs={}, {:?}",
             self.name, self.dim, self.num_clusters, self.num_subvectors, self.metric,
-        )
+        )?;
+        write!(f, ")")
     }
 }

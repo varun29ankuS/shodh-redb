@@ -302,11 +302,6 @@ pub fn ivfpq_metadata_table_name(index_name: &str) -> String {
     alloc::format!("__ivfpq:{index_name}:vector_meta")
 }
 
-/// Generate the metadata table name for a Fractal index.
-pub fn fractal_metadata_table_name(index_name: &str) -> String {
-    alloc::format!("__fractal:{index_name}:vector_meta")
-}
-
 // -------------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------------
@@ -510,10 +505,6 @@ mod tests {
         assert_eq!(
             ivfpq_metadata_table_name("embeddings"),
             "__ivfpq:embeddings:vector_meta"
-        );
-        assert_eq!(
-            fractal_metadata_table_name("embeddings"),
-            "__fractal:embeddings:vector_meta"
         );
     }
 }

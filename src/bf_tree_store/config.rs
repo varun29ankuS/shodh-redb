@@ -49,6 +49,17 @@ pub struct BfTreeConfig {
     pub snapshot_interval: u64,
     /// Durability mode controlling when WAL data is fsynced. Default: `Sync`.
     pub durability: DurabilityMode,
+    /// Threshold in bytes above which values are stored out-of-line as chunked
+    /// blobs in the `__bf_value_chunks` system table.  A compact 16-byte handle
+    /// replaces the original value inline.
+    ///
+    /// Set to `0` (default) to disable indirection — all values are stored
+    /// inline in the `BfTree` leaf page and must fit within `max_record_size`.
+    ///
+    /// When enabled (e.g. `1024`), workloads that mix small metadata with
+    /// large blobs (like IVF-PQ vector indexes) can use default `BfTree` page
+    /// sizes without hitting record-size limits.
+    pub blob_threshold: usize,
 }
 
 /// Controls when WAL data is fsynced to disk.
@@ -99,6 +110,7 @@ impl Default for BfTreeConfig {
             verify_mode: VerifyMode::None,
             snapshot_interval: 100,
             durability: DurabilityMode::Sync,
+            blob_threshold: 0,
         }
     }
 }
@@ -155,6 +167,7 @@ impl BfTreeConfig {
             verify_mode: VerifyMode::None,
             snapshot_interval: 100,
             durability: DurabilityMode::Sync,
+            blob_threshold: 0,
         }
     }
 

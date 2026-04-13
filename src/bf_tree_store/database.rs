@@ -25,7 +25,7 @@
 use crate::compat::Mutex;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::cdc::types::{CdcConfig, CdcEvent, CdcKey, CdcRecord, ChangeStream};
 use crate::types::{Key, Value};
@@ -90,6 +90,14 @@ pub struct BfTreeDatabase {
     /// collisions that would occur if each transaction read the counter from
     /// `BfTree` independently.
     next_blob_seq: Arc<AtomicU64>,
+    /// Shared counter for value-indirection blob IDs.
+    ///
+    /// Used by `BfTreeTable` to allocate unique blob IDs for large values
+    /// stored out-of-line in `__bf_value_chunks`.
+    next_value_blob_id: Arc<AtomicU32>,
+    /// Threshold in bytes above which values are chunked out-of-line.
+    /// 0 = disabled (all values inline).
+    blob_threshold: usize,
 }
 
 impl BfTreeDatabase {
@@ -98,6 +106,7 @@ impl BfTreeDatabase {
         let verify_mode = config.verify_mode.clone();
         let snapshot_interval = config.snapshot_interval;
         let durability = config.durability;
+        let blob_threshold = config.blob_threshold;
         let adapter = BfTreeAdapter::open(config)?;
         Ok(Self {
             adapter: Arc::new(adapter),
@@ -110,6 +119,8 @@ impl BfTreeDatabase {
             snapshot_interval,
             durability,
             next_blob_seq: Arc::new(AtomicU64::new(1)),
+            next_value_blob_id: Arc::new(AtomicU32::new(1)),
+            blob_threshold,
         })
     }
 
@@ -118,10 +129,11 @@ impl BfTreeDatabase {
         let verify_mode = config.verify_mode.clone();
         let snapshot_interval = config.snapshot_interval;
         let durability = config.durability;
+        let blob_threshold = config.blob_threshold;
         let adapter = BfTreeAdapter::open_from_snapshot(config)?;
-        // Recover the next transaction ID from the latest CDC log entry.
         let next_id = recover_next_txn_id(&adapter).unwrap_or(1);
         let blob_seq = recover_blob_seq(&adapter);
+        let value_blob_id = super::value_indirection::recover_blob_id(&adapter);
         Ok(Self {
             adapter: Arc::new(adapter),
             cdc_config: CdcConfig::default(),
@@ -133,6 +145,8 @@ impl BfTreeDatabase {
             snapshot_interval,
             durability,
             next_blob_seq: Arc::new(AtomicU64::new(blob_seq)),
+            next_value_blob_id: Arc::new(AtomicU32::new(value_blob_id)),
+            blob_threshold,
         })
     }
 
@@ -144,6 +158,7 @@ impl BfTreeDatabase {
         let verify_mode = config.verify_mode.clone();
         let snapshot_interval = config.snapshot_interval;
         let durability = config.durability;
+        let blob_threshold = config.blob_threshold;
         let adapter = BfTreeAdapter::open(config)?;
         Ok(Self {
             adapter: Arc::new(adapter),
@@ -156,6 +171,8 @@ impl BfTreeDatabase {
             snapshot_interval,
             durability,
             next_blob_seq: Arc::new(AtomicU64::new(1)),
+            next_value_blob_id: Arc::new(AtomicU32::new(1)),
+            blob_threshold,
         })
     }
 
@@ -164,9 +181,11 @@ impl BfTreeDatabase {
         let verify_mode = config.verify_mode.clone();
         let snapshot_interval = config.snapshot_interval;
         let durability = config.durability;
+        let blob_threshold = config.blob_threshold;
         let adapter = BfTreeAdapter::open_from_snapshot(config)?;
         let next_id = recover_next_txn_id(&adapter).unwrap_or(1);
         let blob_seq = recover_blob_seq(&adapter);
+        let value_blob_id = super::value_indirection::recover_blob_id(&adapter);
         Ok(Self {
             adapter: Arc::new(adapter),
             cdc_config,
@@ -178,6 +197,8 @@ impl BfTreeDatabase {
             snapshot_interval,
             durability,
             next_blob_seq: Arc::new(AtomicU64::new(blob_seq)),
+            next_value_blob_id: Arc::new(AtomicU32::new(value_blob_id)),
+            blob_threshold,
         })
     }
 
@@ -210,6 +231,8 @@ impl BfTreeDatabase {
             committed: core::sync::atomic::AtomicBool::new(false),
             durability: self.durability,
             next_blob_seq: self.next_blob_seq.clone(),
+            next_value_blob_id: self.next_value_blob_id.clone(),
+            blob_threshold: self.blob_threshold,
         }
     }
 
@@ -225,6 +248,7 @@ impl BfTreeDatabase {
             verify_mode: self.verify_mode.clone(),
             read_buf: Vec::new(),
             key_buf: Vec::new(),
+            blob_threshold: self.blob_threshold,
         }
     }
 
@@ -518,7 +542,7 @@ fn validate_table_name(name: &str) -> Result<(), BfTreeError> {
 /// All writes are namespaced by table name and immediately visible.
 pub struct BfTreeDatabaseWriteTxn {
     pub(crate) adapter: Arc<BfTreeAdapter>,
-    ops_count: AtomicU64,
+    pub(crate) ops_count: AtomicU64,
     /// Monotonic transaction ID assigned at `begin_write()`.
     pub(crate) txn_id: u64,
     /// Shared commit-order counter from the parent `BfTreeDatabase`.
@@ -550,6 +574,10 @@ pub struct BfTreeDatabaseWriteTxn {
     /// Concurrent transactions use `fetch_add` on this shared counter to
     /// allocate disjoint blob sequence numbers, preventing ID collisions.
     pub(crate) next_blob_seq: Arc<AtomicU64>,
+    /// Shared counter for value-indirection blob IDs.
+    pub(crate) next_value_blob_id: Arc<AtomicU32>,
+    /// Threshold in bytes above which values are chunked out-of-line.
+    pub(crate) blob_threshold: usize,
 }
 
 impl BfTreeDatabaseWriteTxn {
@@ -572,6 +600,8 @@ impl BfTreeDatabaseWriteTxn {
             self.cdc_log.as_ref(),
             &self.buffer,
             &self.verify_mode,
+            &self.next_value_blob_id,
+            self.blob_threshold,
         ))
     }
 
@@ -620,6 +650,17 @@ impl BfTreeDatabaseWriteTxn {
             self.cdc_log.as_ref(),
             &self.next_blob_seq,
         )
+    }
+
+    /// Open an IVF-PQ vector index for read-write access.
+    ///
+    /// The index tables will be created if they do not exist.
+    pub fn open_ivfpq_index(
+        &self,
+        definition: &crate::ivfpq::config::IvfPqIndexDefinition,
+    ) -> Result<crate::ivfpq::index::IvfPqIndex<'_, Self>, BfTreeError> {
+        crate::ivfpq::index::IvfPqIndex::open(self, definition)
+            .map_err(|e| BfTreeError::InvalidConfig(alloc::format!("{e}")))
     }
 
     /// Insert a typed key-value pair into the specified table.
@@ -727,6 +768,11 @@ impl BfTreeDatabaseWriteTxn {
             let mut buffer = self.buffer.lock();
             let commit_id = self.stage_cdc_into_buffer(&mut buffer)?;
             self.stage_txn_id_into_buffer(&mut buffer, commit_id)?;
+            // Persist blob-id counter so recovery picks up where we left off.
+            if self.blob_threshold > 0 {
+                let next_id = self.next_value_blob_id.load(Ordering::Relaxed);
+                super::value_indirection::persist_blob_id(&mut buffer, next_id)?;
+            }
             // Flush write buffer to BfTree. Each entry goes through WAL
             // append_and_wait(), so data is durable when flush returns.
             buffer.flush(&self.adapter, self.durability)?;
@@ -759,6 +805,10 @@ impl BfTreeDatabaseWriteTxn {
             let mut buffer = self.buffer.lock();
             let commit_id = self.stage_cdc_into_buffer(&mut buffer)?;
             self.stage_txn_id_into_buffer(&mut buffer, commit_id)?;
+            if self.blob_threshold > 0 {
+                let next_id = self.next_value_blob_id.load(Ordering::Relaxed);
+                super::value_indirection::persist_blob_id(&mut buffer, next_id)?;
+            }
             buffer.flush(&self.adapter, self.durability)?;
         }
         self.committed.store(true, Ordering::SeqCst);
@@ -973,6 +1023,8 @@ pub struct BfTreeDatabaseReadTxn {
     read_buf: Vec<u8>,
     /// Reusable buffer for encoded key, avoiding per-read heap allocation.
     key_buf: Vec<u8>,
+    /// Threshold in bytes above which values are chunked out-of-line.
+    pub(crate) blob_threshold: usize,
 }
 
 impl BfTreeDatabaseReadTxn {
@@ -991,6 +1043,7 @@ impl BfTreeDatabaseReadTxn {
             definition.name(),
             &self.adapter,
             &self.verify_mode,
+            self.blob_threshold,
         ))
     }
 
@@ -1024,6 +1077,17 @@ impl BfTreeDatabaseReadTxn {
     /// Open the blob store for read-only access.
     pub fn open_blob_store(&self) -> BfTreeReadOnlyBlobStore<'_> {
         BfTreeReadOnlyBlobStore::new(&self.adapter)
+    }
+
+    /// Open an IVF-PQ vector index for read-only access.
+    ///
+    /// Returns an error if the index does not exist or is not trained.
+    pub fn open_ivfpq_index(
+        &self,
+        definition: &crate::ivfpq::config::IvfPqIndexDefinition,
+    ) -> Result<crate::ivfpq::index::ReadOnlyIvfPqIndex, BfTreeError> {
+        crate::ivfpq::index::ReadOnlyIvfPqIndex::open(self, definition)
+            .map_err(|e| BfTreeError::InvalidConfig(alloc::format!("{e}")))
     }
 
     /// Read a typed value from the specified table.

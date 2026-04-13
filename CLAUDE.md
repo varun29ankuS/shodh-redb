@@ -1,5 +1,5 @@
 # shodh-redb
-Embedded multi-modal database engine in Rust. B-tree page store with vector indexing (IVF-PQ, fractal), blob store, CDC, TTL, merge operators. no_std compatible core, std feature for file backends.
+Embedded multi-modal database engine in Rust. B-tree page store with vector indexing (IVF-PQ), blob store, CDC, TTL, merge operators. no_std compatible core, std feature for file backends.
 
 # Build & Test
 - IMPORTANT: Do NOT run `cargo build` or `trunk serve` -- user runs builds in background

@@ -42,6 +42,7 @@ mod table;
 mod transaction;
 mod ttl;
 mod unified;
+pub(crate) mod value_indirection;
 mod verification;
 
 pub use adapter::BfTreeAdapter;

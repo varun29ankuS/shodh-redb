@@ -19,6 +19,7 @@
 //! - `3` = Bool: `[1 byte: 0 or 1]`
 //! - `4` = Bytes: `[len: u16 LE][raw bytes]`
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 

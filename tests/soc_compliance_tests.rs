@@ -2,7 +2,7 @@
 ///
 /// Comprehensive tests covering type system, merge operators, multimap,
 /// transactions, distance function properties, HLC, builder config,
-/// blob store types, TTL tables, causal edges, fractal metadata, and more.
+/// blob store types, TTL tables, causal edges, and more.
 use shodh_redb::{
     BlobId, Builder, CausalLink, CdcConfig, ChangeOp, ContentType, Database, DatabaseStats,
     Durability, MultimapTableDefinition, MultimapTableHandle, ReadVerification, ReadableDatabase,

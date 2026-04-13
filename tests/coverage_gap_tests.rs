@@ -677,6 +677,7 @@ fn concurrent_ivfpq_reads() {
                 k: 5,
                 rerank: false,
                 diversity: shodh_redb::DiversityConfig { lambda: 0.0 },
+                filter: None,
             };
             let results = idx.search(&read_txn, &query, &params).unwrap();
             assert!(!results.is_empty());

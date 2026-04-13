@@ -2,7 +2,7 @@
 //!
 //! Provides a Greedy MMR (Maximal Marginal Relevance) selection algorithm
 //! that balances proximity to the query with spatial diversity across
-//! the selected probe set. Used by both IVF-PQ and fractal indices.
+//! the selected probe set. Used by IVF-PQ indices.
 
 use alloc::vec;
 use alloc::vec::Vec;

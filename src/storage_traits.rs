@@ -1,7 +1,7 @@
 //! Backend-agnostic storage traits for shodh-redb.
 //!
 //! These traits abstract the storage engine so that higher-level modules
-//! (`IvfPq`, Fractal index, CDC) can work with any backend -- legacy B-tree
+//! (`IvfPq`, CDC) can work with any backend -- legacy B-tree
 //! or Bf-Tree -- without code duplication.
 //!
 //! # Trait Hierarchy
@@ -49,7 +49,7 @@ use crate::types::{Key, Value};
 ///
 /// Provides the `.value()` method that `AccessGuard` exposes, but backed by
 /// an owned `Vec<u8>` instead of a page reference. This enables the same
-/// `guard.value()` pattern used throughout the `IvfPq` and Fractal index code.
+/// `guard.value()` pattern used throughout the `IvfPq` index code.
 pub struct OwnedKv<T: Value + 'static> {
     data: Vec<u8>,
     _type: PhantomData<T>,
@@ -97,7 +97,7 @@ impl<T: Value + 'static> core::fmt::Debug for OwnedKv<T> {
 /// A writable table handle that can get, insert, remove, range-scan, and drain.
 ///
 /// Both `Table<'txn, K, V>` (legacy) and `BfTreeTable<'txn, K, V>` implement
-/// this trait, allowing IvfPq/Fractal code to be generic over the backend.
+/// this trait, allowing `IvfPq` code to be generic over the backend.
 pub trait WriteTable<K: Key + 'static, V: Value + 'static> {
     /// Range iterator type returned by `range()`.
     type RangeIter<'a>: Iterator<Item = crate::Result<(OwnedKv<K>, OwnedKv<V>)>>

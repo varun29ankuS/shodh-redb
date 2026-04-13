@@ -13,14 +13,14 @@
 //!   [12..14] pq_len: u16 LE = M (bytes per PQ code)
 //!   [14..16] flags: u16 LE (bit 0 = has_raw_vectors)
 //!
-//! Vector IDs (N × 8 bytes):
-//!   Sorted u64 LE array — enables binary search for upsert/delete
+//! Vector IDs (N * 8 bytes):
+//!   Sorted u64 LE array -- enables binary search for upsert/delete
 //!
-//! PQ Codes (N × M bytes):
-//!   Row-major contiguous block — hot path for ADC scan
+//! PQ Codes (N * M bytes):
+//!   Row-major contiguous block -- hot path for ADC scan
 //!
-//! Raw Vectors (conditional, N × raw_dim bytes):
-//!   Row-major f32 LE — only present if flags bit 0 set
+//! Raw Vectors (conditional, N * raw_dim bytes):
+//!   Row-major f32 LE -- only present if flags bit 0 set
 //! ```
 
 use crate::error::StorageError;
@@ -289,9 +289,9 @@ impl<'a> ClusterBlobRef<'a> {
         unsafe { self.data.get_unchecked(start..end) }
     }
 
-    /// Get the entire PQ codes block (N × `pq_len` bytes).
+    /// Get the entire PQ codes block (N * `pq_len` bytes).
     ///
-    /// This is the hot-path accessor for ADC scanning — one contiguous slice.
+    /// This is the hot-path accessor for ADC scanning -- one contiguous slice.
     #[inline]
     pub fn pq_codes_block(&self) -> &[u8] {
         let end = self.pq_offset + self.count as usize * self.pq_len as usize;
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(view.pq_codes(0), &[10, 20]);
 
         let raw_bytes = view.raw_vector_bytes(0).unwrap();
-        assert_eq!(raw_bytes.len(), 8); // 2 floats × 4 bytes
+        assert_eq!(raw_bytes.len(), 8); // 2 floats * 4 bytes
         let f0 = f32::from_le_bytes([raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3]]);
         let f1 = f32::from_le_bytes([raw_bytes[4], raw_bytes[5], raw_bytes[6], raw_bytes[7]]);
         assert!((f0 - 1.0).abs() < f32::EPSILON);

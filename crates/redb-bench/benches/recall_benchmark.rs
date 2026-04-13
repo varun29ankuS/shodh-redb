@@ -318,13 +318,13 @@ fn run_ivfpq_benchmark(
 
     // Search configs: (label, nprobe, k, rerank, candidates_override)
     let configs: Vec<(&str, u32, usize, bool, Option<usize>)> = vec![
-        // PQ-only (no rerank) — shows raw scan performance
+        // PQ-only (no rerank) -- shows raw scan performance
         ("PQ-only", 10, GROUND_TRUTH_K, false, None),
-        // Reranked k=100 — full accuracy benchmark (default 10x candidates)
+        // Reranked k=100 -- full accuracy benchmark (default 10x candidates)
         ("rerank", 1, GROUND_TRUTH_K, true, None),
         ("rerank", 10, GROUND_TRUTH_K, true, None),
         ("rerank", 50, GROUND_TRUTH_K, true, None),
-        // Reranked k=10 — realistic use case
+        // Reranked k=10 -- realistic use case
         ("k10", 10, 10, true, None),           // default 100 candidates
         ("k10-200c", 10, 10, true, Some(200)), // 200 candidates
         ("k10-500c", 10, 10, true, Some(500)), // 500 candidates

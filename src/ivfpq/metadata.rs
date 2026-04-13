@@ -122,7 +122,7 @@ impl MetadataValue {
     }
 
     /// Compare numerically. Returns None if types are incompatible.
-    #[allow(clippy::cast_precision_loss)] // Intentional: u64→f64 for cross-type comparison.
+    #[allow(clippy::cast_precision_loss)] // Intentional: u64->f64 for cross-type comparison.
     fn partial_cmp_numeric(&self, other: &Self) -> Option<core::cmp::Ordering> {
         match (self, other) {
             (Self::U64(a), Self::U64(b)) => Some(a.cmp(b)),

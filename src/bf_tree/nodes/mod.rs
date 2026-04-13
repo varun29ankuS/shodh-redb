@@ -12,9 +12,9 @@ pub(crate) use page_id::PageID;
 
 pub(crate) const INNER_NODE_SIZE: usize = 4096;
 pub(crate) const DISK_PAGE_SIZE: usize = 4096; // The size of a disk page.
-pub(crate) const MAX_LEAF_PAGE_SIZE: usize = 32768; // 32KB
+pub(crate) const MAX_LEAF_PAGE_SIZE: usize = 1_048_576; // 1MB
 pub(crate) const MAX_KEY_LEN: usize = 2020; // 2KB
-pub(crate) const MAX_VALUE_LEN: usize = 16332; // 16KB
+pub(crate) const MAX_VALUE_LEN: usize = 1_040_384; // ~1016KB (page - header - fences - meta)
 pub(crate) const CACHE_LINE_SIZE: usize = 64;
 pub(crate) const FENCE_KEY_CNT: usize = 2;
-pub(crate) const KV_META_SIZE: usize = 8;
+pub(crate) const KV_META_SIZE: usize = 12;

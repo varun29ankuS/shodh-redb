@@ -204,8 +204,8 @@ fn test_tree_insert_read_8() {
 fn test_tree_insert_read_9() {
     let mut config = BfTreeConfig::default();
     config.cb_size_byte(16 * 1024);
-    config.cb_min_record_size = 2028;
-    config.cb_max_record_size = 2028;
+    config.cb_min_record_size = 2008;
+    config.cb_max_record_size = 2008;
     config.leaf_page_size = 4096;
     config.cache_only = true;
 

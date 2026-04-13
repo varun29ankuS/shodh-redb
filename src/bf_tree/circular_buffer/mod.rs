@@ -1234,9 +1234,15 @@ mod tests {
 
     #[test]
     fn idential_mini_page_classes() {
-        // Create a regular bf-tree and check the BfTree's mini-page classes are identical to its CB's mini-page classes
+        // Create a regular bf-tree and check the BfTree's mini-page classes are identical to its CB's mini-page classes.
+        // With KV_META_SIZE=12 and LeafNode=32, use a max_record_size small enough that
+        // both cache-only and non-cache-only modes produce identical size class lists
+        // (both max_mini values exceed the largest power-of-2 class).
         let mut config = Config::default();
-        config.cb_max_record_size(1928);
+        // max_record_size=1916 chosen so that both non-cache-only and cache-only
+        // modes produce the same max_mini_page_size (2112) after cache-line alignment,
+        // ensuring identical size class lists.
+        config.cb_max_record_size(1916);
 
         let mut tree = BfTree::with_config(config.clone(), None).unwrap();
 

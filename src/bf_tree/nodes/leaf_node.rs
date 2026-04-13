@@ -57,10 +57,10 @@ const HIGH_FENCE_IDX: usize = 1;
 const OP_TYPE_SHIFT: u16 = 14;
 const KEY_LEN_MASK: u16 = 0x3F_FF; // lower 14 bits on the key_len
 
-// highest bit on the value_len;
-const REF_BIT_MASK: u16 = 0x80_00;
-// third highest bit on the value_len;
-const VALUE_LEN_MASK: u16 = 0x7F_FF; // lower 15 bits on the value_len;
+// highest bit on the value_len (u32);
+const REF_BIT_MASK: u32 = 0x8000_0000;
+// lower 31 bits on the value_len (u32);
+const VALUE_LEN_MASK: u32 = 0x7FFF_FFFF;
 
 pub(crate) fn common_prefix_len(low_fence: &[u8], high_fence: &[u8]) -> u16 {
     let mut prefix_len = 0;
@@ -76,24 +76,24 @@ pub(crate) fn common_prefix_len(low_fence: &[u8], high_fence: &[u8]) -> u16 {
 
 #[repr(C)]
 pub(crate) struct LeafKVMeta {
-    offset: u16,
-    op_type_key_len_in_byte: u16, // Highest 2 bits: op_type, Lower 14 bits: Key length in bytes.
-    ref_value_len_in_byte: core::sync::atomic::AtomicU16, // Highest bit: ref, Lower 15 bits: value length in bytes. here we don't use shuttle's AtomicU16, because this is not a real sync point.
-    preview_bytes: [u8; PREVIEW_SIZE],
+    offset: u32,                                           // 4B — byte offset within page data
+    ref_value_len_in_byte: core::sync::atomic::AtomicU32, // 4B — bit 31: ref, bits 0-30: value length. Not a real sync point.
+    op_type_key_len_in_byte: u16,                         // 2B — highest 2 bits: op_type, lower 14 bits: key length
+    preview_bytes: [u8; PREVIEW_SIZE],                    // 2B
 }
 
 impl LeafKVMeta {
     pub(crate) fn make_prefixed_meta(
-        offset: u16,
-        value_len: u16,
+        offset: u32,
+        value_len: u32,
         key: &[u8],
         prefix_len: u16,
         op_type: OpType,
     ) -> Self {
         let mut meta = Self {
             offset,
+            ref_value_len_in_byte: core::sync::atomic::AtomicU32::new(value_len),
             op_type_key_len_in_byte: key.len() as u16 | ((op_type as u16) << OP_TYPE_SHIFT),
-            ref_value_len_in_byte: core::sync::atomic::AtomicU16::new(value_len),
             preview_bytes: [0; PREVIEW_SIZE],
         };
 
@@ -111,35 +111,35 @@ impl LeafKVMeta {
         assert_eq!(core::mem::size_of::<Self>(), super::KV_META_SIZE);
 
         Self {
-            offset: u16::MAX,
+            offset: u32::MAX,
+            ref_value_len_in_byte: core::sync::atomic::AtomicU32::new(0),
             op_type_key_len_in_byte: 0,
-            ref_value_len_in_byte: core::sync::atomic::AtomicU16::new(0),
             preview_bytes: [0; PREVIEW_SIZE],
         }
     }
 
     pub fn make_infinite_low_fence_key() -> Self {
         Self {
-            offset: u16::MAX - 1,
+            offset: u32::MAX - 1,
+            ref_value_len_in_byte: core::sync::atomic::AtomicU32::new(0),
             op_type_key_len_in_byte: 0,
-            ref_value_len_in_byte: core::sync::atomic::AtomicU16::new(0),
             preview_bytes: [0; PREVIEW_SIZE],
         }
     }
 
     pub fn is_infinite_low_fence_key(&self) -> bool {
-        self.offset == u16::MAX - 1
+        self.offset == u32::MAX - 1
     }
 
     pub fn is_infinite_high_fence_key(&self) -> bool {
-        self.offset == u16::MAX
+        self.offset == u32::MAX
     }
 
-    pub fn value_len(&self) -> u16 {
+    pub fn value_len(&self) -> u32 {
         self.ref_value_len_in_byte.load(atomic::Ordering::Relaxed) & VALUE_LEN_MASK
     }
 
-    pub fn set_value_len(&mut self, value: u16) {
+    pub fn set_value_len(&mut self, value: u32) {
         let v = self.ref_value_len_in_byte.load(atomic::Ordering::Relaxed);
         self.ref_value_len_in_byte.store(
             (v & !VALUE_LEN_MASK) | (value & VALUE_LEN_MASK),
@@ -177,6 +177,13 @@ impl LeafKVMeta {
         self.ref_value_len_in_byte.load(atomic::Ordering::Relaxed) & REF_BIT_MASK != 0
     }
 
+    /// Returns the value length as a u16 for cases where the caller
+    /// knows the value fits in u16 (e.g., key length arithmetic).
+    #[inline]
+    pub(crate) fn value_len_u16(&self) -> u16 {
+        self.value_len() as u16
+    }
+
     pub fn mark_as_deleted(&mut self) {
         self.set_op_type(OpType::Delete);
     }
@@ -186,7 +193,7 @@ impl LeafKVMeta {
         self.op_type() == OpType::Delete
     }
 
-    pub(crate) fn get_offset(&self) -> u16 {
+    pub(crate) fn get_offset(&self) -> u32 {
         self.offset
     }
 
@@ -228,7 +235,7 @@ pub(crate) struct LeafNode {
     data: [u8; 0],
 }
 
-const _: () = assert!(core::mem::size_of::<LeafNode>() == 24);
+const _: () = assert!(core::mem::size_of::<LeafNode>() == 32);
 
 impl LeafNode {
     fn max_data_size(node_size: usize) -> usize {
@@ -439,7 +446,7 @@ impl LeafNode {
         let cur_low_offset = self.current_lowest_offset();
 
         self.meta.increment_value_count();
-        self.meta.remaining_size -= core::mem::size_of::<LeafKVMeta>() as u16;
+        self.meta.remaining_size -= core::mem::size_of::<LeafKVMeta>() as u32;
 
         if key.is_empty() {
             let fence = if is_high_fence {
@@ -451,8 +458,8 @@ impl LeafNode {
         } else {
             let prefix_len = if is_high_fence { self.prefix_len } else { 0 }; // we don't compress low fence.
 
-            let post_fix_len = key.len() as u16 - prefix_len;
-            let val_len = 0u16;
+            let post_fix_len = key.len() as u32 - prefix_len as u32;
+            let val_len = 0u32;
             let kv_len = post_fix_len + val_len;
 
             let remaining = self.meta.remaining_size;
@@ -488,16 +495,16 @@ impl LeafNode {
         }
     }
 
-    pub(crate) fn current_lowest_offset(&self) -> u16 {
-        let value_count = self.meta.meta_count_with_fence();
+    pub(crate) fn current_lowest_offset(&self) -> u32 {
+        let value_count = self.meta.meta_count_with_fence() as u32;
         let rt =
-            (value_count * core::mem::size_of::<LeafKVMeta>() as u16) + self.meta.remaining_size;
+            (value_count * core::mem::size_of::<LeafKVMeta>() as u32) + self.meta.remaining_size;
 
         // Sanity check
         #[cfg(debug_assertions)]
         {
-            let mut min_offset = LeafNode::max_data_size(self.meta.node_size as usize) as u16;
-            for i in 0..value_count {
+            let mut min_offset = LeafNode::max_data_size(self.meta.node_size as usize) as u32;
+            for i in 0..self.meta.meta_count_with_fence() {
                 let kv_meta = self.get_kv_meta(i as usize);
                 if kv_meta.is_infinite_low_fence_key() || kv_meta.is_infinite_high_fence_key() {
                     continue;
@@ -510,7 +517,7 @@ impl LeafNode {
     }
 
     pub(crate) fn get_value(&self, meta: &LeafKVMeta) -> &[u8] {
-        let val_offset = meta.get_offset() + meta.get_key_len() - self.prefix_len;
+        let val_offset = meta.get_offset() + meta.get_key_len() as u32 - self.prefix_len as u32;
         // SAFETY: The value is stored immediately after the remaining key bytes in the data
         // buffer. val_offset = key_offset + (key_len - prefix_len) points to the start of
         // the value region. Both pointer and length are within the node's data allocation.
@@ -531,23 +538,23 @@ impl LeafNode {
     /// Returns the key that split the node into two roughly equal size, and the new node count.
     /// This is only invoked once for splitting the root node.
     pub fn get_split_key(&self, cache_only: bool) -> (Vec<u8>, u16) {
-        let mut data_size = 0;
+        let mut data_size: u32 = 0;
 
         for meta in self.meta_iter() {
-            let key_len = meta.get_key_len();
+            let key_len = meta.get_key_len() as u32;
             let value_len = meta.value_len();
 
-            data_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+            data_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
         }
 
         let split_target_size = data_size / 2;
-        let mut cur_size = 0;
+        let mut cur_size: u32 = 0;
 
         for (i, meta) in self.meta_iter().enumerate() {
-            let key_len = meta.get_key_len();
+            let key_len = meta.get_key_len() as u32;
             let value_len = meta.value_len();
 
-            cur_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+            cur_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
 
             // Here we guarantee in cache-only mode, the root node has at least two keys
             if cache_only && i == 0 {
@@ -587,24 +594,24 @@ impl LeafNode {
     pub fn get_cache_only_insert_split_key(&self, key: &[u8], new_record_size: &u16) -> Vec<u8> {
         let mut merge_split_key_1: Option<Vec<u8>> = None;
         let mut merge_split_key_2: Option<Vec<u8>> = None;
-        let mut diff_1: i16 = i16::MAX;
-        let mut diff_2: i16 = i16::MAX;
+        let mut diff_1: i32 = i32::MAX;
+        let mut diff_2: i32 = i32::MAX;
 
         // The total size of all records including the new record to insert
-        let mut total_merged_size: u16 = 0;
+        let mut total_merged_size: u32 = 0;
 
         for meta in self.meta_iter() {
-            let key_len = meta.get_key_len();
+            let key_len = meta.get_key_len() as u32;
             let value_len = meta.value_len();
 
-            total_merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+            total_merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
         }
 
-        total_merged_size += new_record_size + core::mem::size_of::<LeafKVMeta>() as u16;
+        total_merged_size += *new_record_size as u32 + core::mem::size_of::<LeafKVMeta>() as u32;
         let split_target_size = total_merged_size / 2;
 
         // Search for the splitting key
-        let mut merged_size: u16 = 0;
+        let mut merged_size: u32 = 0;
         let mut self_meta_iter = self.meta_iter();
         let mut self_meta_option = self_meta_iter.next();
 
@@ -615,9 +622,9 @@ impl LeafNode {
             let mut cmp = cur_base_key.as_slice().cmp(key);
 
             while cmp == core::cmp::Ordering::Less {
-                let key_len = cur_base_meta.get_key_len();
+                let key_len = cur_base_meta.get_key_len() as u32;
                 let value_len = cur_base_meta.value_len();
-                merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+                merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
                 if merged_size >= split_target_size {
                     // Two split key candidates are already found
                     // Stop
@@ -625,18 +632,18 @@ impl LeafNode {
                         break;
                     }
 
-                    let left_side: u16 = merged_size
+                    let left_side: u32 = merged_size
                         - key_len
                         - value_len
-                        - core::mem::size_of::<LeafKVMeta>() as u16;
+                        - core::mem::size_of::<LeafKVMeta>() as u32;
                     let right_side = total_merged_size - left_side;
 
                     if merge_split_key_1.is_none() {
                         merge_split_key_1 = Some(cur_base_key);
-                        diff_1 = (left_side as i16 - right_side as i16).abs();
+                        diff_1 = (left_side as i32 - right_side as i32).abs();
                     } else {
                         merge_split_key_2 = Some(cur_base_key);
-                        diff_2 = (left_side as i16 - right_side as i16).abs();
+                        diff_2 = (left_side as i32 - right_side as i32).abs();
                     }
                 }
 
@@ -653,22 +660,22 @@ impl LeafNode {
 
         // Count the new key
         if merge_split_key_2.is_none() {
-            merged_size += new_record_size + core::mem::size_of::<LeafKVMeta>() as u16;
+            merged_size += *new_record_size as u32 + core::mem::size_of::<LeafKVMeta>() as u32;
 
             if merged_size >= split_target_size {
                 // Two split key candidates are already found
                 // Stop
 
-                let left_side: u16 =
-                    merged_size - new_record_size - core::mem::size_of::<LeafKVMeta>() as u16;
+                let left_side: u32 =
+                    merged_size - *new_record_size as u32 - core::mem::size_of::<LeafKVMeta>() as u32;
                 let right_side = total_merged_size - left_side;
 
                 if merge_split_key_1.is_none() {
                     merge_split_key_1 = Some(key.to_vec());
-                    diff_1 = (left_side as i16 - right_side as i16).abs();
+                    diff_1 = (left_side as i32 - right_side as i32).abs();
                 } else {
                     merge_split_key_2 = Some(key.to_vec());
-                    diff_2 = (left_side as i16 - right_side as i16).abs();
+                    diff_2 = (left_side as i32 - right_side as i32).abs();
                 }
             }
         }
@@ -676,9 +683,9 @@ impl LeafNode {
         // Go through the rest of records in the base page
         while self_meta_option.is_some() {
             let base_meta = self_meta_option.unwrap();
-            let key_len = base_meta.get_key_len();
+            let key_len = base_meta.get_key_len() as u32;
             let value_len = base_meta.value_len();
-            merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+            merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
 
             if merged_size >= split_target_size {
                 // Return the splitting key
@@ -687,16 +694,16 @@ impl LeafNode {
                     break;
                 }
 
-                let left_side: u16 =
-                    merged_size - key_len - value_len - core::mem::size_of::<LeafKVMeta>() as u16;
+                let left_side: u32 =
+                    merged_size - key_len - value_len - core::mem::size_of::<LeafKVMeta>() as u32;
                 let right_side = total_merged_size - left_side;
 
                 if merge_split_key_1.is_none() {
                     merge_split_key_1 = Some(cur_base_key);
-                    diff_1 = (left_side as i16 - right_side as i16).abs();
+                    diff_1 = (left_side as i32 - right_side as i32).abs();
                 } else {
                     merge_split_key_2 = Some(cur_base_key);
-                    diff_2 = (left_side as i16 - right_side as i16).abs();
+                    diff_2 = (left_side as i32 - right_side as i32).abs();
                 }
             }
             self_meta_option = self_meta_iter.next();
@@ -728,10 +735,10 @@ impl LeafNode {
     pub(crate) fn get_merge_split_key(&mut self, mini_page: &LeafNode) -> Vec<u8> {
         let mut merge_split_key_1: Option<Vec<u8>> = None;
         let mut merge_split_key_2: Option<Vec<u8>> = None;
-        let mut diff_1: i16 = i16::MAX;
-        let mut diff_2: i16 = i16::MAX;
+        let mut diff_1: i32 = i32::MAX;
+        let mut diff_2: i32 = i32::MAX;
 
-        let mut total_merged_size: u16 = 0;
+        let mut total_merged_size: u32 = 0;
         let mut base_meta_iter = self.meta_iter();
         let mut cur_pos = base_meta_iter.cur;
         let mut cur_base_meta_option = base_meta_iter.next();
@@ -754,10 +761,10 @@ impl LeafNode {
                 // Go through all records from the base page whose key is strictly smaller
                 // than the current record from the mini page
                 while cmp == core::cmp::Ordering::Less {
-                    let key_len = cur_base_meta.get_key_len();
+                    let key_len = cur_base_meta.get_key_len() as u32;
                     let value_len = cur_base_meta.value_len();
                     total_merged_size +=
-                        key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+                        key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
 
                     cur_pos = base_meta_iter.cur;
                     cur_base_meta_option = base_meta_iter.next();
@@ -780,18 +787,18 @@ impl LeafNode {
                 }
             }
 
-            let key_len = mini_meta.get_key_len();
+            let key_len = mini_meta.get_key_len() as u32;
             let value_len = mini_meta.value_len();
-            total_merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+            total_merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
         }
 
         // Mini-page records are exhuasted, go through the rest of
         // records from the base page, if any
         while cur_base_meta_option.is_some() {
             let base_meta = cur_base_meta_option.unwrap();
-            let key_len = base_meta.get_key_len();
+            let key_len = base_meta.get_key_len() as u32;
             let value_len = base_meta.value_len();
-            total_merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+            total_merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
 
             cur_base_meta_option = base_meta_iter.next();
         }
@@ -801,7 +808,7 @@ impl LeafNode {
 
         // Merge sort the distinct records from the mini page and the base page
         // until the size of the sorted records reaches the target split size
-        let mut merged_size: u16 = 0;
+        let mut merged_size: u32 = 0;
         base_meta_iter = self.meta_iter();
         cur_base_meta_option = base_meta_iter.next();
 
@@ -821,9 +828,9 @@ impl LeafNode {
                 // Go through all records from the base page whose key is strictly smaller
                 // than the current record from the mini page
                 while cmp == core::cmp::Ordering::Less {
-                    let key_len = cur_base_meta.get_key_len();
+                    let key_len = cur_base_meta.get_key_len() as u32;
                     let value_len = cur_base_meta.value_len();
-                    merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+                    merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
                     if merged_size >= split_target_size {
                         // Two split key candidates are already found
                         // Stop
@@ -831,18 +838,18 @@ impl LeafNode {
                             break;
                         }
 
-                        let left_side: u16 = merged_size
+                        let left_side: u32 = merged_size
                             - key_len
                             - value_len
-                            - core::mem::size_of::<LeafKVMeta>() as u16;
+                            - core::mem::size_of::<LeafKVMeta>() as u32;
                         let right_side = total_merged_size - left_side;
 
                         if merge_split_key_1.is_none() {
                             merge_split_key_1 = Some(cur_base_key);
-                            diff_1 = (left_side as i16 - right_side as i16).abs();
+                            diff_1 = (left_side as i32 - right_side as i32).abs();
                         } else {
                             merge_split_key_2 = Some(cur_base_key);
-                            diff_2 = (left_side as i16 - right_side as i16).abs();
+                            diff_2 = (left_side as i32 - right_side as i32).abs();
                         }
                     }
 
@@ -863,9 +870,9 @@ impl LeafNode {
                 }
             }
 
-            let key_len = mini_meta.get_key_len();
+            let key_len = mini_meta.get_key_len() as u32;
             let value_len = mini_meta.value_len();
-            merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+            merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
 
             if merged_size >= split_target_size {
                 // Two split key candidates are already found
@@ -874,16 +881,16 @@ impl LeafNode {
                     break;
                 }
 
-                let left_side: u16 =
-                    merged_size - key_len - value_len - core::mem::size_of::<LeafKVMeta>() as u16;
+                let left_side: u32 =
+                    merged_size - key_len - value_len - core::mem::size_of::<LeafKVMeta>() as u32;
                 let right_side = total_merged_size - left_side;
 
                 if merge_split_key_1.is_none() {
                     merge_split_key_1 = Some(cur_mini_key);
-                    diff_1 = (left_side as i16 - right_side as i16).abs();
+                    diff_1 = (left_side as i32 - right_side as i32).abs();
                 } else {
                     merge_split_key_2 = Some(cur_mini_key);
-                    diff_2 = (left_side as i16 - right_side as i16).abs();
+                    diff_2 = (left_side as i32 - right_side as i32).abs();
                 }
             }
         }
@@ -892,9 +899,9 @@ impl LeafNode {
         // records from the base page, if any
         while cur_base_meta_option.is_some() {
             let base_meta = cur_base_meta_option.unwrap();
-            let key_len = base_meta.get_key_len();
+            let key_len = base_meta.get_key_len() as u32;
             let value_len = base_meta.value_len();
-            merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u16;
+            merged_size += key_len + value_len + core::mem::size_of::<LeafKVMeta>() as u32;
 
             if merged_size >= split_target_size {
                 // Return the splitting key
@@ -903,16 +910,16 @@ impl LeafNode {
                     break;
                 }
 
-                let left_side: u16 =
-                    merged_size - key_len - value_len - core::mem::size_of::<LeafKVMeta>() as u16;
+                let left_side: u32 =
+                    merged_size - key_len - value_len - core::mem::size_of::<LeafKVMeta>() as u32;
                 let right_side = total_merged_size - left_side;
 
                 if merge_split_key_1.is_none() {
                     merge_split_key_1 = Some(cur_base_key);
-                    diff_1 = (left_side as i16 - right_side as i16).abs();
+                    diff_1 = (left_side as i32 - right_side as i32).abs();
                 } else {
                     merge_split_key_2 = Some(cur_base_key);
-                    diff_2 = (left_side as i16 - right_side as i16).abs();
+                    diff_2 = (left_side as i32 - right_side as i32).abs();
                 }
             }
             cur_base_meta_option = base_meta_iter.next();
@@ -992,7 +999,7 @@ impl LeafNode {
         let key_offset = meta.get_offset();
         let key_len = meta.get_key_len();
 
-        if key_offset + key_len > LeafNode::max_data_size(self.meta.node_size as usize) as u16 {
+        if key_offset + key_len as u32 > LeafNode::max_data_size(self.meta.node_size as usize) as u32 {
             return Err(TreeError::NeedRestart);
         }
 
@@ -1147,8 +1154,8 @@ impl LeafNode {
             OpType::Delete | OpType::Phantom => {}
         }
 
-        let post_fix_len = key.len() as u16 - self.prefix_len;
-        let val_len = value.len() as u16;
+        let post_fix_len = key.len() as u32 - self.prefix_len as u32;
+        let val_len = value.len() as u32;
         let kv_len = post_fix_len + val_len;
 
         let value_count_with_fence = self.meta.meta_count_with_fence();
@@ -1170,7 +1177,7 @@ impl LeafNode {
                 }
 
                 let pos_value = self.get_value(pos_meta);
-                let pos_value_len = pos_value.len() as u16;
+                let pos_value_len = pos_value.len() as u32;
 
                 if pos_value_len >= val_len {
                     // we are lucky, old value is larger than new value. We just overwrite the old value.
@@ -1234,7 +1241,7 @@ impl LeafNode {
 
         //Check if the node has capacity for the new record with or without fences
         if self.full_with_fences(
-            kv_len + core::mem::size_of::<LeafKVMeta>() as u16,
+            kv_len + core::mem::size_of::<LeafKVMeta>() as u32,
             max_fence_len,
         ) {
             return false;
@@ -1279,7 +1286,7 @@ impl LeafNode {
             );
         }
 
-        self.meta.remaining_size -= kv_len + core::mem::size_of::<LeafKVMeta>() as u16;
+        self.meta.remaining_size -= kv_len + core::mem::size_of::<LeafKVMeta>() as u32;
         self.meta.increment_value_count();
         true
     }
@@ -1637,20 +1644,20 @@ impl LeafNode {
             assert!(high_fence.is_empty());
 
             self.meta = NodeMeta::new(
-                LeafNode::max_data_size(node_size) as u16,
+                LeafNode::max_data_size(node_size) as u32,
                 false,
                 false,
-                node_size as u16,
+                node_size as u32,
                 cache_only,
             );
             self.prefix_len = 0;
             self.next_level = next_level;
         } else {
             self.meta = NodeMeta::new(
-                LeafNode::max_data_size(node_size) as u16, // - max_fence_len as u16, // Reserve space for
+                LeafNode::max_data_size(node_size) as u32,
                 false,
                 true,
-                node_size as u16,
+                node_size as u32,
                 cache_only,
             );
 
@@ -1807,7 +1814,7 @@ impl LeafNode {
 
         for meta in self.meta_iter() {
             if meta.op_type() == OpType::Insert {
-                required_size += (meta.get_key_len() + meta.value_len()) as usize
+                required_size += (meta.get_key_len() as u32 + meta.value_len()) as usize
                     + core::mem::size_of::<LeafKVMeta>();
             }
         }
@@ -1817,7 +1824,7 @@ impl LeafNode {
 
     /// Determine if the leaf node has space of the requested_size given the full fence length
     /// This is required as fences could be added to a base page during consolidation
-    pub(crate) fn full_with_fences(&self, requested_size: u16, max_fence_len: usize) -> bool {
+    pub(crate) fn full_with_fences(&self, requested_size: u32, max_fence_len: usize) -> bool {
         if self.meta.remaining_size < requested_size {
             return true;
         }
@@ -1827,15 +1834,15 @@ impl LeafNode {
 
             let low_key_meta = self.get_kv_meta(LOW_FENCE_IDX);
             if !low_key_meta.is_infinite_low_fence_key() {
-                empty_data_size += low_key_meta.get_key_len();
+                empty_data_size += low_key_meta.get_key_len() as u32;
             }
 
             let high_key_meta = self.get_kv_meta(HIGH_FENCE_IDX);
             if !high_key_meta.is_infinite_high_fence_key() {
-                empty_data_size += high_key_meta.get_key_len();
+                empty_data_size += high_key_meta.get_key_len() as u32;
             }
 
-            if empty_data_size >= requested_size + max_fence_len as u16 {
+            if empty_data_size >= requested_size + max_fence_len as u32 {
                 return false;
             }
 
@@ -1848,7 +1855,7 @@ impl LeafNode {
     pub(crate) fn merge_mini_page(&mut self, mini_page: &LeafNode, max_fence_len: usize) -> bool {
         let size_required = mini_page.estimate_merge_size();
 
-        if self.full_with_fences(size_required as u16, max_fence_len) {
+        if self.full_with_fences(size_required as u32, max_fence_len) {
             return false;
         }
 
@@ -2055,7 +2062,7 @@ mod tests {
     #[test]
     fn test_make_infinite_high_fence_key() {
         let meta = LeafKVMeta::make_infinite_high_fence_key();
-        assert_eq!(meta.offset, u16::MAX);
+        assert_eq!(meta.offset, u32::MAX);
         assert_eq!(meta.get_key_len(), 0);
         assert_eq!(meta.value_len(), 0);
         assert!(meta.is_infinite_high_fence_key());
@@ -2064,7 +2071,7 @@ mod tests {
     #[test]
     fn test_make_infinite_low_fence_key() {
         let meta = LeafKVMeta::make_infinite_low_fence_key();
-        assert_eq!(meta.offset, u16::MAX - 1);
+        assert_eq!(meta.offset, u32::MAX - 1);
         assert_eq!(meta.get_key_len(), 0);
         assert_eq!(meta.value_len(), 0);
         assert!(meta.is_infinite_low_fence_key());

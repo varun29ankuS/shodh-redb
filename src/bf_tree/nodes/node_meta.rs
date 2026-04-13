@@ -6,12 +6,13 @@ use crate::bf_tree::nodes::FENCE_KEY_CNT;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NodeMeta {
+    pub(crate) node_size: u32,
+    pub(crate) remaining_size: u32,
     encoded: u16,
     // if highest bit, it is a leaf node, otherwise inner node.
     // if second highest bit set, the node needs to be split.
     // remaining bits are value count.
-    pub(crate) node_size: u16,
-    pub(crate) remaining_size: u16,
+    _pad: u16,
 }
 
 const HAS_FENCE_MASK: u16 = 0x8000;
@@ -26,10 +27,10 @@ const VALUE_COUNT_MASK: u16 = 0x0FFF;
 
 impl NodeMeta {
     pub(crate) fn new(
-        remaining_size: u16,
+        remaining_size: u32,
         children_is_leaf: bool,
         has_fence: bool,
-        node_size: u16,
+        node_size: u32,
         cache_only: bool,
     ) -> Self {
         let mut encoded = 0;
@@ -40,7 +41,6 @@ impl NodeMeta {
 
         if has_fence {
             // fence key is only for leaf node
-            // assert_eq!(node_size as usize, DEFAULT_LEAF_NODE_SIZE);
             assert!(!children_is_leaf);
             encoded |= HAS_FENCE_MASK;
         }
@@ -50,9 +50,10 @@ impl NodeMeta {
         }
 
         Self {
-            encoded,
             node_size,
             remaining_size,
+            encoded,
+            _pad: 0,
         }
     }
 
@@ -65,7 +66,6 @@ impl NodeMeta {
         self.meta_count_with_fence() - 1
     }
 
-    /// TODO: this is undefined for inner nodes.
     pub(crate) fn meta_count_without_fence(&self) -> u16 {
         if self.has_fence() {
             self.meta_count_with_fence() - FENCE_KEY_CNT as u16
@@ -171,5 +171,12 @@ mod tests {
         assert!(!meta.get_split_flag());
         meta.set_split_flag();
         assert!(meta.get_split_flag());
+    }
+
+    #[test]
+    fn test_large_node_size() {
+        let meta = NodeMeta::new(250_000, false, false, 262_144, false);
+        assert_eq!(meta.node_size, 262_144);
+        assert_eq!(meta.remaining_size, 250_000);
     }
 }

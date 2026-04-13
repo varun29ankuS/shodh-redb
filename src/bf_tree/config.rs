@@ -27,7 +27,7 @@ const DEFAULT_MAX_MINI_PAGE_SIZE: usize = 2048; // Deprecated
 const DEFAULT_COPY_ON_ACCESS_RATIO: f64 = 0.1;
 const DEFAULT_CIRCULAR_BUFFER_SIZE: usize = 1024 * 1024 * 32;
 const DEFAULT_MIN_RECORD_SIZE: usize = 4;
-const DEFAULT_MAX_RECORD_SIZE: usize = 1952;
+const DEFAULT_MAX_RECORD_SIZE: usize = 1568;
 const DEFAULT_LEAF_PAGE_SIZE: usize = 4096;
 const DEFAULT_MAX_KEY_LEN: usize = 16;
 

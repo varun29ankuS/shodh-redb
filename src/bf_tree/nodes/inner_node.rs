@@ -47,7 +47,7 @@ pub(crate) struct InnerNode {
 }
 
 #[cfg(not(feature = "shuttle"))]
-const _: () = assert!(core::mem::size_of::<InnerNode>() == 16);
+const _: () = assert!(core::mem::size_of::<InnerNode>() == 24);
 
 struct InnerPtrGuard {
     ptr: *mut InnerNode,
@@ -191,10 +191,10 @@ impl InnerNode {
             core::ptr::write(
                 &mut self.meta,
                 NodeMeta::new(
-                    InnerNode::max_data_size() as u16,
+                    InnerNode::max_data_size() as u32,
                     children_is_leaf,
                     false,
-                    INNER_NODE_SIZE as u16,
+                    INNER_NODE_SIZE as u32,
                     false,
                 ),
             );
@@ -202,6 +202,7 @@ impl InnerNode {
         self.disk_offset = disk_offset;
 
         let offset = self.current_lowest_offset() - core::mem::size_of::<PageID>() as u16;
+        // Note: InnerNode offsets stay u16 since inner nodes are always 4KB
         let new_meta = InnerKVMeta {
             offset,
             key_len: 0,
@@ -223,7 +224,7 @@ impl InnerNode {
         }
 
         self.meta.remaining_size -=
-            (core::mem::size_of::<PageID>() + core::mem::size_of::<InnerKVMeta>()) as u16;
+            (core::mem::size_of::<PageID>() + core::mem::size_of::<InnerKVMeta>()) as u32;
         self.meta.increment_value_count();
     }
 
@@ -248,7 +249,7 @@ impl InnerNode {
     pub(crate) fn current_lowest_offset(&self) -> u16 {
         let value_count = self.meta.meta_count_with_fence();
         let rt =
-            (value_count * core::mem::size_of::<InnerKVMeta>() as u16) + self.meta.remaining_size;
+            (value_count as u32 * core::mem::size_of::<InnerKVMeta>() as u32) + self.meta.remaining_size;
 
         // Sanity check
         #[cfg(debug_assertions)]
@@ -258,9 +259,9 @@ impl InnerNode {
                 let kv_meta = self.get_kv_meta(i);
                 min_offset = core::cmp::min(min_offset, kv_meta.offset);
             }
-            assert!(min_offset == rt);
+            assert!(min_offset == rt as u16);
         }
-        rt
+        rt as u16
     }
 
     pub(crate) fn get_full_key(&self, meta: &InnerKVMeta) -> Vec<u8> {
@@ -378,7 +379,7 @@ impl InnerNode {
         let required_len = kv_len + core::mem::size_of::<InnerKVMeta>();
 
         let remaining = self.meta.remaining_size;
-        if remaining < required_len as u16 {
+        if remaining < required_len as u32 {
             return false;
         }
 
@@ -449,7 +450,7 @@ impl InnerNode {
             core::ptr::write_unaligned(pair_ptr.add(post_key_len) as *mut PageID, child);
         }
 
-        self.meta.remaining_size -= required_len as u16;
+        self.meta.remaining_size -= required_len as u32;
         self.meta.increment_value_count();
         true
     }
@@ -514,7 +515,7 @@ impl InnerNode {
         let required_len = kv_len + core::mem::size_of::<InnerKVMeta>();
 
         let remaining = self.meta.remaining_size;
-        remaining >= required_len as u16
+        remaining >= required_len as u32
     }
 
     pub(crate) fn update_at_pos(&mut self, pos: usize, new_id: PageID) {

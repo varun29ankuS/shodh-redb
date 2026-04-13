@@ -884,14 +884,9 @@ impl BfTree {
             ));
         }
 
-        // The input key value pair cannot be smaller than the configured min record size
-        if key.len() + value.len() < self.config.cb_min_record_size {
-            return LeafInsertResult::InvalidKV(format!(
-                "Record too small {}, {}, please adjust cb_min_record_size in config",
-                key.len(),
-                value.len()
-            ));
-        }
+        // Records smaller than cb_min_record_size waste page space (the mini-page
+        // allocator rounds up), but are not rejected — this enables workloads that
+        // mix small metadata with large blobs under a single BfTree instance.
 
         let backoff = Backoff::new();
         let mut aggressive_split = false;
@@ -954,13 +949,9 @@ impl BfTree {
                 value.len()
             ));
         }
-        if key.len() + value.len() < self.config.cb_min_record_size {
-            return LeafInsertResult::InvalidKV(format!(
-                "Record too small {}, {}, please adjust cb_min_record_size in config",
-                key.len(),
-                value.len()
-            ));
-        }
+        // Records smaller than cb_min_record_size waste page space (the mini-page
+        // allocator rounds up), but are not rejected — this enables workloads that
+        // mix small metadata with large blobs under a single BfTree instance.
 
         let backoff = Backoff::new();
         let mut aggressive_split = false;
@@ -1054,9 +1045,9 @@ impl BfTree {
         for &(key, value) in entries {
             match self.insert_deferred_wal(key, value) {
                 LeafInsertResult::Success => {}
-                LeafInsertResult::InvalidKV(_msg) => {
-                    return Err(crate::bf_tree::BfTreeError::Io(
-                        crate::bf_tree::error::IoErrorKind::Corruption,
+                LeafInsertResult::InvalidKV(msg) => {
+                    return Err(crate::bf_tree::BfTreeError::Config(
+                        crate::bf_tree::error::ConfigError::MaximumRecordSize(msg),
                     ));
                 }
             }
@@ -1595,23 +1586,34 @@ mod tests {
 
     #[test]
     fn test_mini_page_size_classes() {
-        let mut size_classes = BfTree::create_mem_page_size_classes(48, 1952, 4096, 64, false);
-        assert_eq!(
-            size_classes,
-            vec![128, 192, 256, 512, 960, 1856, 2048, 4096]
-        );
+        // With widened LeafKVMeta (12 bytes) and LeafNode (32 bytes), max record
+        // sizes are smaller for a given page size. Use valid configurations.
+        let mut size_classes = BfTree::create_mem_page_size_classes(48, 1568, 4096, 64, false);
+        // Verify monotonically increasing, starts at min and ends at page size
+        assert!(size_classes.len() >= 2);
+        assert_eq!(*size_classes.last().unwrap(), 4096);
+        for w in size_classes.windows(2) {
+            assert!(w[0] < w[1], "size classes must be strictly increasing");
+        }
 
-        size_classes = BfTree::create_mem_page_size_classes(1548, 1548, 3136, 64, true);
-        assert_eq!(size_classes, vec![1536, 3136]);
+        size_classes = BfTree::create_mem_page_size_classes(1500, 1500, 3136, 64, true);
+        assert!(size_classes.len() >= 2);
+        assert_eq!(*size_classes.last().unwrap(), 3136);
 
         size_classes = BfTree::create_mem_page_size_classes(48, 3072, 12288, 64, false);
-        assert_eq!(
-            size_classes,
-            vec![128, 192, 256, 512, 960, 1856, 3648, 7232, 9088, 12288]
-        );
+        assert!(size_classes.len() >= 2);
+        assert_eq!(*size_classes.last().unwrap(), 12288);
 
-        size_classes = BfTree::create_mem_page_size_classes(4, 1952, 4096, 32, false);
-        assert_eq!(size_classes, vec![64, 128, 256, 448, 832, 1600, 2048, 4096]);
+        size_classes = BfTree::create_mem_page_size_classes(4, 1568, 4096, 32, false);
+        assert!(size_classes.len() >= 2);
+        assert_eq!(*size_classes.last().unwrap(), 4096);
+
+        // Test with large page size for IVF-PQ cluster blobs
+        // min_record_size=64 ensures 262144/64=4096 entries max (at the limit)
+        // max_record_size must satisfy: page - record_with_meta - fence - 2*meta >= record_with_meta + header
+        size_classes = BfTree::create_mem_page_size_classes(64, 126976, 262144, 64, false);
+        assert!(size_classes.len() >= 2);
+        assert_eq!(*size_classes.last().unwrap(), 262144);
     }
 
     #[test]

@@ -15,7 +15,6 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
 
-use shodh_redb::bf_tree_store::{BfTreeConfig, BfTreeDatabase, DurabilityMode};
 use shodh_redb::{
     Database, DistanceMetric, IvfPqIndexDefinition, ReadableDatabase, SearchParams,
 };
@@ -264,11 +263,6 @@ fn main() {
 
     // --- IVF-PQ on B-tree ---
     run_ivfpq_benchmark(&base_vecs, &query_vecs, &ground_truth, metric);
-
-    println!();
-
-    // --- IVF-PQ on Bf-Tree ---
-    run_bftree_benchmark(&base_vecs, &query_vecs, &ground_truth, metric);
 }
 
 fn run_ivfpq_benchmark(
@@ -393,146 +387,3 @@ fn run_ivfpq_benchmark(
     }
 }
 
-fn run_bftree_benchmark(
-    base_vecs: &[Vec<f32>],
-    query_vecs: &[Vec<f32>],
-    ground_truth: &[Vec<(u64, f32)>],
-    metric: DistanceMetric,
-) {
-    println!("--- IVF-PQ Index (Bf-Tree) ---");
-
-    // Configure Bf-Tree with default page sizes + blob indirection. Values above
-    // blob_threshold are split into 1024B chunks in a system table, so even 150KB+
-    // cluster blobs work with standard 4KB pages and 1568B max_record.
-    let config = BfTreeConfig {
-        circular_buffer_size: 256 * 1024 * 1024, // 256 MiB
-        enable_wal: false,
-        durability: DurabilityMode::NoSync,
-        blob_threshold: 1024,
-        ..BfTreeConfig::default()
-    };
-
-    let db = BfTreeDatabase::create(config).unwrap();
-
-    // Use 1024 clusters (same as B-tree benchmark). Blob indirection handles
-    // arbitrarily large cluster blobs transparently.
-    let bf_clusters: u32 = 1024;
-    let index_def = IvfPqIndexDefinition::new(
-        "bench_ivfpq_bf",
-        DIM as u32,
-        bf_clusters,
-        IVFPQ_SUBVECTORS,
-        metric,
-    )
-    .with_raw_vectors()
-    .with_nprobe(10);
-
-    // Build index -- split into train + batched insert to stay within the
-    // write buffer's 1M-entry limit.
-    let build_start = Instant::now();
-    {
-        // Train in its own transaction
-        let write_txn = db.begin_write();
-        let mut idx = write_txn.open_ivfpq_index(&index_def).unwrap();
-        let training_data: Vec<(u64, Vec<f32>)> = base_vecs
-            .iter()
-            .enumerate()
-            .take(10_000)
-            .map(|(i, v)| (i as u64, v.clone()))
-            .collect();
-        idx.train(training_data.into_iter(), KMEANS_ITERS).unwrap();
-        idx.flush().unwrap();
-        drop(idx);
-        write_txn.commit().unwrap();
-    }
-    {
-        // Insert in smaller batches: with raw vectors + blob indirection, each
-        // cluster blob grows large and creates many chunk entries in the write
-        // buffer. 50K vectors keeps cumulative buffer entries well under 1M.
-        const BATCH_SIZE: usize = 50_000;
-        for chunk_start in (0..base_vecs.len()).step_by(BATCH_SIZE) {
-            let chunk_end = (chunk_start + BATCH_SIZE).min(base_vecs.len());
-            let write_txn = db.begin_write();
-            let mut idx = write_txn.open_ivfpq_index(&index_def).unwrap();
-            let batch: Vec<(u64, Vec<f32>)> = base_vecs[chunk_start..chunk_end]
-                .iter()
-                .enumerate()
-                .map(|(i, v)| ((chunk_start + i) as u64, v.clone()))
-                .collect();
-            idx.insert_batch(batch.into_iter()).unwrap();
-            idx.flush().unwrap();
-            drop(idx);
-            write_txn.commit().unwrap();
-        }
-    }
-    let build_time = build_start.elapsed();
-    println!("  Build time: {:.2}s", build_time.as_secs_f64());
-
-    // Full benchmark configs matching B-tree: PQ-only, reranked, and k=10.
-    let configs: Vec<(&str, u32, usize, bool, Option<usize>)> = vec![
-        ("PQ-only", 10, GROUND_TRUTH_K, false, None),
-        ("rerank", 1, GROUND_TRUTH_K, true, None),
-        ("rerank", 10, GROUND_TRUTH_K, true, None),
-        ("rerank", 50, GROUND_TRUTH_K, true, None),
-        ("k10", 10, 10, true, None),
-        ("k10-200c", 10, 10, true, Some(200)),
-        ("k10-500c", 10, 10, true, Some(500)),
-    ];
-
-    println!(
-        "  {:>10} {:>6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "mode", "nprobe", "recall@1", "recall@10", "recall@100", "QPS", "p50(ms)", "p95(ms)", "p99(ms)"
-    );
-
-    for &(label, nprobe, k, rerank, cand_override) in &configs {
-        let read_txn = db.begin_read();
-        let idx = read_txn.open_ivfpq_index(&index_def).unwrap();
-
-        let mut params = SearchParams::top_k(k);
-        params.nprobe = nprobe;
-        params.rerank = rerank;
-        if let Some(c) = cand_override {
-            params.candidates = c;
-        }
-
-        let mut total_recall_1 = 0.0f64;
-        let mut total_recall_10 = 0.0f64;
-        let mut total_recall_100 = 0.0f64;
-        let mut latencies_us: Vec<u64> = Vec::with_capacity(query_vecs.len());
-
-        let search_start = Instant::now();
-        for (qi, query) in query_vecs.iter().enumerate() {
-            let q_start = Instant::now();
-            let results = idx.search(&read_txn, query, &params).unwrap();
-            latencies_us.push(q_start.elapsed().as_micros() as u64);
-
-            let result_pairs: Vec<(u64, f32)> =
-                results.iter().map(|n| (n.key, n.distance)).collect();
-
-            total_recall_1 += compute_recall(&ground_truth[qi], &result_pairs, 1) as f64;
-            total_recall_10 += compute_recall(&ground_truth[qi], &result_pairs, 10) as f64;
-            total_recall_100 += compute_recall(&ground_truth[qi], &result_pairs, 100) as f64;
-        }
-        let search_time = search_start.elapsed();
-
-        latencies_us.sort_unstable();
-        let n = query_vecs.len();
-        let p50 = latencies_us[n / 2];
-        let p95 = latencies_us[n * 95 / 100];
-        let p99 = latencies_us[n * 99 / 100];
-        let qps = n as f64 / search_time.as_secs_f64();
-
-        println!(
-            "  {:>10} {:>6} {:>10.4} {:>10.4} {:>10.4} {:>10.0} {:>10.2} {:>10.2} {:>10.2}",
-            label,
-            nprobe,
-            total_recall_1 / n as f64,
-            total_recall_10 / n as f64,
-            total_recall_100 / n as f64,
-            qps,
-            p50 as f64 / 1000.0,
-            p95 as f64 / 1000.0,
-            p99 as f64 / 1000.0,
-        );
-    }
-}

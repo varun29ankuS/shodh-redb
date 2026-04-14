@@ -1,4 +1,4 @@
-use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH};
+use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH, PageNumber};
 use crate::{ReadTransaction, TypeName};
 use alloc::boxed::Box;
 use alloc::format;
@@ -93,6 +93,52 @@ pub enum StorageError {
     },
     /// The requested history snapshot was not found for the given transaction ID
     HistorySnapshotNotFound(u64),
+    /// A B-tree page has an unexpected type byte
+    InvalidPageType {
+        /// Page region
+        page_region: u32,
+        /// Page index within region
+        page_index: u32,
+        /// Page order
+        page_order: u8,
+        /// The invalid type byte found
+        found: u8,
+    },
+    /// A child pointer or checksum on a B-tree branch page is invalid
+    InvalidChildRef {
+        /// Page region
+        page_region: u32,
+        /// Page index within region
+        page_index: u32,
+        /// Page order
+        page_order: u8,
+        /// Child index within the branch node
+        child_index: usize,
+        /// Whether this is a checksum error (true) or a pointer error (false)
+        is_checksum: bool,
+    },
+    /// An entry index on a B-tree page is invalid or out of range
+    InvalidEntryIndex {
+        /// Page region
+        page_region: u32,
+        /// Page index within region
+        page_index: u32,
+        /// Page order
+        page_order: u8,
+        /// The invalid entry index
+        entry_index: usize,
+    },
+    /// A B-tree page has structural corruption
+    PageCorrupted {
+        /// Page region
+        page_region: u32,
+        /// Page index within region
+        page_index: u32,
+        /// Page order
+        page_order: u8,
+        /// Static description of the corruption
+        detail: &'static str,
+    },
     Io(BackendError),
     PreviousIo,
     DatabaseClosed,
@@ -148,6 +194,52 @@ impl From<StorageError> for Error {
                 Error::MemoryBudgetExceeded { budget, used }
             }
             StorageError::HistorySnapshotNotFound(id) => Error::HistorySnapshotNotFound(id),
+            StorageError::InvalidPageType {
+                page_region,
+                page_index,
+                page_order,
+                found,
+            } => Error::InvalidPageType {
+                page_region,
+                page_index,
+                page_order,
+                found,
+            },
+            StorageError::InvalidChildRef {
+                page_region,
+                page_index,
+                page_order,
+                child_index,
+                is_checksum,
+            } => Error::InvalidChildRef {
+                page_region,
+                page_index,
+                page_order,
+                child_index,
+                is_checksum,
+            },
+            StorageError::InvalidEntryIndex {
+                page_region,
+                page_index,
+                page_order,
+                entry_index,
+            } => Error::InvalidEntryIndex {
+                page_region,
+                page_index,
+                page_order,
+                entry_index,
+            },
+            StorageError::PageCorrupted {
+                page_region,
+                page_index,
+                page_order,
+                detail,
+            } => Error::PageCorrupted {
+                page_region,
+                page_index,
+                page_order,
+                detail,
+            },
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
@@ -207,6 +299,52 @@ impl Display for StorageError {
             StorageError::HistorySnapshotNotFound(id) => {
                 write!(f, "History snapshot not found for transaction id={id}")
             }
+            StorageError::InvalidPageType {
+                page_region,
+                page_index,
+                page_order,
+                found,
+            } => {
+                write!(
+                    f,
+                    "Invalid page type byte {found} on page ({page_region}, {page_index}, order={page_order}), expected LEAF (1) or BRANCH (2)"
+                )
+            }
+            StorageError::InvalidChildRef {
+                page_region,
+                page_index,
+                page_order,
+                child_index,
+                is_checksum,
+            } => {
+                let kind = if *is_checksum { "checksum" } else { "pointer" };
+                write!(
+                    f,
+                    "Invalid child {kind} at index {child_index} on page ({page_region}, {page_index}, order={page_order})"
+                )
+            }
+            StorageError::InvalidEntryIndex {
+                page_region,
+                page_index,
+                page_order,
+                entry_index,
+            } => {
+                write!(
+                    f,
+                    "Invalid entry index {entry_index} on page ({page_region}, {page_index}, order={page_order})"
+                )
+            }
+            StorageError::PageCorrupted {
+                page_region,
+                page_index,
+                page_order,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "Page ({page_region}, {page_index}, order={page_order}) corrupted: {detail}"
+                )
+            }
             StorageError::Io(err) => {
                 write!(f, "I/O error: {err}")
             }
@@ -228,6 +366,55 @@ impl Display for StorageError {
 
 #[cfg(feature = "std")]
 impl std::error::Error for StorageError {}
+
+impl StorageError {
+    pub(crate) fn invalid_page_type(page: PageNumber, found: u8) -> Self {
+        StorageError::InvalidPageType {
+            page_region: page.region,
+            page_index: page.page_index,
+            page_order: page.page_order,
+            found,
+        }
+    }
+
+    pub(crate) fn invalid_child_pointer(page: PageNumber, child_index: usize) -> Self {
+        StorageError::InvalidChildRef {
+            page_region: page.region,
+            page_index: page.page_index,
+            page_order: page.page_order,
+            child_index,
+            is_checksum: false,
+        }
+    }
+
+    pub(crate) fn invalid_child_checksum(page: PageNumber, child_index: usize) -> Self {
+        StorageError::InvalidChildRef {
+            page_region: page.region,
+            page_index: page.page_index,
+            page_order: page.page_order,
+            child_index,
+            is_checksum: true,
+        }
+    }
+
+    pub(crate) fn invalid_entry_index(page: PageNumber, entry_index: usize) -> Self {
+        StorageError::InvalidEntryIndex {
+            page_region: page.region,
+            page_index: page.page_index,
+            page_order: page.page_order,
+            entry_index,
+        }
+    }
+
+    pub(crate) fn page_corrupted(page: PageNumber, detail: &'static str) -> Self {
+        StorageError::PageCorrupted {
+            page_region: page.region,
+            page_index: page.page_index,
+            page_order: page.page_order,
+            detail,
+        }
+    }
+}
 
 /// Errors related to opening tables
 #[derive(Debug)]
@@ -726,6 +913,35 @@ pub enum Error {
     },
     /// The requested history snapshot was not found for the given transaction ID
     HistorySnapshotNotFound(u64),
+    /// A B-tree page has an unexpected type byte
+    InvalidPageType {
+        page_region: u32,
+        page_index: u32,
+        page_order: u8,
+        found: u8,
+    },
+    /// A child pointer or checksum on a B-tree branch page is invalid
+    InvalidChildRef {
+        page_region: u32,
+        page_index: u32,
+        page_order: u8,
+        child_index: usize,
+        is_checksum: bool,
+    },
+    /// An entry index on a B-tree page is invalid or out of range
+    InvalidEntryIndex {
+        page_region: u32,
+        page_index: u32,
+        page_order: u8,
+        entry_index: usize,
+    },
+    /// A B-tree page has structural corruption
+    PageCorrupted {
+        page_region: u32,
+        page_index: u32,
+        page_order: u8,
+        detail: &'static str,
+    },
     Io(BackendError),
     DatabaseClosed,
     /// A previous IO error occurred. The database must be closed and re-opened
@@ -866,6 +1082,52 @@ impl Display for Error {
             }
             Error::HistorySnapshotNotFound(id) => {
                 write!(f, "History snapshot not found for transaction id={id}")
+            }
+            Error::InvalidPageType {
+                page_region,
+                page_index,
+                page_order,
+                found,
+            } => {
+                write!(
+                    f,
+                    "Invalid page type byte {found} on page ({page_region}, {page_index}, order={page_order}), expected LEAF (1) or BRANCH (2)"
+                )
+            }
+            Error::InvalidChildRef {
+                page_region,
+                page_index,
+                page_order,
+                child_index,
+                is_checksum,
+            } => {
+                let kind = if *is_checksum { "checksum" } else { "pointer" };
+                write!(
+                    f,
+                    "Invalid child {kind} at index {child_index} on page ({page_region}, {page_index}, order={page_order})"
+                )
+            }
+            Error::InvalidEntryIndex {
+                page_region,
+                page_index,
+                page_order,
+                entry_index,
+            } => {
+                write!(
+                    f,
+                    "Invalid entry index {entry_index} on page ({page_region}, {page_index}, order={page_order})"
+                )
+            }
+            Error::PageCorrupted {
+                page_region,
+                page_index,
+                page_order,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "Page ({page_region}, {page_index}, order={page_order}) corrupted: {detail}"
+                )
             }
             Error::Io(err) => {
                 write!(f, "I/O error: {err}")

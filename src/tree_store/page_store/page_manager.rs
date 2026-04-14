@@ -556,16 +556,18 @@ impl TransactionalMemory {
         if let Some(ref cb) = self.read_verification_callback {
             match cb(page_num_raw) {
                 ReadVerificationAction::ReturnError => {
-                    Err(StorageError::Corrupted(alloc::format!(
-                        "Read verification failed: page {page_number:?} checksum mismatch"
-                    )))
+                    Err(StorageError::page_corrupted(
+                        page_number,
+                        "read verification checksum mismatch",
+                    ))
                 }
                 ReadVerificationAction::Continue => Ok(()),
             }
         } else {
-            Err(StorageError::Corrupted(alloc::format!(
-                "Read verification failed: page {page_number:?} checksum mismatch"
-            )))
+            Err(StorageError::page_corrupted(
+                page_number,
+                "read verification checksum mismatch",
+            ))
         }
     }
 

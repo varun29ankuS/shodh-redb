@@ -66,9 +66,7 @@ fn multimap_stats_helper(
             let mut is_branch = false;
             for i in 0..accessor.num_pairs() {
                 let entry = accessor.entry(i).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "invalid entry index {i} in multimap_stats_helper leaf"
-                    ))
+                    StorageError::invalid_entry_index(page_number, i)
                 })?;
                 let collection: &UntypedDynamicCollection =
                     UntypedDynamicCollection::new(entry.value());
@@ -94,9 +92,7 @@ fn multimap_stats_helper(
 
             for i in 0..accessor.num_pairs() {
                 let entry = accessor.entry(i).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "invalid entry index {i} in multimap_stats_helper branch iteration"
-                    ))
+                    StorageError::invalid_entry_index(page_number, i)
                 })?;
                 let collection: &UntypedDynamicCollection =
                     UntypedDynamicCollection::new(entry.value());
@@ -161,9 +157,7 @@ fn multimap_stats_helper(
                 fragmented_bytes,
             })
         }
-        other => Err(StorageError::Corrupted(format!(
-            "unexpected page type {other} in multimap stats helper"
-        ))),
+        other => Err(StorageError::invalid_page_type(page_number, other)),
     }
 }
 
@@ -332,9 +326,7 @@ pub(crate) fn relocate_subtrees(
             );
             for i in 0..accessor.num_pairs() {
                 let entry = accessor.entry(i).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "invalid entry index {i} in relocate_subtrees leaf"
-                    ))
+                    StorageError::invalid_entry_index(root.0, i)
                 })?;
                 let collection = UntypedDynamicCollection::from_bytes(entry.value());
                 if matches!(collection.collection_type()?, SubtreeV2) {
@@ -378,10 +370,7 @@ pub(crate) fn relocate_subtrees(
             }
         }
         _ => {
-            return Err(StorageError::Corrupted(format!(
-                "unexpected page type {} in multimap subtree relocation",
-                old_page.memory()[0]
-            )));
+            return Err(StorageError::invalid_page_type(root.0, old_page.memory()[0]));
         }
     }
 
@@ -421,9 +410,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
         );
         for i in 0..accessor.num_pairs() {
             let entry = accessor.entry(i).ok_or_else(|| {
-                StorageError::Corrupted(format!(
-                    "invalid entry index {i} in finalize_dirty_checksums leaf visitor"
-                ))
+                StorageError::invalid_entry_index(leaf_page.get_page_number(), i)
             })?;
             let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
             if matches!(collection.collection_type()?, SubtreeV2) {
@@ -477,9 +464,7 @@ fn parse_subtree_roots<T: Page>(
             );
             for i in 0..accessor.num_pairs() {
                 let entry = accessor.entry(i).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "invalid entry index {i} in parse_subtree_roots"
-                    ))
+                    StorageError::invalid_entry_index(page.get_page_number(), i)
                 })?;
                 let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
                 if matches!(collection.collection_type()?, SubtreeV2) {
@@ -489,10 +474,7 @@ fn parse_subtree_roots<T: Page>(
 
             Ok(result)
         }
-        _ => Err(StorageError::Corrupted(format!(
-            "invalid page type byte {} in parse_subtree_roots",
-            page.memory()[0]
-        ))),
+        _ => Err(StorageError::invalid_page_type(page.get_page_number(), page.memory()[0])),
     }
 }
 
@@ -551,9 +533,7 @@ impl UntypedMultiBtree {
                     // No-op. The tree.visit_pages() call will process this sub-tree
                 }
                 other => {
-                    return Err(StorageError::Corrupted(format!(
-                        "unexpected page type {other} in multimap page visitor"
-                    )));
+                    return Err(StorageError::invalid_page_type(path.page_number(), other));
                 }
             }
             Ok(())
@@ -1491,9 +1471,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                                 .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                         }
                         other => {
-                            return Err(StorageError::Corrupted(format!(
-                                "unexpected page type {other} in multimap remove"
-                            )));
+                            return Err(StorageError::invalid_page_type(new_root, other));
                         }
                     }
                 } else {

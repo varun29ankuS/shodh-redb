@@ -8,7 +8,6 @@ use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
-use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
@@ -31,25 +30,13 @@ pub(super) fn leaf_checksum<T: Page>(
 ) -> Result<Checksum, StorageError> {
     let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
     let last_pair = accessor.num_pairs().checked_sub(1).ok_or_else(|| {
-        StorageError::Corrupted(format!(
-            "Leaf page {:?} corrupted. Number of pairs is zero",
-            page.get_page_number()
-        ))
+        StorageError::page_corrupted(page.get_page_number(), "leaf page has zero pairs")
     })?;
     let end = accessor.value_end(last_pair).ok_or_else(|| {
-        StorageError::Corrupted(format!(
-            "Leaf page {:?} corrupted. Couldn't find offset for pair {}",
-            page.get_page_number(),
-            last_pair,
-        ))
+        StorageError::page_corrupted(page.get_page_number(), "leaf page has invalid pair offset")
     })?;
     if end > page.memory().len() {
-        Err(StorageError::Corrupted(format!(
-            "Leaf page {:?} corrupted. Last offset {} beyond end of data {}",
-            page.get_page_number(),
-            end,
-            page.memory().len()
-        )))
+        Err(StorageError::page_corrupted(page.get_page_number(), "leaf page last offset beyond end of data"))
     } else {
         Ok(xxh3_checksum(&page.memory()[..end]))
     }
@@ -61,25 +48,13 @@ pub(super) fn branch_checksum<T: Page>(
 ) -> Result<Checksum, StorageError> {
     let accessor = BranchAccessor::new(page, fixed_key_size);
     let last_key = accessor.num_keys().checked_sub(1).ok_or_else(|| {
-        StorageError::Corrupted(format!(
-            "Branch page {:?} corrupted. Number of keys is zero",
-            page.get_page_number()
-        ))
+        StorageError::page_corrupted(page.get_page_number(), "branch page has zero keys")
     })?;
     let end = accessor.key_end(last_key).ok_or_else(|| {
-        StorageError::Corrupted(format!(
-            "Branch page {:?} corrupted. Can't find offset for key {}",
-            page.get_page_number(),
-            last_key
-        ))
+        StorageError::page_corrupted(page.get_page_number(), "branch page has invalid key offset")
     })?;
     if end > page.memory().len() {
-        Err(StorageError::Corrupted(format!(
-            "Branch page {:?} corrupted. Last offset {} beyond end of data {}",
-            page.get_page_number(),
-            end,
-            page.memory().len()
-        )))
+        Err(StorageError::page_corrupted(page.get_page_number(), "branch page last offset beyond end of data"))
     } else {
         Ok(xxh3_checksum(&page.memory()[..end]))
     }

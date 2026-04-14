@@ -2,7 +2,7 @@
 name = "shodh-redb"
 description = "Multi-modal embedded database - vectors, blobs, TTL, merge operators, and causal tracking built on ACID B-trees"
 readme = "README.md"
-version = "0.3.2"
+version = "0.3.3"
 exclude = ["fuzz/", "data/"]
 edition.workspace = true
 rust-version.workspace = true

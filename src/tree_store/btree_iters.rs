@@ -1026,9 +1026,9 @@ fn find_iter_unbounded_raw(
         })),
         BRANCH => {
             let accessor = BranchAccessor::new(&page, fixed_key_size);
-            let child_page_number = accessor.child_page(0).ok_or_else(|| {
-                StorageError::invalid_child_pointer(page.get_page_number(), 0)
-            })?;
+            let child_page_number = accessor
+                .child_page(0)
+                .ok_or_else(|| StorageError::invalid_child_pointer(page.get_page_number(), 0))?;
             let child_checksum = accessor.child_checksum(0);
             let child_page = manager.get_page(child_page_number)?;
             if 1 < accessor.count_children() {

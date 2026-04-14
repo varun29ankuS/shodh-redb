@@ -36,7 +36,10 @@ pub(super) fn leaf_checksum<T: Page>(
         StorageError::page_corrupted(page.get_page_number(), "leaf page has invalid pair offset")
     })?;
     if end > page.memory().len() {
-        Err(StorageError::page_corrupted(page.get_page_number(), "leaf page last offset beyond end of data"))
+        Err(StorageError::page_corrupted(
+            page.get_page_number(),
+            "leaf page last offset beyond end of data",
+        ))
     } else {
         Ok(xxh3_checksum(&page.memory()[..end]))
     }
@@ -54,7 +57,10 @@ pub(super) fn branch_checksum<T: Page>(
         StorageError::page_corrupted(page.get_page_number(), "branch page has invalid key offset")
     })?;
     if end > page.memory().len() {
-        Err(StorageError::page_corrupted(page.get_page_number(), "branch page last offset beyond end of data"))
+        Err(StorageError::page_corrupted(
+            page.get_page_number(),
+            "branch page last offset beyond end of data",
+        ))
     } else {
         Ok(xxh3_checksum(&page.memory()[..end]))
     }

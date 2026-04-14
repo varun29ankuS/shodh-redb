@@ -555,12 +555,10 @@ impl TransactionalMemory {
             u64::from(page_number.page_index) | (u64::from(page_number.region) << 32);
         if let Some(ref cb) = self.read_verification_callback {
             match cb(page_num_raw) {
-                ReadVerificationAction::ReturnError => {
-                    Err(StorageError::page_corrupted(
-                        page_number,
-                        "read verification checksum mismatch",
-                    ))
-                }
+                ReadVerificationAction::ReturnError => Err(StorageError::page_corrupted(
+                    page_number,
+                    "read verification checksum mismatch",
+                )),
                 ReadVerificationAction::Continue => Ok(()),
             }
         } else {

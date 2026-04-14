@@ -65,9 +65,9 @@ fn multimap_stats_helper(
             let mut leaf_bytes = 0u64;
             let mut is_branch = false;
             for i in 0..accessor.num_pairs() {
-                let entry = accessor.entry(i).ok_or_else(|| {
-                    StorageError::invalid_entry_index(page_number, i)
-                })?;
+                let entry = accessor
+                    .entry(i)
+                    .ok_or_else(|| StorageError::invalid_entry_index(page_number, i))?;
                 let collection: &UntypedDynamicCollection =
                     UntypedDynamicCollection::new(entry.value());
                 match collection.collection_type()? {
@@ -91,9 +91,9 @@ fn multimap_stats_helper(
             let (mut leaf_pages, mut branch_pages) = if is_branch { (0, 1) } else { (1, 0) };
 
             for i in 0..accessor.num_pairs() {
-                let entry = accessor.entry(i).ok_or_else(|| {
-                    StorageError::invalid_entry_index(page_number, i)
-                })?;
+                let entry = accessor
+                    .entry(i)
+                    .ok_or_else(|| StorageError::invalid_entry_index(page_number, i))?;
                 let collection: &UntypedDynamicCollection =
                     UntypedDynamicCollection::new(entry.value());
                 match collection.collection_type()? {
@@ -325,9 +325,9 @@ pub(crate) fn relocate_subtrees(
                 UntypedDynamicCollection::fixed_width_with(value_size),
             );
             for i in 0..accessor.num_pairs() {
-                let entry = accessor.entry(i).ok_or_else(|| {
-                    StorageError::invalid_entry_index(root.0, i)
-                })?;
+                let entry = accessor
+                    .entry(i)
+                    .ok_or_else(|| StorageError::invalid_entry_index(root.0, i))?;
                 let collection = UntypedDynamicCollection::from_bytes(entry.value());
                 if matches!(collection.collection_type()?, SubtreeV2) {
                     let sub_root = collection.as_subtree();
@@ -370,7 +370,10 @@ pub(crate) fn relocate_subtrees(
             }
         }
         _ => {
-            return Err(StorageError::invalid_page_type(root.0, old_page.memory()[0]));
+            return Err(StorageError::invalid_page_type(
+                root.0,
+                old_page.memory()[0],
+            ));
         }
     }
 
@@ -409,9 +412,9 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
             DynamicCollection::<()>::fixed_width_with(value_size),
         );
         for i in 0..accessor.num_pairs() {
-            let entry = accessor.entry(i).ok_or_else(|| {
-                StorageError::invalid_entry_index(leaf_page.get_page_number(), i)
-            })?;
+            let entry = accessor
+                .entry(i)
+                .ok_or_else(|| StorageError::invalid_entry_index(leaf_page.get_page_number(), i))?;
             let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
             if matches!(collection.collection_type()?, SubtreeV2) {
                 let sub_root = collection.as_subtree();
@@ -463,9 +466,9 @@ fn parse_subtree_roots<T: Page>(
                 DynamicCollection::<()>::fixed_width_with(fixed_value_size),
             );
             for i in 0..accessor.num_pairs() {
-                let entry = accessor.entry(i).ok_or_else(|| {
-                    StorageError::invalid_entry_index(page.get_page_number(), i)
-                })?;
+                let entry = accessor
+                    .entry(i)
+                    .ok_or_else(|| StorageError::invalid_entry_index(page.get_page_number(), i))?;
                 let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
                 if matches!(collection.collection_type()?, SubtreeV2) {
                     result.push(collection.as_subtree());
@@ -474,7 +477,10 @@ fn parse_subtree_roots<T: Page>(
 
             Ok(result)
         }
-        _ => Err(StorageError::invalid_page_type(page.get_page_number(), page.memory()[0])),
+        _ => Err(StorageError::invalid_page_type(
+            page.get_page_number(),
+            page.memory()[0],
+        )),
     }
 }
 

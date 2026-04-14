@@ -34,7 +34,7 @@ sha2 = { version = "0.10", default-features = false }
 zstd = { version = "0.13.3", optional = true, default-features = false }
 hashbrown = "0.15"
 portable-atomic = { version = "1", default-features = false, features = ["fallback"] }
-spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex", "rwlock"] }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex", "rwlock", "portable-atomic"] }
 
 [target.'cfg(target_os = "wasi")'.dependencies]
 libc = "0.2.174"

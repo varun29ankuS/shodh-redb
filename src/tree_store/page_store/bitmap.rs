@@ -331,12 +331,17 @@ impl U64GroupedBitmap {
         let old_len = self.len;
         self.len = new_len;
         if old_len < new_len {
-            // TODO: optimize this loop to set whole words at a time
-            for i in old_len..new_len {
+            // Handle the partial boundary word at old_len (if not word-aligned).
+            // All fully new words beyond this are already correct from Vec::resize.
+            let old_bit = u64::from(old_len % 64);
+            if old_bit != 0 {
+                let word_idx = (old_len / 64) as usize;
                 if full {
-                    self.set(i);
+                    // Set bits [old_bit..64) in the boundary word
+                    self.data[word_idx] |= !((1u64 << old_bit) - 1);
                 } else {
-                    self.clear(i);
+                    // Clear bits [old_bit..64) in the boundary word
+                    self.data[word_idx] &= (1u64 << old_bit) - 1;
                 }
             }
         }

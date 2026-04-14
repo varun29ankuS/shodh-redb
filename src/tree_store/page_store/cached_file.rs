@@ -9,9 +9,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::{Index, IndexMut};
 use core::slice::SliceIndex;
-#[cfg(feature = "cache_metrics")]
-use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(feature = "cache_metrics")]
+use portable_atomic::AtomicU64;
 
 pub(super) struct WritablePage {
     buffer: Arc<Mutex<LRUWriteCache>>,

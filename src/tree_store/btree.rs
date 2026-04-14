@@ -121,24 +121,14 @@ impl UntypedBtree {
                 let accessor = BranchAccessor::new(&page, self.key_width);
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).ok_or_else(|| {
-                        StorageError::Corrupted(format!(
-                            "invalid child page pointer at index {} on page {:?}",
-                            i,
-                            page.get_page_number()
-                        ))
+                        StorageError::invalid_child_pointer(page.get_page_number(), i)
                     })?;
                     let child_path = path.with_child(child_page);
                     self.visit_pages_helper(child_path, visitor)?;
                 }
             }
             x => {
-                return Err(StorageError::Corrupted(format!(
-                    "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                    x,
-                    page.get_page_number(),
-                    LEAF,
-                    BRANCH
-                )));
+                return Err(StorageError::invalid_page_type(page.get_page_number(), x));
             }
         }
 
@@ -328,9 +318,10 @@ impl UntypedBtreeMut {
 
     fn finalize_dirty_checksums_helper(&mut self, page_number: PageNumber) -> Result<Checksum> {
         if !self.mem.uncommitted(page_number) {
-            return Err(StorageError::Corrupted(format!(
-                "finalize_dirty_checksums_helper called on committed page {page_number:?}"
-            )));
+            return Err(StorageError::page_corrupted(
+                page_number,
+                "finalize_dirty_checksums_helper called on committed page",
+            ));
         }
         let mut page = self.mem.get_page_mut(page_number)?;
 
@@ -340,11 +331,9 @@ impl UntypedBtreeMut {
                 let accessor = BranchAccessor::new(&page, self.key_width);
                 let mut new_children = vec![];
                 for i in 0..accessor.count_children() {
-                    let child_page = accessor.child_page(i).ok_or_else(|| {
-                        StorageError::Corrupted(format!(
-                            "invalid child page pointer at index {i} on page {page_number:?}"
-                        ))
-                    })?;
+                    let child_page = accessor
+                        .child_page(i)
+                        .ok_or_else(|| StorageError::invalid_child_pointer(page_number, i))?;
                     if self.mem.uncommitted(child_page) {
                         let new_checksum = self.finalize_dirty_checksums_helper(child_page)?;
                         new_children.push(Some((i, child_page, new_checksum)));
@@ -362,13 +351,7 @@ impl UntypedBtreeMut {
 
                 branch_checksum(&page, self.key_width)
             }
-            x => Err(StorageError::Corrupted(format!(
-                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                x,
-                page.get_page_number(),
-                LEAF,
-                BRANCH
-            ))),
+            x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
         }
     }
 
@@ -393,13 +376,7 @@ impl UntypedBtreeMut {
                     self.dirty_leaf_visitor_helper(page_number, &visitor)?;
                 }
                 x => {
-                    return Err(StorageError::Corrupted(format!(
-                        "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                        x,
-                        page.get_page_number(),
-                        LEAF,
-                        BRANCH
-                    )));
+                    return Err(StorageError::invalid_page_type(page.get_page_number(), x));
                 }
             }
         }
@@ -412,9 +389,10 @@ impl UntypedBtreeMut {
         F: Fn(PageMut) -> Result,
     {
         if !self.mem.uncommitted(page_number) {
-            return Err(StorageError::Corrupted(format!(
-                "dirty_leaf_visitor_helper called on committed page {page_number:?}"
-            )));
+            return Err(StorageError::page_corrupted(
+                page_number,
+                "dirty_leaf_visitor_helper called on committed page",
+            ));
         }
         let page = self.mem.get_page_mut(page_number)?;
 
@@ -425,24 +403,16 @@ impl UntypedBtreeMut {
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
                 for i in 0..accessor.count_children() {
-                    let child_page = accessor.child_page(i).ok_or_else(|| {
-                        StorageError::Corrupted(format!(
-                            "invalid child page pointer at index {i} on page {page_number:?}"
-                        ))
-                    })?;
+                    let child_page = accessor
+                        .child_page(i)
+                        .ok_or_else(|| StorageError::invalid_child_pointer(page_number, i))?;
                     if self.mem.uncommitted(child_page) {
                         self.dirty_leaf_visitor_helper(child_page, visitor)?;
                     }
                 }
             }
             x => {
-                return Err(StorageError::Corrupted(format!(
-                    "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                    x,
-                    page.get_page_number(),
-                    LEAF,
-                    BRANCH
-                )));
+                return Err(StorageError::invalid_page_type(page.get_page_number(), x));
             }
         }
 
@@ -486,11 +456,9 @@ impl UntypedBtreeMut {
                 let accessor = BranchAccessor::new(&old_page, self.key_width);
                 let mut mutator = BranchMutator::new(new_page.memory_mut()?);
                 for i in 0..accessor.count_children() {
-                    let child = accessor.child_page(i).ok_or_else(|| {
-                        StorageError::Corrupted(format!(
-                            "invalid child page pointer at index {i} on page {page_number:?}"
-                        ))
-                    })?;
+                    let child = accessor
+                        .child_page(i)
+                        .ok_or_else(|| StorageError::invalid_child_pointer(page_number, i))?;
                     if let Some((new_child, new_checksum)) =
                         self.relocate_helper(child, relocation_map)?
                     {
@@ -499,13 +467,10 @@ impl UntypedBtreeMut {
                 }
             }
             x => {
-                return Err(StorageError::Corrupted(format!(
-                    "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                    x,
+                return Err(StorageError::invalid_page_type(
                     old_page.get_page_number(),
-                    LEAF,
-                    BRANCH
-                )));
+                    x,
+                ));
             }
         }
 
@@ -719,6 +684,48 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         Ok(result)
     }
 
+    pub(crate) fn pop_first(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'_, V>)>> {
+        let compression = self.compression();
+        let mut freed_pages = self.freed_pages.lock();
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
+            &mut self.root,
+            self.mem.clone(),
+            freed_pages.as_mut(),
+            self.allocated_pages.clone(),
+            compression,
+        );
+        match operation.delete_first()? {
+            Some((key_bytes, value_guard)) => Ok(Some((
+                AccessGuard::with_owned_value(key_bytes),
+                value_guard,
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn pop_last(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'_, V>)>> {
+        let compression = self.compression();
+        let mut freed_pages = self.freed_pages.lock();
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
+            &mut self.root,
+            self.mem.clone(),
+            freed_pages.as_mut(),
+            self.allocated_pages.clone(),
+            compression,
+        );
+        match operation.delete_last()? {
+            Some((key_bytes, value_guard)) => Ok(Some((
+                AccessGuard::with_owned_value(key_bytes),
+                value_guard,
+            ))),
+            None => Ok(None),
+        }
+    }
+
     #[allow(dead_code)]
     #[cfg(feature = "std")]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
@@ -779,10 +786,10 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                         .page_size_bytes(page_size)
                         .try_into()
                         .map_err(|_| {
-                            StorageError::Corrupted(format!(
-                                "page size bytes overflow usize for page {:?}",
-                                root.root
-                            ))
+                            StorageError::page_corrupted(
+                                root.root,
+                                "page size bytes overflow usize",
+                            )
                         })?;
                 let mut new_page = self.mem.allocate(required, &mut allocated)?;
                 let old_page = self.mem.get_page(root.root)?;
@@ -814,11 +821,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), value_width);
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).ok_or_else(|| {
-                        StorageError::Corrupted(format!(
-                            "invalid value range at entry index {} on page {:?}",
-                            entry_index,
-                            page.get_page_number()
-                        ))
+                        StorageError::invalid_entry_index(page.get_page_number(), entry_index)
                     })?;
                     let root_header = self.root.as_mut().ok_or_else(|| {
                         StorageError::Corrupted(String::from(
@@ -863,9 +866,10 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                         .page_size_bytes(page_size)
                         .try_into()
                         .map_err(|_| {
-                            StorageError::Corrupted(format!(
-                                "page size bytes overflow usize for page {child_page:?}"
-                            ))
+                            StorageError::page_corrupted(
+                                child_page,
+                                "page size bytes overflow usize",
+                            )
                         })?;
                     let mut new_page = self.mem.allocate(required, &mut allocated)?;
                     let old_child_page = self.mem.get_page(child_page)?;
@@ -881,13 +885,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                 };
                 self.get_mut_helper(Some((page, child_index)), child_page_mut, query)
             }
-            x => Err(StorageError::Corrupted(format!(
-                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                x,
-                page.get_page_number(),
-                LEAF,
-                BRANCH
-            ))),
+            x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
         }
     }
 
@@ -1101,16 +1099,12 @@ impl RawBtree {
                 }
                 let accessor = BranchAccessor::new(&page, self.fixed_key_size);
                 for i in 0..accessor.count_children() {
-                    let child = accessor.child_page(i).ok_or_else(|| {
-                        StorageError::Corrupted(format!(
-                            "invalid child page pointer at index {i} on page {page_number:?}"
-                        ))
-                    })?;
-                    let checksum = accessor.child_checksum(i).ok_or_else(|| {
-                        StorageError::Corrupted(format!(
-                            "invalid child checksum at index {i} on page {page_number:?}"
-                        ))
-                    })?;
+                    let child = accessor
+                        .child_page(i)
+                        .ok_or_else(|| StorageError::invalid_child_pointer(page_number, i))?;
+                    let checksum = accessor
+                        .child_checksum(i)
+                        .ok_or_else(|| StorageError::invalid_child_checksum(page_number, i))?;
                     if !self.verify_checksum_helper(child, checksum)? {
                         return Ok(false);
                     }
@@ -1503,11 +1497,7 @@ impl<K: Key, V: Value> Btree<K, V> {
                     LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).ok_or_else(|| {
-                        StorageError::Corrupted(format!(
-                            "invalid value range at entry index {} on page {:?}",
-                            entry_index,
-                            page.get_page_number()
-                        ))
+                        StorageError::invalid_entry_index(page.get_page_number(), entry_index)
                     })?;
                     let guard = if self.compression().is_enabled() {
                         AccessGuard::with_page_decompress(page, start..end)?
@@ -1524,11 +1514,7 @@ impl<K: Key, V: Value> Btree<K, V> {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let (child_index, child_page_num) = accessor.child_for_key::<K>(query);
                 let child_checksum = accessor.child_checksum(child_index).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "invalid child checksum at index {} on page {:?}",
-                        child_index,
-                        page.get_page_number()
-                    ))
+                    StorageError::invalid_child_checksum(page.get_page_number(), child_index)
                 })?;
                 self.get_helper(
                     self.mem.get_page_extended(child_page_num, self.hint)?,
@@ -1536,13 +1522,7 @@ impl<K: Key, V: Value> Btree<K, V> {
                     child_checksum,
                 )
             }
-            x => Err(StorageError::Corrupted(format!(
-                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                x,
-                page.get_page_number(),
-                LEAF,
-                BRANCH
-            ))),
+            x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
         }
     }
 
@@ -1575,12 +1555,9 @@ impl<K: Key, V: Value> Btree<K, V> {
                 self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor =
                     LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
-                let (key_range, value_range) = accessor.entry_ranges(0).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "invalid entry ranges at index 0 on page {:?}",
-                        page.get_page_number()
-                    ))
-                })?;
+                let (key_range, value_range) = accessor
+                    .entry_ranges(0)
+                    .ok_or_else(|| StorageError::invalid_entry_index(page.get_page_number(), 0))?;
                 let key_guard = AccessGuard::with_page(page.clone(), key_range);
                 let value_guard = if self.compression().is_enabled() {
                     AccessGuard::with_page_decompress(page, value_range)?
@@ -1593,29 +1570,17 @@ impl<K: Key, V: Value> Btree<K, V> {
                 self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let child_page = accessor.child_page(0).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "invalid child page pointer at index 0 on page {:?}",
-                        page.get_page_number()
-                    ))
+                    StorageError::invalid_child_pointer(page.get_page_number(), 0)
                 })?;
                 let child_checksum = accessor.child_checksum(0).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "invalid child checksum at index 0 on page {:?}",
-                        page.get_page_number()
-                    ))
+                    StorageError::invalid_child_checksum(page.get_page_number(), 0)
                 })?;
                 self.first_helper(
                     self.mem.get_page_extended(child_page, self.hint)?,
                     child_checksum,
                 )
             }
-            x => Err(StorageError::Corrupted(format!(
-                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                x,
-                page.get_page_number(),
-                LEAF,
-                BRANCH
-            ))),
+            x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
         }
     }
 
@@ -1651,11 +1616,7 @@ impl<K: Key, V: Value> Btree<K, V> {
                 let last_index = accessor.num_pairs() - 1;
                 let (key_range, value_range) =
                     accessor.entry_ranges(last_index).ok_or_else(|| {
-                        StorageError::Corrupted(format!(
-                            "invalid entry ranges at index {} on page {:?}",
-                            last_index,
-                            page.get_page_number()
-                        ))
+                        StorageError::invalid_entry_index(page.get_page_number(), last_index)
                     })?;
                 let key_guard = AccessGuard::with_page(page.clone(), key_range);
                 let value_guard = if self.compression().is_enabled() {
@@ -1670,31 +1631,17 @@ impl<K: Key, V: Value> Btree<K, V> {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let last_child = accessor.count_children() - 1;
                 let child_page = accessor.child_page(last_child).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "invalid child page pointer at index {} on page {:?}",
-                        last_child,
-                        page.get_page_number()
-                    ))
+                    StorageError::invalid_child_pointer(page.get_page_number(), last_child)
                 })?;
                 let child_checksum = accessor.child_checksum(last_child).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "invalid child checksum at index {} on page {:?}",
-                        last_child,
-                        page.get_page_number()
-                    ))
+                    StorageError::invalid_child_checksum(page.get_page_number(), last_child)
                 })?;
                 self.last_helper(
                     self.mem.get_page_extended(child_page, self.hint)?,
                     child_checksum,
                 )
             }
-            x => Err(StorageError::Corrupted(format!(
-                "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                x,
-                page.get_page_number(),
-                LEAF,
-                BRANCH
-            ))),
+            x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
         }
     }
 
@@ -1819,14 +1766,10 @@ fn stats_helper(
             let overhead_bytes = accessor.total_length() - leaf_bytes;
             let fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
             let stored_leaf_bytes: u64 = leaf_bytes.try_into().map_err(|_| {
-                StorageError::Corrupted(format!(
-                    "leaf bytes {leaf_bytes} overflows u64 on page {page_number:?}"
-                ))
+                StorageError::page_corrupted(page_number, "leaf bytes overflows u64")
             })?;
             let metadata_bytes: u64 = overhead_bytes.try_into().map_err(|_| {
-                StorageError::Corrupted(format!(
-                    "overhead bytes {overhead_bytes} overflows u64 on page {page_number:?}"
-                ))
+                StorageError::page_corrupted(page_number, "overhead bytes overflows u64")
             })?;
             Ok(BtreeStats {
                 tree_height: 1,
@@ -1866,12 +1809,6 @@ fn stats_helper(
                 fragmented_bytes,
             })
         }
-        x => Err(StorageError::Corrupted(format!(
-            "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-            x,
-            page.get_page_number(),
-            LEAF,
-            BRANCH
-        ))),
+        x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
     }
 }

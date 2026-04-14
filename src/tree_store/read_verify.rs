@@ -1,4 +1,5 @@
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
+use portable_atomic::AtomicU64;
 
 /// Lock-free xorshift64 PRNG for sampling read verification.
 ///

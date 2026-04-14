@@ -11,7 +11,6 @@ use crate::types::{Key, Value};
 use crate::{Result, StorageError};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
-use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -84,11 +83,7 @@ impl RangeIterState {
             } => {
                 let accessor = BranchAccessor::new(&page, fixed_key_size);
                 let child_page_num = accessor.child_page(child).ok_or_else(|| {
-                    StorageError::Corrupted(format!(
-                        "branch page {:?} has no child at index {}",
-                        page.get_page_number(),
-                        child,
-                    ))
+                    StorageError::invalid_child_pointer(page.get_page_number(), child)
                 })?;
                 let child_page = manager.get_page(child_page_num)?;
                 // Inline read verification for the child page
@@ -100,9 +95,10 @@ impl RangeIterState {
                         LEAF => leaf_checksum(&child_page, fixed_key_size, fixed_value_size)?,
                         BRANCH => branch_checksum(&child_page, fixed_key_size)?,
                         _ => {
-                            return Err(crate::StorageError::Corrupted(String::from(
+                            return Err(StorageError::page_corrupted(
+                                child_page_num,
                                 "Read verification: unknown page type in iterator",
-                            )));
+                            ));
                         }
                     };
                     if computed != expected {
@@ -163,13 +159,10 @@ impl RangeIterState {
                             parent,
                         }))
                     }
-                    x => Err(StorageError::Corrupted(format!(
-                        "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-                        x,
+                    x => Err(StorageError::invalid_page_type(
                         child_page.get_page_number(),
-                        LEAF,
-                        BRANCH
-                    ))),
+                        x,
+                    )),
                 }
             }
         }
@@ -310,9 +303,7 @@ impl AllPageNumbersBtreeIter {
                 parent: None,
             },
             x => {
-                return Err(StorageError::Corrupted(format!(
-                    "Invalid page type byte {x} on page {root:?}, expected LEAF ({LEAF}) or BRANCH ({BRANCH})"
-                )));
+                return Err(StorageError::invalid_page_type(root, x));
             }
         };
         Ok(Self {
@@ -776,9 +767,10 @@ fn maybe_verify_iter_page(
             LEAF => leaf_checksum(page, fixed_key_size, fixed_value_size)?,
             BRANCH => branch_checksum(page, fixed_key_size)?,
             _ => {
-                return Err(crate::StorageError::Corrupted(String::from(
+                return Err(StorageError::page_corrupted(
+                    page.get_page_number(),
                     "Read verification: unknown page type in iterator init",
-                )));
+                ));
             }
         };
         if computed != expected {
@@ -828,11 +820,7 @@ fn find_iter_unbounded<K: Key, V: Value>(
                 0
             };
             let child_page_number = accessor.child_page(child_index).ok_or_else(|| {
-                StorageError::Corrupted(format!(
-                    "branch page {:?} has no child at index {}",
-                    page.get_page_number(),
-                    child_index,
-                ))
+                StorageError::invalid_child_pointer(page.get_page_number(), child_index)
             })?;
             let child_checksum = accessor.child_checksum(child_index);
             let child_page = manager.get_page(child_page_number)?;
@@ -864,13 +852,7 @@ fn find_iter_unbounded<K: Key, V: Value>(
                 child_checksum,
             )
         }
-        x => Err(StorageError::Corrupted(format!(
-            "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-            x,
-            page.get_page_number(),
-            LEAF,
-            BRANCH
-        ))),
+        x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
     }
 }
 
@@ -941,13 +923,7 @@ fn find_iter_left<K: Key, V: Value>(
                 child_checksum,
             )
         }
-        x => Err(StorageError::Corrupted(format!(
-            "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-            x,
-            page.get_page_number(),
-            LEAF,
-            BRANCH
-        ))),
+        x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
     }
 }
 
@@ -1016,13 +992,7 @@ fn find_iter_right<K: Key, V: Value>(
                 child_checksum,
             )
         }
-        x => Err(StorageError::Corrupted(format!(
-            "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-            x,
-            page.get_page_number(),
-            LEAF,
-            BRANCH
-        ))),
+        x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
     }
 }
 
@@ -1056,12 +1026,9 @@ fn find_iter_unbounded_raw(
         })),
         BRANCH => {
             let accessor = BranchAccessor::new(&page, fixed_key_size);
-            let child_page_number = accessor.child_page(0).ok_or_else(|| {
-                StorageError::Corrupted(format!(
-                    "branch page {:?} has no child at index 0",
-                    page.get_page_number(),
-                ))
-            })?;
+            let child_page_number = accessor
+                .child_page(0)
+                .ok_or_else(|| StorageError::invalid_child_pointer(page.get_page_number(), 0))?;
             let child_checksum = accessor.child_checksum(0);
             let child_page = manager.get_page(child_page_number)?;
             if 1 < accessor.count_children() {
@@ -1082,13 +1049,7 @@ fn find_iter_unbounded_raw(
                 child_checksum,
             )
         }
-        x => Err(StorageError::Corrupted(format!(
-            "Invalid page type byte {} on page {:?}, expected LEAF ({}) or BRANCH ({})",
-            x,
-            page.get_page_number(),
-            LEAF,
-            BRANCH
-        ))),
+        x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
     }
 }
 

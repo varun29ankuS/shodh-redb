@@ -51,6 +51,12 @@ struct InsertionResult<'a, V: Value + 'static> {
     old_value: Option<AccessGuard<'a, V>>,
 }
 
+enum DeleteTarget<'a> {
+    Key(&'a [u8]),
+    First,
+    Last,
+}
+
 pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
     root: &'b mut Option<BtreeHeader>,
     modify_uncommitted: bool,
@@ -58,6 +64,7 @@ pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
     freed: &'b mut Vec<PageNumber>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     compression: CompressionConfig,
+    extracted_key: Option<Vec<u8>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
@@ -78,6 +85,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             freed,
             allocated,
             compression,
+            extracted_key: None,
             _key_type: Default::default(),
             _value_type: Default::default(),
             _lifetime: Default::default(),
@@ -100,6 +108,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             freed,
             allocated,
             compression,
+            extracted_key: None,
             _key_type: Default::default(),
             _value_type: Default::default(),
             _lifetime: Default::default(),
@@ -135,8 +144,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             length,
         }) = *self.root
         {
-            let (deletion_result, found) =
-                *self.delete_helper(self.mem.get_page(p)?, checksum, K::as_bytes(key).as_ref())?;
+            let (deletion_result, found) = *self.delete_helper(
+                self.mem.get_page(p)?,
+                checksum,
+                DeleteTarget::Key(K::as_bytes(key).as_ref()),
+            )?;
             let new_length = if found.is_some() { length - 1 } else { length };
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
@@ -171,6 +183,63 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         } else {
             Ok(None)
         }
+    }
+
+    fn delete_extreme(
+        &mut self,
+        target: DeleteTarget<'_>,
+    ) -> Result<Option<(Vec<u8>, AccessGuard<'a, V>)>> {
+        if let Some(BtreeHeader {
+            root: p,
+            checksum,
+            length,
+        }) = *self.root
+        {
+            self.extracted_key = None;
+            let (deletion_result, found) =
+                *self.delete_helper(self.mem.get_page(p)?, checksum, target)?;
+            let new_length = if found.is_some() { length - 1 } else { length };
+            let new_root = match deletion_result {
+                Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
+                DeletedLeaf => None,
+                PartialLeaf { page, deleted_pair } => {
+                    let accessor = LeafAccessor::new(&page, K::fixed_width(), self.value_width());
+                    let mut builder = LeafBuilder::new(
+                        &self.mem,
+                        &self.allocated,
+                        accessor.num_pairs() - 1,
+                        K::fixed_width(),
+                        self.value_width(),
+                    );
+                    builder.push_all_except(&accessor, Some(deleted_pair));
+                    let page = builder.build()?;
+                    assert_eq!(new_length, accessor.num_pairs() as u64 - 1);
+                    Some(BtreeHeader::new(
+                        page.get_page_number(),
+                        DEFERRED,
+                        new_length,
+                    ))
+                }
+                PartialBranch(page_number, checksum) => {
+                    Some(BtreeHeader::new(page_number, checksum, new_length))
+                }
+                DeletedBranch(remaining_child, checksum) => {
+                    Some(BtreeHeader::new(remaining_child, checksum, new_length))
+                }
+            };
+            *self.root = new_root;
+            Ok(found.map(|v| (self.extracted_key.take().unwrap(), v)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn delete_first(&mut self) -> Result<Option<(Vec<u8>, AccessGuard<'a, V>)>> {
+        self.delete_extreme(DeleteTarget::First)
+    }
+
+    pub(crate) fn delete_last(&mut self) -> Result<Option<(Vec<u8>, AccessGuard<'a, V>)>> {
+        self.delete_extreme(DeleteTarget::Last)
     }
 
     #[allow(clippy::type_complexity)]
@@ -571,10 +640,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 result
             }
             x => {
-                return Err(StorageError::invalid_page_type(
-                    page.get_page_number(),
-                    x,
-                ));
+                return Err(StorageError::invalid_page_type(page.get_page_number(), x));
             }
         })
     }
@@ -621,10 +687,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 mutator.write_child_page(child_index, child_page, DEFERRED);
             }
             x => {
-                return Err(StorageError::invalid_page_type(
-                    page.get_page_number(),
-                    x,
-                ));
+                return Err(StorageError::invalid_page_type(page.get_page_number(), x));
             }
         }
 
@@ -635,12 +698,30 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         &mut self,
         page: PageImpl,
         checksum: Checksum,
-        key: &[u8],
+        target: DeleteTarget<'_>,
     ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
         let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
-        let (position, found) = accessor.position::<K>(key);
+        let (position, found) = match target {
+            DeleteTarget::Key(key) => accessor.position::<K>(key),
+            DeleteTarget::First => {
+                if accessor.num_pairs() > 0 {
+                    (0, true)
+                } else {
+                    (0, false)
+                }
+            }
+            DeleteTarget::Last => {
+                let n = accessor.num_pairs();
+                if n > 0 { (n - 1, true) } else { (0, false) }
+            }
+        };
         if !found {
             return Ok(Box::new((Subtree(page.get_page_number(), checksum), None)));
+        }
+        // Extract key bytes for pop operations before any page modifications
+        if matches!(target, DeleteTarget::First | DeleteTarget::Last) {
+            let entry = accessor.entry(position).unwrap();
+            self.extracted_key = Some(entry.key().to_vec());
         }
         let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
             - accessor.length_of_pairs(position, position + 1);
@@ -763,14 +844,24 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         &mut self,
         page: PageImpl,
         checksum: Checksum,
-        key: &[u8],
+        target: DeleteTarget<'_>,
     ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
         let accessor = BranchAccessor::new(&page, K::fixed_width());
         let original_page_number = page.get_page_number();
-        let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
+        let (child_index, child_page_number) = match target {
+            DeleteTarget::Key(key) => accessor.child_for_key::<K>(key),
+            DeleteTarget::First => (0, accessor.child_page(0).unwrap()),
+            DeleteTarget::Last => {
+                let last = accessor.count_children() - 1;
+                (last, accessor.child_page(last).unwrap())
+            }
+        };
         let child_checksum = accessor.child_checksum(child_index).unwrap();
-        let (result, found) =
-            *self.delete_helper(self.mem.get_page(child_page_number)?, child_checksum, key)?;
+        let (result, found) = *self.delete_helper(
+            self.mem.get_page(child_page_number)?,
+            child_checksum,
+            target,
+        )?;
         if found.is_none() {
             return Ok(Box::new((Subtree(original_page_number, checksum), None)));
         }
@@ -1076,12 +1167,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         &mut self,
         page: PageImpl,
         checksum: Checksum,
-        key: &[u8],
+        target: DeleteTarget<'_>,
     ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
         let page_type = page.memory()[0];
         match page_type {
-            LEAF => self.delete_leaf_helper(page, checksum, key),
-            BRANCH => self.delete_branch_helper(page, checksum, key),
+            LEAF => self.delete_leaf_helper(page, checksum, target),
+            BRANCH => self.delete_branch_helper(page, checksum, target),
             x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
         }
     }

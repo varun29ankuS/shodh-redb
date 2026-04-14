@@ -114,42 +114,12 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
 
     /// Removes and returns the first key-value pair in the table
     pub fn pop_first(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
-        // TODO: optimize this
-        let first = self
-            .iter()?
-            .next()
-            .map(|x| x.map(|(key, _)| K::as_bytes(&key.value()).as_ref().to_vec()));
-        if let Some(owned_key) = first {
-            let owned_key = owned_key?;
-            let key = K::from_bytes(&owned_key);
-            let value = self.remove(&key)?.ok_or_else(|| {
-                StorageError::Corrupted("key disappeared during pop operation".into())
-            })?;
-            drop(key);
-            Ok(Some((AccessGuard::with_owned_value(owned_key), value)))
-        } else {
-            Ok(None)
-        }
+        self.tree.pop_first()
     }
 
     /// Removes and returns the last key-value pair in the table
     pub fn pop_last(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
-        // TODO: optimize this
-        let last = self
-            .iter()?
-            .next_back()
-            .map(|x| x.map(|(key, _)| K::as_bytes(&key.value()).as_ref().to_vec()));
-        if let Some(owned_key) = last {
-            let owned_key = owned_key?;
-            let key = K::from_bytes(&owned_key);
-            let value = self.remove(&key)?.ok_or_else(|| {
-                StorageError::Corrupted("key disappeared during pop operation".into())
-            })?;
-            drop(key);
-            Ok(Some((AccessGuard::with_owned_value(owned_key), value)))
-        } else {
-            Ok(None)
-        }
+        self.tree.pop_last()
     }
 
     /// Applies `predicate` to all key-value pairs. All entries for which
@@ -323,7 +293,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
 
         // Copy key and existing value bytes, then drop the access guard
         // to release the immutable borrow before calling insert/remove.
-        // This is the same pattern used by pop_first()/pop_last().
+        // Copy key and existing value bytes, then drop the access guard
+        // to release the immutable borrow before calling insert/remove.
         let key_bytes = K::as_bytes(key_ref).as_ref().to_vec();
         let existing_bytes: Option<Vec<u8>> = {
             let guard = self.get(key_ref)?;

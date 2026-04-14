@@ -233,7 +233,7 @@ jobs:
       - name: CLI smoke test (Unix)
         if: runner.os != 'Windows'
         run: |
-          cargo run --example create_test_db
+          cargo run -p shodh-redb-cli --example create_test_db
           cargo run -p shodh-redb-cli -- info test.redb
           cargo run -p shodh-redb-cli -- tables test.redb
           cargo run -p shodh-redb-cli -- stats test.redb
@@ -247,7 +247,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cargo run --example create_test_db
+          cargo run -p shodh-redb-cli --example create_test_db
           cargo run -p shodh-redb-cli -- info test.redb
           cargo run -p shodh-redb-cli -- tables test.redb
           cargo run -p shodh-redb-cli -- stats test.redb

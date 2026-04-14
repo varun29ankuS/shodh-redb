@@ -2590,7 +2590,8 @@ mod test {
     use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::Ordering;
+    use portable_atomic::AtomicU64;
 
     #[derive(Debug)]
     struct FailingBackend {

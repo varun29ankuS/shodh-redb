@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::ops::{Index, IndexMut};
 use core::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
-use core::sync::atomic::AtomicU64;
+use portable_atomic::AtomicU64;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub(super) struct WritablePage {

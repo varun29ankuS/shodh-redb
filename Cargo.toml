@@ -15,7 +15,7 @@ categories = ["database-implementations", "data-structures", "no-std"]
 
 [workspace]
 members = [".", "crates/redb-bench", "crates/redb-cli", "crates/redb-derive", "crates/redb-python"]
-default-members = [".", "crates/redb-cli", "crates/redb-derive", "crates/redb-python"]
+default-members = [".", "crates/redb-derive"]
 
 [workspace.package]
 edition = "2024"
@@ -33,6 +33,7 @@ lz4_flex = { version = "0.11.5", optional = true }
 sha2 = { version = "0.10", default-features = false }
 zstd = { version = "0.13.3", optional = true, default-features = false }
 hashbrown = "0.15"
+portable-atomic = { version = "1", default-features = false, features = ["fallback"] }
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex", "rwlock"] }
 
 [target.'cfg(target_os = "wasi")'.dependencies]

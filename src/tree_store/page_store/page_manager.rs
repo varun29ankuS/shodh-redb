@@ -155,7 +155,7 @@ pub(crate) struct TransactionalMemory {
     // Size of the EOF mirror header appended after data. Non-zero after a
     // successful durable commit writes the mirror. Used by file_len() to
     // exclude the mirror so that new blob regions are placed correctly.
-    eof_mirror_size: core::sync::atomic::AtomicU64,
+    eof_mirror_size: portable_atomic::AtomicU64,
     // Read integrity verification
     read_verification: ReadVerification,
     sampling_rng: SamplingRng,
@@ -407,7 +407,7 @@ impl TransactionalMemory {
             region_header_with_padding_size: region_header_size,
             compression,
             pending_blob_state: Mutex::new(BlobCommitState::default()),
-            eof_mirror_size: core::sync::atomic::AtomicU64::new(initial_mirror_size),
+            eof_mirror_size: portable_atomic::AtomicU64::new(initial_mirror_size),
             read_verification,
             sampling_rng: SamplingRng::new(0xDEAD_BEEF_CAFE_1337),
             read_verification_callback,
@@ -523,7 +523,7 @@ impl TransactionalMemory {
             region_header_with_padding_size: region_header_size,
             compression,
             pending_blob_state: Mutex::new(BlobCommitState::default()),
-            eof_mirror_size: core::sync::atomic::AtomicU64::new(0),
+            eof_mirror_size: portable_atomic::AtomicU64::new(0),
             read_verification: ReadVerification::None,
             sampling_rng: SamplingRng::new(0xDEAD_BEEF_CAFE_1337),
             read_verification_callback: None,

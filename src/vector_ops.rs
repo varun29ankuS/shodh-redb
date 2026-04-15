@@ -433,17 +433,20 @@ pub fn quantize_scalar<const N: usize>(v: &[f32; N]) -> SQVec<N> {
             codes,
         };
     }
-    if range > 0.0 {
+    if range >= f32::MIN_POSITIVE {
         let inv_range = 255.0 / range;
-        for (i, &x) in v.iter().enumerate() {
-            // Quantize to [0, 255]: value is guaranteed non-negative and <= 255.5
-            // because x is clamped within [min_val, max_val].
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let q = ((x - min_val) * inv_range + 0.5) as u8;
-            codes[i] = q;
+        if inv_range.is_finite() {
+            for (i, &x) in v.iter().enumerate() {
+                // Quantize to [0, 255]: value is guaranteed non-negative and <= 255.5
+                // because x is clamped within [min_val, max_val].
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let q = ((x - min_val) * inv_range + 0.5) as u8;
+                codes[i] = q;
+            }
         }
+        // else: inv_range is Inf/NaN from a subnormal range; treat as zero-range
     }
-    // If range == 0 all codes stay 0, and dequantize returns min_val for all
+    // If range < MIN_POSITIVE all codes stay 0, and dequantize returns min_val for all
 
     SQVec {
         min_val,

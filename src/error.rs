@@ -139,6 +139,9 @@ pub enum StorageError {
         /// Static description of the corruption
         detail: &'static str,
     },
+    /// Timed out waiting for a write transaction lock (`no_std` spin-lock).
+    /// This is transient contention, not corruption.
+    LockTimeout(String),
     Io(BackendError),
     PreviousIo,
     DatabaseClosed,
@@ -240,6 +243,7 @@ impl From<StorageError> for Error {
                 page_order,
                 detail,
             },
+            StorageError::LockTimeout(msg) => Error::LockTimeout(msg),
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
@@ -344,6 +348,9 @@ impl Display for StorageError {
                     f,
                     "Page ({page_region}, {page_index}, order={page_order}) corrupted: {detail}"
                 )
+            }
+            StorageError::LockTimeout(msg) => {
+                write!(f, "Lock timeout: {msg}")
             }
             StorageError::Io(err) => {
                 write!(f, "I/O error: {err}")
@@ -942,6 +949,8 @@ pub enum Error {
         page_order: u8,
         detail: &'static str,
     },
+    /// Timed out waiting for a write transaction lock (`no_std` spin-lock).
+    LockTimeout(String),
     Io(BackendError),
     DatabaseClosed,
     /// A previous IO error occurred. The database must be closed and re-opened
@@ -1128,6 +1137,9 @@ impl Display for Error {
                     f,
                     "Page ({page_region}, {page_index}, order={page_order}) corrupted: {detail}"
                 )
+            }
+            Error::LockTimeout(msg) => {
+                write!(f, "Lock timeout: {msg}")
             }
             Error::Io(err) => {
                 write!(f, "I/O error: {err}")

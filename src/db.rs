@@ -125,6 +125,21 @@ impl MultimapTableHandle for UntypedMultimapTableHandle {
 
 impl Sealed for UntypedMultimapTableHandle {}
 
+/// Const-compatible byte-level prefix check for use in `const fn` table name validation.
+const fn const_starts_with(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < needle.len() {
+        if haystack[i] != needle[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Defines the name and types of a table
 ///
 /// A [`TableDefinition`] should be opened for use by calling [`ReadTransaction::open_table`] or [`WriteTransaction::open_table`]
@@ -142,9 +157,13 @@ impl<'a, K: Key + 'static, V: Value + 'static> TableDefinition<'a, K, V> {
     ///
     /// ## Invariant
     ///
-    /// `name` must not be empty.
+    /// `name` must not be empty and must not use the reserved `__ivfpq:` prefix.
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
+        assert!(
+            !const_starts_with(name.as_bytes(), b"__ivfpq:"),
+            "table names starting with \"__ivfpq:\" are reserved for internal use"
+        );
         Self {
             name,
             _key_type: PhantomData,
@@ -198,6 +217,10 @@ pub struct MultimapTableDefinition<'a, K: Key + 'static, V: Key + 'static> {
 impl<'a, K: Key + 'static, V: Key + 'static> MultimapTableDefinition<'a, K, V> {
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
+        assert!(
+            !const_starts_with(name.as_bytes(), b"__ivfpq:"),
+            "table names starting with \"__ivfpq:\" are reserved for internal use"
+        );
         Self {
             name,
             _key_type: PhantomData,
@@ -1311,7 +1334,11 @@ impl Database {
         }
 
         // -- Truncate the file ------------------------------------------------
-        let blob_state = self.mem.get_blob_state();
+        // IMPORTANT: Use committed state only. get_blob_state() may return
+        // non-durable pending state (if a prior Durability::None blob write
+        // set pending_blob_state.next_sequence != 0), which would cause
+        // truncation to a wrong length and permanent database corruption.
+        let blob_state = self.mem.get_committed_blob_state();
         let target_len = blob_state.region_offset + blob_state.region_length;
         if target_len > 0 {
             self.mem
@@ -1986,10 +2013,10 @@ impl Database {
             let txn = match self.begin_write() {
                 Ok(txn) => txn,
                 Err(e) => {
-                    let storage_err = e.into_storage_error();
+                    let msg = e.into_storage_error().to_string();
                     for b in batches {
                         let _ = b.result_tx.send(Err(GroupCommitError::TransactionFailed(
-                            StorageError::Corrupted(storage_err.to_string()),
+                            StorageError::Corrupted(msg.clone()),
                         )));
                     }
                     let _ = self.group_committer.finish_leader();
@@ -2040,7 +2067,7 @@ impl Database {
                     }
                 }
                 Err(e) => {
-                    let msg = e.to_string();
+                    let msg = e.into_storage_error().to_string();
                     for tx in senders {
                         let _ = tx.send(Err(GroupCommitError::CommitFailed(
                             StorageError::Corrupted(msg.clone()),

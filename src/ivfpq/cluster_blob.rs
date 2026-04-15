@@ -261,7 +261,7 @@ impl<'a> ClusterBlobRef<'a> {
     /// `i < self.count` is the caller's responsibility. Validated at blob
     /// construction time via size checks.
     #[inline]
-    pub fn vector_id(&self, i: u32) -> u64 {
+    pub(crate) fn vector_id(&self, i: u32) -> u64 {
         let offset = self.ids_offset + i as usize * 8;
         // SAFETY: blob size validated in new() to contain count * 8 bytes of IDs.
         debug_assert!(offset + 8 <= self.data.len());
@@ -281,7 +281,7 @@ impl<'a> ClusterBlobRef<'a> {
 
     /// Get the PQ codes for vector at position `i`.
     #[inline]
-    pub fn pq_codes(&self, i: u32) -> &[u8] {
+    pub(crate) fn pq_codes(&self, i: u32) -> &[u8] {
         let start = self.pq_offset + i as usize * self.pq_len as usize;
         let end = start + self.pq_len as usize;
         // SAFETY: blob size validated in new().
@@ -293,7 +293,7 @@ impl<'a> ClusterBlobRef<'a> {
     ///
     /// This is the hot-path accessor for ADC scanning -- one contiguous slice.
     #[inline]
-    pub fn pq_codes_block(&self) -> &[u8] {
+    pub(crate) fn pq_codes_block(&self) -> &[u8] {
         let end = self.pq_offset + self.count as usize * self.pq_len as usize;
         debug_assert!(end <= self.data.len());
         unsafe { self.data.get_unchecked(self.pq_offset..end) }
@@ -303,7 +303,7 @@ impl<'a> ClusterBlobRef<'a> {
     ///
     /// Returns `None` if the blob has no raw vectors.
     #[inline]
-    pub fn raw_vector_bytes(&self, i: u32) -> Option<&[u8]> {
+    pub(crate) fn raw_vector_bytes(&self, i: u32) -> Option<&[u8]> {
         if !self.has_raw {
             return None;
         }

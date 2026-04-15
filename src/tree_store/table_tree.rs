@@ -460,6 +460,10 @@ impl TableTreeMut<'_> {
             .insert(name.to_string(), (table_root, length));
     }
 
+    pub(crate) fn clear_pending_updates(&mut self) {
+        self.pending_table_updates.clear();
+    }
+
     pub(crate) fn clear_root_updates_and_close(&mut self) {
         self.pending_table_updates.clear();
         self.allocated_pages.lock().close();

@@ -476,6 +476,18 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
                 "CompositeQuery: causal signal requires a root blob_id".to_string(),
             ));
         }
+        // When temporal is the only active signal, time_range is required to
+        // populate candidates. Without it, no other signal can seed the
+        // candidate set and the query silently returns empty.
+        if self.weights.temporal > 0.0
+            && self.weights.semantic <= 0.0
+            && self.weights.causal <= 0.0
+            && self.time_range.is_none()
+        {
+            return Err(StorageError::Corrupted(
+                "CompositeQuery: temporal-only signal requires a time_range".to_string(),
+            ));
+        }
         if self.top_k == 0 {
             return Err(StorageError::Corrupted(
                 "CompositeQuery: top_k must be >= 1".to_string(),

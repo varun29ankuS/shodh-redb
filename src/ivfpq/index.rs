@@ -688,17 +688,14 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                     let dist = adc.to_f32(adc.approximate_distance(codes));
                     let vid = blob.vector_id(i);
 
+                    // Vectors without metadata pass the filter — absence
+                    // of metadata is not a filter match failure.
                     if let Some(ref filter) = params.filter
                         && let Some(ref mt) = meta_table
+                        && let Some(guard) = mt.st_get(&vid)?
+                        && !passes_filter(guard.value(), filter)
                     {
-                        match mt.st_get(&vid)? {
-                            Some(guard) => {
-                                if !passes_filter(guard.value(), filter) {
-                                    continue;
-                                }
-                            }
-                            None => continue,
-                        }
+                        continue;
                     }
                     heap.push(vid, dist);
                 }
@@ -1157,17 +1154,14 @@ impl ReadOnlyIvfPqIndex {
                     let dist = adc.to_f32(adc.approximate_distance(codes));
                     let vid = blob.vector_id(i);
 
+                    // Vectors without metadata pass the filter — absence
+                    // of metadata is not a filter match failure.
                     if let Some(ref filter) = params.filter
                         && let Some(ref mt) = meta_table
+                        && let Some(guard) = mt.st_get(&vid)?
+                        && !passes_filter(guard.value(), filter)
                     {
-                        match mt.st_get(&vid)? {
-                            Some(guard) => {
-                                if !passes_filter(guard.value(), filter) {
-                                    continue;
-                                }
-                            }
-                            None => continue,
-                        }
+                        continue;
                     }
                     heap.push(vid, dist);
                 }

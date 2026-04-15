@@ -1017,43 +1017,37 @@ fn legacy_build_range<'a, K: Key + 'static, V: Value + 'static, T: ReadableTable
     start_inclusive: bool,
     end_inclusive: bool,
 ) -> crate::Result<Range<'a, K, V>> {
-    match (start, end) {
-        (None, None) => table.range::<K::SelfType<'_>>(..),
-        (Some(s), None) => {
-            let s_bytes = K::as_bytes(s).as_ref().to_vec();
-            let s_val = K::from_bytes(&s_bytes);
+    use core::ops::Bound;
+
+    // Hoist byte vecs so they outlive the Bound references.
+    let s_bytes = start.map(|s| K::as_bytes(s).as_ref().to_vec());
+    let e_bytes = end.map(|e| K::as_bytes(e).as_ref().to_vec());
+
+    let start_bound = match s_bytes.as_deref() {
+        Some(b) => {
+            let s_val = K::from_bytes(b);
             if start_inclusive {
-                table.range::<K::SelfType<'_>>(s_val..)
+                Bound::Included(s_val)
             } else {
-                // Exclusive start bound: start from inclusive, caller filters
-                table.range::<K::SelfType<'_>>(s_val..)
+                Bound::Excluded(s_val)
             }
         }
-        (None, Some(e)) => {
-            let e_bytes = K::as_bytes(e).as_ref().to_vec();
-            let e_val = K::from_bytes(&e_bytes);
+        None => Bound::Unbounded,
+    };
+
+    let end_bound = match e_bytes.as_deref() {
+        Some(b) => {
+            let e_val = K::from_bytes(b);
             if end_inclusive {
-                table.range::<K::SelfType<'_>>(..=e_val)
+                Bound::Included(e_val)
             } else {
-                table.range::<K::SelfType<'_>>(..e_val)
+                Bound::Excluded(e_val)
             }
         }
-        (Some(s), Some(e)) => {
-            let s_bytes = K::as_bytes(s).as_ref().to_vec();
-            let e_bytes = K::as_bytes(e).as_ref().to_vec();
-            let s_val = K::from_bytes(&s_bytes);
-            let e_val = K::from_bytes(&e_bytes);
-            if start_inclusive && end_inclusive {
-                table.range::<K::SelfType<'_>>(s_val..=e_val)
-            } else if start_inclusive {
-                table.range::<K::SelfType<'_>>(s_val..e_val)
-            } else if end_inclusive {
-                table.range::<K::SelfType<'_>>(s_val..=e_val)
-            } else {
-                table.range::<K::SelfType<'_>>(s_val..e_val)
-            }
-        }
-    }
+        None => Bound::Unbounded,
+    };
+
+    table.range::<K::SelfType<'_>>((start_bound, end_bound))
 }
 
 /// Build a `Range` from optional start/end keys for `ReadOnlyTable`.
@@ -1067,38 +1061,34 @@ fn legacy_build_range_ro<'a, K: Key + 'static, V: Value + 'static>(
     start_inclusive: bool,
     end_inclusive: bool,
 ) -> crate::Result<Range<'a, K, V>> {
-    match (start, end) {
-        (None, None) => table.range::<K::SelfType<'_>>(..),
-        (Some(s), None) => {
-            let s_bytes = K::as_bytes(s).as_ref().to_vec();
-            let s_val = K::from_bytes(&s_bytes);
-            // Note: RangeFrom is always inclusive in Rust's std. Exclusive-start
-            // semantics are handled by the caller via iterator-level filtering.
-            table.range::<K::SelfType<'_>>(s_val..)
+    use core::ops::Bound;
+
+    let s_bytes = start.map(|s| K::as_bytes(s).as_ref().to_vec());
+    let e_bytes = end.map(|e| K::as_bytes(e).as_ref().to_vec());
+
+    let start_bound = match s_bytes.as_deref() {
+        Some(b) => {
+            let s_val = K::from_bytes(b);
+            if start_inclusive {
+                Bound::Included(s_val)
+            } else {
+                Bound::Excluded(s_val)
+            }
         }
-        (None, Some(e)) => {
-            let e_bytes = K::as_bytes(e).as_ref().to_vec();
-            let e_val = K::from_bytes(&e_bytes);
+        None => Bound::Unbounded,
+    };
+
+    let end_bound = match e_bytes.as_deref() {
+        Some(b) => {
+            let e_val = K::from_bytes(b);
             if end_inclusive {
-                table.range::<K::SelfType<'_>>(..=e_val)
+                Bound::Included(e_val)
             } else {
-                table.range::<K::SelfType<'_>>(..e_val)
+                Bound::Excluded(e_val)
             }
         }
-        (Some(s), Some(e)) => {
-            let s_bytes = K::as_bytes(s).as_ref().to_vec();
-            let e_bytes = K::as_bytes(e).as_ref().to_vec();
-            let s_val = K::from_bytes(&s_bytes);
-            let e_val = K::from_bytes(&e_bytes);
-            if start_inclusive && end_inclusive {
-                table.range::<K::SelfType<'_>>(s_val..=e_val)
-            } else if start_inclusive {
-                table.range::<K::SelfType<'_>>(s_val..e_val)
-            } else if end_inclusive {
-                table.range::<K::SelfType<'_>>(s_val..=e_val)
-            } else {
-                table.range::<K::SelfType<'_>>(s_val..e_val)
-            }
-        }
-    }
+        None => Bound::Unbounded,
+    };
+
+    table.range::<K::SelfType<'_>>((start_bound, end_bound))
 }

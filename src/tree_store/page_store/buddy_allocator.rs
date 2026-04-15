@@ -15,6 +15,9 @@ const NUM_PAGES_OFFSET: usize = MAX_ORDER_OFFSET + size_of::<u8>() + PADDING;
 const FREE_END_OFFSETS: usize = NUM_PAGES_OFFSET + size_of::<u32>();
 
 fn calculate_usable_order(pages: u32) -> u8 {
+    if pages == 0 {
+        return 0;
+    }
     let max_order = (32 - pages.leading_zeros() - 1).try_into().unwrap();
     min(MAX_MAX_PAGE_ORDER, max_order)
 }

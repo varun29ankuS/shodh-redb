@@ -787,9 +787,19 @@ impl TableNamespace<'_> {
         }
     }
 
-    fn set_root(&mut self, root: Option<BtreeHeader>) {
-        debug_assert!(self.open_tables.is_empty());
+    fn set_root(&mut self, root: Option<BtreeHeader>) -> Result<(), StorageError> {
+        if !self.open_tables.is_empty() {
+            return Err(StorageError::Corrupted(
+                "set_root called with open tables".into(),
+            ));
+        }
+        // Clear pending table root updates accumulated by close_table() calls
+        // that occurred after the savepoint was taken. Without this, commit()
+        // would re-stage post-savepoint roots into the restored tree, producing
+        // a mix of pre- and post-savepoint state.
+        self.table_tree.clear_pending_updates();
         self.table_tree.set_root(root);
+        Ok(())
     }
 
     #[track_caller]
@@ -1331,7 +1341,7 @@ impl WriteTransaction {
 
         // 1) restore the table tree
         {
-            self.tables.lock().set_root(savepoint.get_user_root());
+            self.tables.lock().set_root(savepoint.get_user_root())?;
         }
 
         // 1a) purge all transactions that happened after the savepoint from the data freed tree
@@ -2645,8 +2655,10 @@ impl WriteTransaction {
 
             // Don't prune past the oldest cursor -- a slow consumer would
             // silently miss mutations if we deleted entries it hasn't read.
+            // Use min() so the cutoff never advances beyond what the slowest
+            // consumer has already read.
             let effective_cutoff = match oldest_cursor {
-                Some(cursor_pos) => retention_cutoff.max(cursor_pos),
+                Some(cursor_pos) => retention_cutoff.min(cursor_pos),
                 None => retention_cutoff,
             };
 

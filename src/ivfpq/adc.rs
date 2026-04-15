@@ -167,7 +167,7 @@ impl IntAdcTable {
     /// No floating-point operations. Uses unchecked indexing for maximum
     /// throughput on the hot scan path (~40K calls per search).
     #[inline]
-    pub fn approximate_distance(&self, pq_codes: &[u8]) -> u32 {
+    pub(crate) fn approximate_distance(&self, pq_codes: &[u8]) -> u32 {
         debug_assert!(pq_codes.len() >= self.num_subvectors);
         debug_assert!(self.distances.len() >= self.num_subvectors * 256);
         let mut dist = 0u32;
@@ -190,7 +190,7 @@ impl IntAdcTable {
     /// `f32_total = u32_sum * scale + num_subvectors * offset`.
     #[inline]
     #[allow(clippy::cast_precision_loss)]
-    pub fn to_f32(&self, dist_u32: u32) -> f32 {
+    pub(crate) fn to_f32(&self, dist_u32: u32) -> f32 {
         dist_u32 as f32 * self.scale + self.num_subvectors as f32 * self.offset
     }
 }

@@ -737,14 +737,20 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                     return Ok(());
                 }
 
-                // Update the block map: remap logical block from src to dst
-                if let Some(logical) = state
+                // Update the block map: remap logical block from src to dst.
+                // Remove dst_rel from the free list BEFORE assign, otherwise
+                // it remains free-listed while mapped to a live logical block,
+                // causing double-allocation on the next allocate_block() call.
+                if let Some(pos) = state.block_map.free_list.iter().position(|&b| b == dst_rel) {
+                    state.block_map.free_list.swap_remove(pos);
+                }
+                let logical = state
                     .block_map
                     .reverse
                     .get(src_rel as usize)
                     .copied()
-                    .filter(|&l| l != UNMAPPED)
-                {
+                    .filter(|&l| l != UNMAPPED);
+                if let Some(logical) = logical {
                     state.block_map.assign(logical, dst_rel);
                     state.block_map.free_list.push(src_rel);
                 }
@@ -753,13 +759,30 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                 // crash. Without this, recovery would replay the old mapping
                 // while the physical data has already moved, causing silent
                 // data corruption.
+                //
+                // If the journal commit fails, rollback the in-memory block map
+                // to match the on-disk state. Without rollback, the in-memory
+                // map would be ahead of the persistent journal, and a subsequent
+                // power loss would cause silent data corruption.
                 let metadata = Self::serialize_metadata_inner(state);
                 let FtlState {
                     ref hw,
                     ref mut journal,
                     ..
                 } = *state;
-                journal.commit(hw, &metadata)?;
+                if let Err(e) = journal.commit(hw, &metadata) {
+                    // Rollback: undo the block map changes
+                    if let Some(logical) = logical {
+                        state.block_map.assign(logical, src_rel);
+                        if let Some(pos) =
+                            state.block_map.free_list.iter().position(|&b| b == src_rel)
+                        {
+                            state.block_map.free_list.swap_remove(pos);
+                        }
+                    }
+                    state.block_map.free_list.push(dst_rel);
+                    return Err(e);
+                }
             }
         }
 

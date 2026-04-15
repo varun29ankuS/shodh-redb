@@ -176,7 +176,7 @@ impl TransactionTracker {
 
             retries += 1;
             if retries >= MAX_SPIN_RETRIES {
-                return Err(StorageError::Corrupted(
+                return Err(StorageError::LockTimeout(
                     "Timed out waiting for write transaction lock after 1000 spin iterations"
                         .into(),
                 ));

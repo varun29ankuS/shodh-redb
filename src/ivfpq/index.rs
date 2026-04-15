@@ -688,7 +688,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                     let dist = adc.to_f32(adc.approximate_distance(codes));
                     let vid = blob.vector_id(i);
 
-                    // Vectors without metadata pass the filter — absence
+                    // Vectors without metadata pass the filter -- absence
                     // of metadata is not a filter match failure.
                     if let Some(ref filter) = params.filter
                         && let Some(ref mt) = meta_table
@@ -1154,7 +1154,7 @@ impl ReadOnlyIvfPqIndex {
                     let dist = adc.to_f32(adc.approximate_distance(codes));
                     let vid = blob.vector_id(i);
 
-                    // Vectors without metadata pass the filter — absence
+                    // Vectors without metadata pass the filter -- absence
                     // of metadata is not a filter match failure.
                     if let Some(ref filter) = params.filter
                         && let Some(ref mt) = meta_table

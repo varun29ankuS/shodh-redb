@@ -170,6 +170,17 @@ impl<'a, K: Key + 'static, V: Value + 'static> TableDefinition<'a, K, V> {
             _value_type: PhantomData,
         }
     }
+
+    /// Internal constructor that permits reserved prefixes.
+    /// Only for use by IVF-PQ and other internal subsystems.
+    pub(crate) const fn new_internal(name: &'a str) -> Self {
+        assert!(!name.is_empty());
+        Self {
+            name,
+            _key_type: PhantomData,
+            _value_type: PhantomData,
+        }
+    }
 }
 
 impl<K: Key + 'static, V: Value + 'static> TableHandle for TableDefinition<'_, K, V> {

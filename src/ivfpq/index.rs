@@ -106,7 +106,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         let name = String::from(definition.name());
 
         let mn = meta_name(&name);
-        let meta_def = TableDefinition::<&str, &[u8]>::new(&mn);
+        let meta_def = TableDefinition::<&str, &[u8]>::new_internal(&mn);
         let mut meta_table = txn.open_storage_table(meta_def)?;
 
         // Check if config exists; if not, persist the initial config.
@@ -133,15 +133,15 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Eagerly create the other tables.
         {
             let cn = centroids_name(&name);
-            let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&cn))?;
+            let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new_internal(&cn))?;
             let cb = codebooks_name(&name);
-            let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&cb))?;
+            let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new_internal(&cb))?;
             let cl = clusters_name(&name);
-            let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new(&cl))?;
+            let _ = txn.open_storage_table(TableDefinition::<u32, &[u8]>::new_internal(&cl))?;
             let vn = vectors_name(&name);
-            let _ = txn.open_storage_table(TableDefinition::<u64, &[u8]>::new(&vn))?;
+            let _ = txn.open_storage_table(TableDefinition::<u64, &[u8]>::new_internal(&vn))?;
             let an = assignments_name(&name);
-            let _ = txn.open_storage_table(TableDefinition::<u64, u32>::new(&an))?;
+            let _ = txn.open_storage_table(TableDefinition::<u64, u32>::new_internal(&an))?;
         }
 
         let requested_num_clusters = definition.num_clusters();
@@ -270,7 +270,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // 5. Persist new centroids.
         {
             let tn = centroids_name(&self.name);
-            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             for c in 0..actual_k {
                 let bytes = f32_slice_to_le_bytes(&centroid_data[c * dim..(c + 1) * dim]);
@@ -282,7 +282,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // 6. Persist PQ codebooks.
         {
             let tn = codebooks_name(&self.name);
-            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             for m in 0..num_subvectors {
                 let bytes = codebooks_trained.serialize_codebook(m);
@@ -355,7 +355,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Check if this vector_id already exists.
         let old_cluster = {
             let tn = assignments_name(&self.name);
-            let def = TableDefinition::<u64, u32>::new(&tn);
+            let def = TableDefinition::<u64, u32>::new_internal(&tn);
             let table = self.txn.open_storage_table(def)?;
             table.st_get(&vector_id)?.map(|g| g.value())
         };
@@ -372,7 +372,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Merge into target cluster blob (PQ-only, no raw vectors).
         {
             let tn = clusters_name(&self.name);
-            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
             let mut table = self.txn.open_storage_table(def)?;
 
             let existing_blob = table.st_get(&cluster_id)?;
@@ -391,7 +391,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         if self.config.store_raw_vectors {
             let raw_bytes = f32_slice_to_le_bytes(vec_ref);
             let vn = vectors_name(&self.name);
-            let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
+            let vdef = TableDefinition::<u64, &[u8]>::new_internal(&vn);
             let mut vt = self.txn.open_storage_table(vdef)?;
             vt.st_insert(&vector_id, &raw_bytes.as_slice())?;
         }
@@ -399,7 +399,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Update assignment.
         {
             let tn = assignments_name(&self.name);
-            let def = TableDefinition::<u64, u32>::new(&tn);
+            let def = TableDefinition::<u64, u32>::new_internal(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             table.st_insert(&vector_id, &cluster_id)?;
         }
@@ -441,7 +441,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         let mut raw_vectors: Vec<(u64, Vec<u8>)> = Vec::new();
 
         let an = assignments_name(&self.name);
-        let ad = TableDefinition::<u64, u32>::new(&an);
+        let ad = TableDefinition::<u64, u32>::new_internal(&an);
         let mut at = self.txn.open_storage_table(ad)?;
 
         // Track old cluster assignments for upsert cleanup.
@@ -502,7 +502,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Phase 3: For each cluster touched, read-modify-write the PQ blob.
         {
             let tn = clusters_name(&self.name);
-            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
             let mut table = self.txn.open_storage_table(def)?;
 
             for (cid, mut entries) in grouped.into_iter().enumerate() {
@@ -526,7 +526,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Phase 4: Write raw vectors to separate table.
         if !raw_vectors.is_empty() {
             let vn = vectors_name(&self.name);
-            let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
+            let vdef = TableDefinition::<u64, &[u8]>::new_internal(&vn);
             let mut vt = self.txn.open_storage_table(vdef)?;
             for (vid, raw) in &raw_vectors {
                 vt.st_insert(vid, &raw.as_slice())?;
@@ -545,7 +545,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     pub fn remove(&mut self, vector_id: u64) -> crate::Result<bool> {
         let cluster_id = {
             let tn = assignments_name(&self.name);
-            let def = TableDefinition::<u64, u32>::new(&tn);
+            let def = TableDefinition::<u64, u32>::new_internal(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             match table.st_remove(&vector_id)? {
                 Some(guard) => guard.value(),
@@ -559,7 +559,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Remove raw vector if stored.
         if self.config.store_raw_vectors {
             let vn = vectors_name(&self.name);
-            let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
+            let vdef = TableDefinition::<u64, &[u8]>::new_internal(&vn);
             let mut vt = self.txn.open_storage_table(vdef)?;
             vt.st_remove(&vector_id)?;
         }
@@ -570,7 +570,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Also remove associated metadata if present.
         {
             let mn = vector_meta_name(&self.name);
-            let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
+            let mdef = TableDefinition::<u64, &[u8]>::new_internal(&mn);
             let mut mt = self.txn.open_storage_table(mdef)?;
             mt.st_remove(&vector_id)?;
         }
@@ -585,7 +585,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     pub fn insert_metadata(&mut self, vector_id: u64, metadata: &MetadataMap) -> crate::Result<()> {
         let encoded = metadata.encode();
         let mn = vector_meta_name(&self.name);
-        let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
+        let mdef = TableDefinition::<u64, &[u8]>::new_internal(&mn);
         let mut mt = self.txn.open_storage_table(mdef)?;
         mt.st_insert(&vector_id, &encoded.as_slice())?;
         Ok(())
@@ -594,7 +594,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     /// Remove metadata for a vector.
     pub fn remove_metadata(&mut self, vector_id: u64) -> crate::Result<()> {
         let mn = vector_meta_name(&self.name);
-        let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
+        let mdef = TableDefinition::<u64, &[u8]>::new_internal(&mn);
         let mut mt = self.txn.open_storage_table(mdef)?;
         mt.st_remove(&vector_id)?;
         Ok(())
@@ -657,12 +657,12 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         {
             let tn = clusters_name(&self.name);
-            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
             let table = self.txn.open_storage_table(def)?;
 
             let meta_table = if params.filter.is_some() {
                 let mn = vector_meta_name(&self.name);
-                let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
+                let mdef = TableDefinition::<u64, &[u8]>::new_internal(&mn);
                 Some(self.txn.open_storage_table(mdef)?)
             } else {
                 None
@@ -734,7 +734,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     fn clear_stale_training_data(&self, old_k: usize, new_k: usize) -> crate::Result<()> {
         if old_k > new_k {
             let tn = centroids_name(&self.name);
-            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             for c in new_k..old_k {
                 #[allow(clippy::cast_possible_truncation)]
@@ -745,7 +745,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Clear all cluster blobs.
         {
             let tn = clusters_name(&self.name);
-            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             table.st_drain_all()?;
         }
@@ -753,7 +753,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Clear all raw vectors.
         {
             let vn = vectors_name(&self.name);
-            let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
+            let vdef = TableDefinition::<u64, &[u8]>::new_internal(&vn);
             let mut vt = self.txn.open_storage_table(vdef)?;
             vt.st_drain_all()?;
         }
@@ -761,7 +761,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         // Clear all assignments.
         {
             let tn = assignments_name(&self.name);
-            let def = TableDefinition::<u64, u32>::new(&tn);
+            let def = TableDefinition::<u64, u32>::new_internal(&tn);
             let mut table = self.txn.open_storage_table(def)?;
             table.st_drain_all()?;
         }
@@ -781,7 +781,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
     fn persist_config_inner(&self) -> crate::Result<()> {
         let tn = meta_name(&self.name);
-        let def = TableDefinition::<&str, &[u8]>::new(&tn);
+        let def = TableDefinition::<&str, &[u8]>::new_internal(&tn);
         let mut table = self.txn.open_storage_table(def)?;
         let bytes = encode_index_config(&self.config);
         table.st_insert(&"config", &bytes.as_slice())?;
@@ -801,7 +801,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         let dim = self.config.dim as usize;
         let k = self.config.num_clusters as usize;
         let tn = centroids_name(&self.name);
-        let def = TableDefinition::<u32, &[u8]>::new(&tn);
+        let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
         let table = self.txn.open_storage_table(def)?;
 
         let mut flat = Vec::with_capacity(k * dim);
@@ -844,7 +844,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         let m = self.config.num_subvectors as usize;
         let sd = self.config.sub_dim();
         let tn = codebooks_name(&self.name);
-        let def = TableDefinition::<u32, &[u8]>::new(&tn);
+        let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
         let table = self.txn.open_storage_table(def)?;
 
         let mut data = Vec::with_capacity(m * 256 * sd);
@@ -876,7 +876,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     ) -> crate::Result<()> {
         let dim = self.config.dim as usize;
         let tn = clusters_name(&self.name);
-        let def = TableDefinition::<u32, &[u8]>::new(&tn);
+        let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
         let mut table = self.txn.open_storage_table(def)?;
 
         let new_blob_or_empty = {
@@ -935,7 +935,7 @@ macro_rules! impl_rerank_from_vectors {
             k: usize,
         ) -> crate::Result<Vec<Neighbor<u64>>> {
             let vn = vectors_name(index_name);
-            let vdef = TableDefinition::<u64, &[u8]>::new(&vn);
+            let vdef = TableDefinition::<u64, &[u8]>::new_internal(&vn);
             let vt = txn.open_storage_table(vdef)?;
 
             // Sort by vector_id for sequential B-tree access.
@@ -991,7 +991,7 @@ impl ReadOnlyIvfPqIndex {
         let name = String::from(definition.name());
 
         let mn = meta_name(&name);
-        let md = TableDefinition::<&str, &[u8]>::new(&mn);
+        let md = TableDefinition::<&str, &[u8]>::new_internal(&mn);
         let mt = txn.open_storage_table(md)?;
 
         let config = match mt.st_get(&"config")? {
@@ -1007,7 +1007,7 @@ impl ReadOnlyIvfPqIndex {
         let num_clusters = config.num_clusters as usize;
         let centroids = {
             let tn = centroids_name(&name);
-            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
             let table = txn.open_storage_table(def)?;
             let mut flat = Vec::with_capacity(num_clusters * dim);
             for c in 0..num_clusters {
@@ -1031,7 +1031,7 @@ impl ReadOnlyIvfPqIndex {
             let num_subvectors = config.num_subvectors as usize;
             let sub_dim = config.sub_dim();
             let tn = codebooks_name(&name);
-            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
             let table = txn.open_storage_table(def)?;
             let mut data = Vec::with_capacity(num_subvectors * 256 * sub_dim);
             for m in 0..num_subvectors {
@@ -1123,12 +1123,12 @@ impl ReadOnlyIvfPqIndex {
 
         {
             let tn = clusters_name(&self.name);
-            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
             let table = txn.open_storage_table(def)?;
 
             let meta_table = if params.filter.is_some() {
                 let mn = vector_meta_name(&self.name);
-                let mdef = TableDefinition::<u64, &[u8]>::new(&mn);
+                let mdef = TableDefinition::<u64, &[u8]>::new_internal(&mn);
                 Some(txn.open_storage_table(mdef)?)
             } else {
                 None

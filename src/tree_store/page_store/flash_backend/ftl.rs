@@ -741,9 +741,7 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                 // Remove dst_rel from the free list BEFORE assign, otherwise
                 // it remains free-listed while mapped to a live logical block,
                 // causing double-allocation on the next allocate_block() call.
-                if let Some(pos) =
-                    state.block_map.free_list.iter().position(|&b| b == dst_rel)
-                {
+                if let Some(pos) = state.block_map.free_list.iter().position(|&b| b == dst_rel) {
                     state.block_map.free_list.swap_remove(pos);
                 }
                 let logical = state

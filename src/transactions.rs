@@ -4098,6 +4098,23 @@ impl ReadTransaction {
             return Ok(Vec::new());
         };
 
+        // Detect if the cursor is behind the retention window.
+        // If the oldest retained entry is newer than the requested position,
+        // entries have been pruned and the consumer may have missed changes.
+        if after_txn_id > 0 {
+            let mut all_range = btree.range::<core::ops::RangeFull, CdcKey>(&(..))?;
+            if let Some(first) = all_range.next() {
+                let first = first?;
+                let oldest_txn = first.key().transaction_id;
+                if oldest_txn > after_txn_id.saturating_add(1) {
+                    return Err(StorageError::CdcCursorBehindRetention {
+                        cursor_txn_id: after_txn_id,
+                        oldest_retained_txn_id: oldest_txn,
+                    });
+                }
+            }
+        }
+
         let start = CdcKey::new(after_txn_id.saturating_add(1), 0);
         let end = CdcKey::new(u64::MAX, u32::MAX);
         let range = btree.range::<core::ops::RangeInclusive<CdcKey>, CdcKey>(&(start..=end))?;
@@ -4122,6 +4139,21 @@ impl ReadTransaction {
         let Some(btree) = self.open_system_btree(CDC_LOG_TABLE)? else {
             return Ok(Vec::new());
         };
+
+        // Detect if the requested range start is behind the retention window.
+        if start_txn > 0 {
+            let mut all_range = btree.range::<core::ops::RangeFull, CdcKey>(&(..))?;
+            if let Some(first) = all_range.next() {
+                let first = first?;
+                let oldest_txn = first.key().transaction_id;
+                if oldest_txn > start_txn {
+                    return Err(StorageError::CdcCursorBehindRetention {
+                        cursor_txn_id: start_txn,
+                        oldest_retained_txn_id: oldest_txn,
+                    });
+                }
+            }
+        }
 
         let start = CdcKey::new(start_txn, 0);
         let end = CdcKey::new(end_txn, u32::MAX);

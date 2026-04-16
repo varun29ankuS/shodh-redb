@@ -117,11 +117,29 @@ impl SerializedSavepoint<'_> {
         }
     }
 
-    pub(crate) fn to_savepoint(&self, transaction_tracker: Arc<TransactionTracker>) -> Savepoint {
+    pub(crate) fn to_savepoint(
+        &self,
+        transaction_tracker: Arc<TransactionTracker>,
+    ) -> Result<Savepoint, crate::StorageError> {
         let data = self.data();
+        let expected_len = size_of::<u8>()
+            + size_of::<u64>()
+            + size_of::<u64>()
+            + 1
+            + BtreeHeader::serialized_size();
+        if data.len() < expected_len {
+            return Err(crate::StorageError::Corrupted(
+                "savepoint data truncated".into(),
+            ));
+        }
         let mut offset = 0;
+
         let version = data[offset];
-        assert_eq!(version, FILE_FORMAT_VERSION3);
+        if version != FILE_FORMAT_VERSION3 {
+            return Err(crate::StorageError::Corrupted(alloc::format!(
+                "savepoint version mismatch: expected {FILE_FORMAT_VERSION3}, got {version}"
+            )));
+        }
         offset += size_of::<u8>();
 
         let id = u64::from_le_bytes(
@@ -139,7 +157,11 @@ impl SerializedSavepoint<'_> {
         offset += size_of::<u64>();
 
         let not_null = data[offset];
-        assert!(not_null == 0 || not_null == 1);
+        if not_null > 1 {
+            return Err(crate::StorageError::Corrupted(alloc::format!(
+                "savepoint not_null flag invalid: {not_null}"
+            )));
+        }
         offset += 1;
         let user_root = if not_null == 1 {
             Some(BtreeHeader::from_le_bytes(
@@ -150,17 +172,15 @@ impl SerializedSavepoint<'_> {
         } else {
             None
         };
-        offset += BtreeHeader::serialized_size();
-        assert_eq!(offset, data.len());
 
-        Savepoint {
+        Ok(Savepoint {
             version,
             id: SavepointId(id),
             transaction_id: TransactionId::new(transaction_id),
             user_root,
             transaction_tracker,
             ephemeral: false,
-        }
+        })
     }
 }
 

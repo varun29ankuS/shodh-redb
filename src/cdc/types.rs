@@ -190,16 +190,29 @@ impl Key for CdcKey {
 
 const NONE_SENTINEL: u32 = u32::MAX;
 
+/// Magic byte identifying a versioned CDC record. Chosen to be > 2 (outside
+/// the valid `ChangeOp` discriminant range) so that legacy v0 records --
+/// which start directly with an op byte (0, 1, or 2) -- can be distinguished.
+const CDC_FORMAT_MAGIC: u8 = 0xCD;
+
+/// Current CDC record format version.
+const CDC_FORMAT_VERSION: u8 = 1;
+
 /// Serialized CDC change record stored in the system table.
 ///
-/// Binary layout:
+/// Binary layout (v1, current):
 /// ```text
+/// [CDC_FORMAT_MAGIC: u8 = 0xCD][version: u8 = 1]
 /// [op: u8]
 /// [table_name_len: u16 LE][table_name: N bytes]
 /// [key_len: u32 LE][key: N bytes]
 /// [new_val_len: u32 LE][new_val: N bytes]    -- 0xFFFFFFFF if None
 /// [old_val_len: u32 LE][old_val: N bytes]    -- 0xFFFFFFFF if None
 /// ```
+///
+/// Legacy (v0) records omit the magic+version header and start directly with
+/// the `op` byte. The deserializer distinguishes the two: if the first byte
+/// equals `CDC_FORMAT_MAGIC` it is a versioned record, otherwise legacy.
 #[derive(Clone)]
 pub(crate) struct CdcRecord {
     pub op: ChangeOp,
@@ -265,7 +278,8 @@ impl CdcRecord {
     }
 
     pub(crate) fn serialized_size(&self) -> usize {
-        1 // op
+        2 // magic + version
+        + 1 // op
         + 2 + self.table_name.len() // table_name_len + table_name
         + 4 + self.key.len() // key_len + key
         + 4 + self.new_value.as_ref().map_or(0, Vec::len) // new_val_len + new_val
@@ -275,6 +289,8 @@ impl CdcRecord {
     pub(crate) fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.serialized_size());
 
+        buf.push(CDC_FORMAT_MAGIC);
+        buf.push(CDC_FORMAT_VERSION);
         buf.push(self.op as u8);
 
         let name_len = u16::try_from(self.table_name.len()).unwrap_or(u16::MAX);
@@ -317,6 +333,30 @@ impl CdcRecord {
             return Err(StorageError::Corrupted("CDC record is empty".into()));
         }
 
+        // Detect format: if first byte is the magic, this is a versioned
+        // record. Otherwise it is a legacy v0 record whose first byte is the
+        // op discriminant (0, 1, or 2).
+        if data[pos] == CDC_FORMAT_MAGIC {
+            pos += 1; // skip magic
+            if pos >= data.len() {
+                return Err(StorageError::Corrupted(
+                    "CDC record truncated at version byte".into(),
+                ));
+            }
+            let version = data[pos];
+            pos += 1;
+            if version != CDC_FORMAT_VERSION {
+                return Err(StorageError::Corrupted(format!(
+                    "unsupported CDC record version {version} (expected {CDC_FORMAT_VERSION})"
+                )));
+            }
+        }
+
+        if pos >= data.len() {
+            return Err(StorageError::Corrupted(
+                "CDC record truncated at op byte".into(),
+            ));
+        }
         let op = ChangeOp::from_u8(data[pos])?;
         pos += 1;
 

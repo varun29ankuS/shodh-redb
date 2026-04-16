@@ -47,28 +47,50 @@ impl RegionTracker {
         result
     }
 
-    pub(super) fn from_bytes(page: &[u8]) -> Self {
-        let orders = u32::from_le_bytes(page[..size_of::<u32>()].try_into().unwrap());
+    pub(super) fn from_bytes(page: &[u8]) -> Result<Self, crate::StorageError> {
+        if page.len() < size_of::<u32>() {
+            return Err(crate::StorageError::Corrupted(
+                "RegionTracker: buffer too small for header".into(),
+            ));
+        }
+        let orders = u32::from_le_bytes(page[..size_of::<u32>()].try_into().map_err(|_| {
+            crate::StorageError::Corrupted("RegionTracker: failed to read order count".into())
+        })?);
         let mut start = size_of::<u32>();
         let mut allocator_lens = vec![];
         for _ in 0..orders {
+            if start + size_of::<u32>() > page.len() {
+                return Err(crate::StorageError::Corrupted(
+                    "RegionTracker: truncated allocator length table".into(),
+                ));
+            }
             let allocator_len =
-                u32::from_le_bytes(page[start..start + size_of::<u32>()].try_into().unwrap())
-                    as usize;
+                u32::from_le_bytes(page[start..start + size_of::<u32>()].try_into().map_err(
+                    |_| {
+                        crate::StorageError::Corrupted(
+                            "RegionTracker: failed to read allocator length".into(),
+                        )
+                    },
+                )?) as usize;
             allocator_lens.push(allocator_len);
             start += size_of::<u32>();
         }
         let mut data = vec![];
         for allocator_len in allocator_lens {
+            if start + allocator_len > page.len() {
+                return Err(crate::StorageError::Corrupted(
+                    "RegionTracker: allocator data extends beyond buffer".into(),
+                ));
+            }
             data.push(BtreeBitmap::from_bytes(
                 &page[start..(start + allocator_len)],
-            ));
+            )?);
             start += allocator_len;
         }
 
-        Self {
+        Ok(Self {
             order_trackers: data,
-        }
+        })
     }
 
     pub(crate) fn find_free(&self, order: u8) -> Option<u32> {

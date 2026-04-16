@@ -92,11 +92,18 @@ impl BtreeBitmap {
         result
     }
 
-    pub(crate) fn from_bytes(data: &[u8]) -> Self {
+    pub(crate) fn from_bytes(data: &[u8]) -> Result<Self, crate::StorageError> {
+        if data.len() < HEIGHT_OFFSET + size_of::<u32>() {
+            return Err(crate::StorageError::Corrupted(
+                "BtreeBitmap: buffer too small for header".into(),
+            ));
+        }
         let height = u32::from_le_bytes(
             data[HEIGHT_OFFSET..(HEIGHT_OFFSET + size_of::<u32>())]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| {
+                    crate::StorageError::Corrupted("BtreeBitmap: failed to read height".into())
+                })?,
         );
 
         let mut metadata = END_OFFSETS;
@@ -104,17 +111,29 @@ impl BtreeBitmap {
 
         let mut heights = vec![];
         for _ in 0..height {
+            if metadata + size_of::<u32>() > data.len() {
+                return Err(crate::StorageError::Corrupted(
+                    "BtreeBitmap: truncated offset table".into(),
+                ));
+            }
             let data_end = u32::from_le_bytes(
                 data[metadata..(metadata + size_of::<u32>())]
                     .try_into()
-                    .unwrap(),
+                    .map_err(|_| {
+                        crate::StorageError::Corrupted("BtreeBitmap: failed to read offset".into())
+                    })?,
             ) as usize;
-            heights.push(U64GroupedBitmap::from_bytes(&data[data_start..data_end]));
+            if data_end > data.len() || data_start > data_end {
+                return Err(crate::StorageError::Corrupted(
+                    "BtreeBitmap: offset out of bounds".into(),
+                ));
+            }
+            heights.push(U64GroupedBitmap::from_bytes(&data[data_start..data_end])?);
             data_start = data_end;
             metadata += size_of::<u32>();
         }
 
-        Self { heights }
+        Ok(Self { heights })
     }
 
     // Initializes a new allocator, with no ids free
@@ -268,22 +287,37 @@ impl U64GroupedBitmap {
         result
     }
 
-    pub fn from_bytes(serialized: &[u8]) -> Self {
-        assert_eq!(0, (serialized.len() - size_of::<u32>()) % size_of::<u64>());
-        let mut data = vec![];
-        let len = u32::from_le_bytes(serialized[..size_of::<u32>()].try_into().unwrap());
+    pub fn from_bytes(serialized: &[u8]) -> Result<Self, crate::StorageError> {
+        if serialized.len() < size_of::<u32>() {
+            return Err(crate::StorageError::Corrupted(
+                "U64GroupedBitmap: buffer too small for header".into(),
+            ));
+        }
+        if (serialized.len() - size_of::<u32>()) % size_of::<u64>() != 0 {
+            return Err(crate::StorageError::Corrupted(
+                "U64GroupedBitmap: buffer size not aligned to u64".into(),
+            ));
+        }
+        let len = u32::from_le_bytes(serialized[..size_of::<u32>()].try_into().map_err(|_| {
+            crate::StorageError::Corrupted("U64GroupedBitmap: failed to read length".into())
+        })?);
         let words = (serialized.len() - size_of::<u32>()) / size_of::<u64>();
+        let mut data = Vec::with_capacity(words);
         for i in 0..words {
             let start = size_of::<u32>() + i * size_of::<u64>();
             let value = u64::from_le_bytes(
                 serialized[start..(start + size_of::<u64>())]
                     .try_into()
-                    .unwrap(),
+                    .map_err(|_| {
+                        crate::StorageError::Corrupted(
+                            "U64GroupedBitmap: failed to read word".into(),
+                        )
+                    })?,
             );
             data.push(value);
         }
 
-        Self { len, data }
+        Ok(Self { len, data })
     }
 
     fn data_index_of(bit: u32) -> (usize, usize) {

@@ -940,14 +940,16 @@ impl TransactionalMemory {
         for region in
             tree.range(&(AllocatorStateKey::Region(0)..=AllocatorStateKey::Region(u32::MAX)))?
         {
-            region_allocators.push(BuddyAllocator::from_bytes(region?.value()));
+            region_allocators.push(BuddyAllocator::from_bytes(region?.value())?);
         }
 
         let region_tracker = RegionTracker::from_bytes(
             tree.get(&AllocatorStateKey::RegionTracker)?
-                .unwrap()
+                .ok_or_else(|| {
+                    StorageError::Corrupted("Missing RegionTracker entry in allocator state".into())
+                })?
                 .value(),
-        );
+        )?;
 
         let mut state = self.state.lock();
         state.allocators = Allocators {

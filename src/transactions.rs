@@ -1217,9 +1217,10 @@ impl WriteTransaction {
         let table = system_tables.open_system_table(self, SAVEPOINT_TABLE)?;
         let value = table.get(SavepointId(id))?;
 
-        value
-            .map(|x| x.value().to_savepoint(self.transaction_tracker.clone()))
-            .ok_or(SavepointError::InvalidSavepoint)
+        match value {
+            Some(x) => Ok(x.value().to_savepoint(self.transaction_tracker.clone())?),
+            None => Err(SavepointError::InvalidSavepoint),
+        }
     }
 
     /// Delete the given persistent savepoint.
@@ -1238,7 +1239,7 @@ impl WriteTransaction {
         if let Some(serialized) = savepoint {
             let savepoint = serialized
                 .value()
-                .to_savepoint(self.transaction_tracker.clone());
+                .to_savepoint(self.transaction_tracker.clone())?;
             self.deleted_persistent_savepoints
                 .lock()
                 .push((savepoint.get_id(), savepoint.get_transaction_id()));

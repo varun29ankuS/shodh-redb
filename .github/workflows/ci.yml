@@ -195,6 +195,11 @@ jobs:
         with:
           version: "24.0.0"
 
+      - name: Clean stale cargo-fuzz
+        if: matrix.fuzz
+        run: rm -f ~/.cargo/bin/cargo-fuzz
+        shell: bash
+
       - name: Install cargo-fuzz
         if: matrix.fuzz
         uses: taiki-e/install-action@v2

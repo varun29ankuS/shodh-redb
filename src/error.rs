@@ -149,6 +149,39 @@ pub enum StorageError {
         /// The oldest transaction ID still in the CDC log
         oldest_retained_txn_id: u64,
     },
+    /// A configuration parameter is invalid (e.g. page size, region size).
+    InvalidConfiguration {
+        /// Description of the invalid configuration
+        message: String,
+    },
+    /// The IVF-PQ index has not been trained yet
+    IndexNotTrained {
+        /// Name of the untrained index
+        index_name: String,
+    },
+    /// Vector dimensionality does not match the index configuration
+    DimensionMismatch {
+        /// Name of the index
+        index_name: String,
+        /// Dimension the index was configured with
+        expected: usize,
+        /// Dimension of the provided vector
+        actual: usize,
+    },
+    /// IVF-PQ index configuration is invalid
+    InvalidIndexConfig {
+        /// Description of the invalid configuration
+        detail: String,
+    },
+    /// On-disk format validation failed (magic number, version, layout, record structure)
+    FormatError {
+        /// Description of the format violation
+        detail: String,
+    },
+    /// Database requires recovery before this operation can proceed
+    RecoveryRequired,
+    /// Storage space exhausted; the allocator cannot grow further
+    OutOfSpace,
     /// Timed out waiting for a write transaction lock (`no_std` spin-lock).
     /// This is transient contention, not corruption.
     LockTimeout(String),
@@ -261,6 +294,23 @@ impl From<StorageError> for Error {
                 cursor_txn_id,
                 oldest_retained_txn_id,
             },
+            StorageError::InvalidConfiguration { message } => {
+                Error::InvalidConfiguration { message }
+            }
+            StorageError::IndexNotTrained { index_name } => Error::IndexNotTrained { index_name },
+            StorageError::DimensionMismatch {
+                index_name,
+                expected,
+                actual,
+            } => Error::DimensionMismatch {
+                index_name,
+                expected,
+                actual,
+            },
+            StorageError::InvalidIndexConfig { detail } => Error::InvalidIndexConfig { detail },
+            StorageError::FormatError { detail } => Error::FormatError { detail },
+            StorageError::RecoveryRequired => Error::RecoveryRequired,
+            StorageError::OutOfSpace => Error::OutOfSpace,
             StorageError::LockTimeout(msg) => Error::LockTimeout(msg),
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
@@ -378,6 +428,37 @@ impl Display for StorageError {
                     f,
                     "CDC cursor (txn_id={cursor_txn_id}) is behind the retention window (oldest retained txn_id={oldest_retained_txn_id})"
                 )
+            }
+            StorageError::InvalidConfiguration { message } => {
+                write!(f, "Invalid configuration: {message}")
+            }
+            StorageError::IndexNotTrained { index_name } => {
+                write!(f, "IVF-PQ index '{index_name}' has not been trained")
+            }
+            StorageError::DimensionMismatch {
+                index_name,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "Dimension mismatch on index '{index_name}': expected {expected}, got {actual}"
+                )
+            }
+            StorageError::InvalidIndexConfig { detail } => {
+                write!(f, "Invalid index configuration: {detail}")
+            }
+            StorageError::FormatError { detail } => {
+                write!(f, "Format error: {detail}")
+            }
+            StorageError::RecoveryRequired => {
+                write!(
+                    f,
+                    "Database recovery required. Close and re-open the database."
+                )
+            }
+            StorageError::OutOfSpace => {
+                write!(f, "Storage space exhausted: allocator cannot grow further")
             }
             StorageError::LockTimeout(msg) => {
                 write!(f, "Lock timeout: {msg}")
@@ -988,6 +1069,39 @@ pub enum Error {
         /// The oldest transaction ID still in the CDC log
         oldest_retained_txn_id: u64,
     },
+    /// A configuration parameter is invalid (e.g. page size, region size)
+    InvalidConfiguration {
+        /// Description of the invalid configuration
+        message: String,
+    },
+    /// The IVF-PQ index has not been trained yet
+    IndexNotTrained {
+        /// Name of the untrained index
+        index_name: String,
+    },
+    /// Vector dimensionality does not match the index configuration
+    DimensionMismatch {
+        /// Name of the index
+        index_name: String,
+        /// Dimension the index was configured with
+        expected: usize,
+        /// Dimension of the provided vector
+        actual: usize,
+    },
+    /// IVF-PQ index configuration is invalid
+    InvalidIndexConfig {
+        /// Description of the invalid configuration
+        detail: String,
+    },
+    /// On-disk format validation failed (magic number, version, layout, record structure)
+    FormatError {
+        /// Description of the format violation
+        detail: String,
+    },
+    /// Database requires recovery before this operation can proceed
+    RecoveryRequired,
+    /// Storage space exhausted; the allocator cannot grow further
+    OutOfSpace,
     /// Timed out waiting for a write transaction lock (`no_std` spin-lock).
     LockTimeout(String),
     Io(BackendError),
@@ -1188,6 +1302,37 @@ impl Display for Error {
                     f,
                     "CDC cursor (txn_id={cursor_txn_id}) is behind the retention window (oldest retained txn_id={oldest_retained_txn_id})"
                 )
+            }
+            Error::InvalidConfiguration { message } => {
+                write!(f, "Invalid configuration: {message}")
+            }
+            Error::IndexNotTrained { index_name } => {
+                write!(f, "IVF-PQ index '{index_name}' has not been trained")
+            }
+            Error::DimensionMismatch {
+                index_name,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "Dimension mismatch on index '{index_name}': expected {expected}, got {actual}"
+                )
+            }
+            Error::InvalidIndexConfig { detail } => {
+                write!(f, "Invalid index configuration: {detail}")
+            }
+            Error::FormatError { detail } => {
+                write!(f, "Format error: {detail}")
+            }
+            Error::RecoveryRequired => {
+                write!(
+                    f,
+                    "Database recovery required. Close and re-open the database."
+                )
+            }
+            Error::OutOfSpace => {
+                write!(f, "Storage space exhausted: allocator cannot grow further")
             }
             Error::LockTimeout(msg) => {
                 write!(f, "Lock timeout: {msg}")

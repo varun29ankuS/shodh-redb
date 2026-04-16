@@ -23,6 +23,10 @@ use super::types::{decode_index_config, encode_index_config};
 /// Owned entry for cluster blob operations: `(vector_id, pq_codes, optional_raw_bytes)`.
 type OwnedBlobEntry = (u64, Vec<u8>, Option<Vec<u8>>);
 
+/// Maximum number of rerank candidates to prevent pathological allocations.
+/// 1M entries * 12 bytes each = ~12 MB, well within reasonable bounds.
+const MAX_RERANK_CANDIDATES: usize = 1_000_000;
+
 // ---------------------------------------------------------------------------
 // Table name helpers
 // ---------------------------------------------------------------------------
@@ -645,7 +649,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         );
 
         let cap = if params.rerank && self.config.store_raw_vectors {
-            params.candidates.max(params.k)
+            params.candidates.max(params.k).min(MAX_RERANK_CANDIDATES)
         } else {
             params.k
         };
@@ -1111,7 +1115,7 @@ impl ReadOnlyIvfPqIndex {
         );
 
         let cap = if params.rerank && self.config.store_raw_vectors {
-            params.candidates.max(params.k)
+            params.candidates.max(params.k).min(MAX_RERANK_CANDIDATES)
         } else {
             params.k
         };

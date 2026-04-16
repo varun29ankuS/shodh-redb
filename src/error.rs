@@ -75,6 +75,8 @@ pub enum StorageError {
     },
     /// A streaming blob writer is already active on this transaction
     BlobWriterActive,
+    /// The streaming blob writer has already been finished
+    BlobWriterFinished,
     /// The requested byte range exceeds the blob's length
     BlobRangeOutOfBounds {
         /// Total blob length in bytes
@@ -184,6 +186,7 @@ impl From<StorageError> for Error {
                 actual,
             },
             StorageError::BlobWriterActive => Error::BlobWriterActive,
+            StorageError::BlobWriterFinished => Error::BlobWriterFinished,
             StorageError::BlobRangeOutOfBounds {
                 blob_length,
                 requested_offset,
@@ -283,6 +286,9 @@ impl Display for StorageError {
                     f,
                     "Cannot create blob writer or store blob while another writer is active"
                 )
+            }
+            StorageError::BlobWriterFinished => {
+                write!(f, "Blob writer has already been finished")
             }
             StorageError::BlobRangeOutOfBounds {
                 blob_length,
@@ -902,6 +908,8 @@ pub enum Error {
     },
     /// A streaming blob writer is already active on this transaction
     BlobWriterActive,
+    /// The streaming blob writer has already been finished
+    BlobWriterFinished,
     /// The requested byte range exceeds the blob's length
     BlobRangeOutOfBounds {
         /// Total blob length in bytes
@@ -1072,6 +1080,9 @@ impl Display for Error {
                     f,
                     "Cannot create blob writer or store blob while another writer is active"
                 )
+            }
+            Error::BlobWriterFinished => {
+                write!(f, "Blob writer has already been finished")
             }
             Error::BlobRangeOutOfBounds {
                 blob_length,

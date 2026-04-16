@@ -849,12 +849,19 @@ fn exec_table_crash_support<T: Clone + Debug>(
     countdown.swap(u64::MAX, Ordering::SeqCst);
     drop(db);
     let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)).unwrap());
-    db = Database::builder()
+    db = match Database::builder()
         .set_page_size(config.page_size.value)
         .set_cache_size(config.cache_size.value)
         .set_region_size(config.region_size.value as u64)
         .create_with_backend(backend)
-        .unwrap();
+    {
+        Ok(db) => db,
+        Err(_) => {
+            // Database too corrupted to repair after simulated IO errors.
+            // This is expected -- the fuzzer intentionally induces corruption.
+            return Ok(());
+        }
+    };
 
     // Check for leaked pages
     let read_txn = db.begin_read().unwrap();

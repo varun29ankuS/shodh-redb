@@ -667,8 +667,9 @@ impl TransactionalMemory {
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
         let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
-        // TODO: This ends up always being true because this is called from check_integrity() once the db is already open
-        // TODO: Also we should recheck the layout
+        // Note: recovery_required is typically true here because this is called
+        // from check_integrity() after the database is already open and a write
+        // transaction has begun (which sets recovery_required).
         let mut was_clean = true;
         if header.recovery_required {
             if !header.pick_primary_for_repair(repair_info)? {
@@ -676,6 +677,20 @@ impl TransactionalMemory {
             }
             if repair_info.invalid_magic_number {
                 return Err(StorageError::format_error("Invalid magic number").into());
+            }
+            // Recheck the layout against the actual file length in case it changed
+            let blob_region_offset = header.primary_slot().blob_region_offset;
+            let btree_file_len = Self::effective_btree_file_len(&self.storage, blob_region_offset)?;
+            if header.layout().len() != btree_file_len {
+                let layout = header.layout();
+                let region_max_pages = layout.full_region_layout().num_pages();
+                let region_header_pages = layout.full_region_layout().get_header_pages();
+                header.set_layout(DatabaseLayout::recalculate(
+                    btree_file_len,
+                    region_header_pages,
+                    region_max_pages,
+                    self.page_size,
+                ));
             }
             self.storage
                 .write(0, DB_HEADER_SIZE, true)?
@@ -709,9 +724,20 @@ impl TransactionalMemory {
         self.state.lock().allocators.xxh3_hash()
     }
 
-    // TODO: need a clearer distinction between this and needs_repair()
+    /// Returns true if a storage failure has been detected and the database
+    /// needs recovery before further operations. This is set when I/O errors
+    /// occur during commit, rollback, or file growth, indicating that the
+    /// on-disk state may be inconsistent.
     pub(crate) fn storage_failure(&self) -> bool {
         self.needs_recovery.load(Ordering::Acquire)
+    }
+
+    /// Mark the database as needing recovery. Called when an I/O error occurs
+    /// during a critical operation (commit, rollback, resize) and the on-disk
+    /// state may be inconsistent. Once set, all subsequent write transactions
+    /// will fail with `RecoveryRequired` until the database is repaired.
+    fn mark_needs_recovery(&self) {
+        self.needs_recovery.store(true, Ordering::Release);
     }
 
     pub(crate) fn repair_primary_corrupted(&self) {
@@ -1000,7 +1026,7 @@ impl TransactionalMemory {
             shrink_policy,
         );
         if result.is_err() {
-            self.needs_recovery.store(true, Ordering::Release);
+            self.mark_needs_recovery();
         }
         result
     }
@@ -1086,9 +1112,7 @@ impl TransactionalMemory {
             let target_len = data_end + DB_HEADER_SIZE as u64;
             let result = self.storage.resize(target_len);
             if result.is_err() {
-                // TODO: it would be nice to have a more cohesive approach to setting this.
-                // we do it in commit() & rollback() on failure, but there are probably other places that need it
-                self.needs_recovery.store(true, Ordering::Release);
+                self.mark_needs_recovery();
                 return result;
             }
         }
@@ -1109,7 +1133,7 @@ impl TransactionalMemory {
         state.header = header;
         self.read_from_secondary.store(false, Ordering::Release);
         // Hold lock until read_from_secondary is set to false, so that the new primary state is read.
-        // TODO: maybe we can remove the whole read_from_secondary flag?
+        // Hold lock until read_from_secondary is false so readers see the new primary state.
         drop(state);
 
         // Reset pending blob state so the next transaction starts from committed header
@@ -1178,7 +1202,8 @@ impl TransactionalMemory {
             secondary.version = FILE_FORMAT_VERSION5;
         }
 
-        // TODO: maybe we can remove this flag and just update the in-memory DatabaseHeader state?
+        // Signal readers to use the secondary slot until the next durable commit
+        // promotes it to primary.
         self.read_from_secondary.store(true, Ordering::Release);
 
         Ok(())
@@ -1187,7 +1212,7 @@ impl TransactionalMemory {
     pub(crate) fn rollback_uncommitted_writes(&self) -> Result {
         let result = self.rollback_uncommitted_writes_inner();
         if result.is_err() {
-            self.needs_recovery.store(true, Ordering::Release);
+            self.mark_needs_recovery();
         }
         result
     }
@@ -1597,9 +1622,7 @@ impl TransactionalMemory {
         self.eof_mirror_size.store(0, Ordering::Release);
         let result = self.storage.resize(new_layout.len());
         if result.is_err() {
-            // TODO: it would be nice to have a more cohesive approach to setting this.
-            // we do it in commit() & rollback() on failure, but there are probably other places that need it
-            self.needs_recovery.store(true, Ordering::Release);
+            self.mark_needs_recovery();
             return result;
         }
 

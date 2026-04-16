@@ -108,12 +108,21 @@ impl BuddyAllocator {
         result
     }
 
-    pub(crate) fn from_bytes(data: &[u8]) -> Self {
+    pub(crate) fn from_bytes(data: &[u8]) -> Result<Self, crate::StorageError> {
+        if data.len() < FREE_END_OFFSETS {
+            return Err(crate::StorageError::Corrupted(
+                "BuddyAllocator: buffer too small for header".into(),
+            ));
+        }
         let max_order = data[MAX_ORDER_OFFSET];
         let num_pages = u32::from_le_bytes(
             data[NUM_PAGES_OFFSET..(NUM_PAGES_OFFSET + size_of::<u32>())]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| {
+                    crate::StorageError::Corrupted(
+                        "BuddyAllocator: failed to read num_pages".into(),
+                    )
+                })?,
         );
 
         let mut metadata = FREE_END_OFFSETS;
@@ -121,21 +130,35 @@ impl BuddyAllocator {
 
         let mut free = vec![];
         for _ in 0..=max_order {
+            if metadata + size_of::<u32>() > data.len() {
+                return Err(crate::StorageError::Corrupted(
+                    "BuddyAllocator: truncated offset table".into(),
+                ));
+            }
             let data_end = u32::from_le_bytes(
                 data[metadata..(metadata + size_of::<u32>())]
                     .try_into()
-                    .unwrap(),
+                    .map_err(|_| {
+                        crate::StorageError::Corrupted(
+                            "BuddyAllocator: failed to read offset".into(),
+                        )
+                    })?,
             ) as usize;
-            free.push(BtreeBitmap::from_bytes(&data[data_start..data_end]));
+            if data_end > data.len() || data_start > data_end {
+                return Err(crate::StorageError::Corrupted(
+                    "BuddyAllocator: offset out of bounds".into(),
+                ));
+            }
+            free.push(BtreeBitmap::from_bytes(&data[data_start..data_end])?);
             data_start = data_end;
             metadata += size_of::<u32>();
         }
 
-        Self {
+        Ok(Self {
             free,
             len: num_pages,
             max_order,
-        }
+        })
     }
 
     #[inline]

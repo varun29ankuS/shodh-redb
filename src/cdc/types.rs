@@ -48,7 +48,7 @@ impl ChangeOp {
             0 => Ok(Self::Insert),
             1 => Ok(Self::Update),
             2 => Ok(Self::Delete),
-            other => Err(StorageError::Corrupted(format!(
+            other => Err(StorageError::format_error(format!(
                 "invalid ChangeOp discriminant byte: {other}"
             ))),
         }
@@ -237,13 +237,13 @@ impl fmt::Debug for CdcRecord {
 impl CdcRecord {
     pub fn from_event(event: &CdcEvent) -> Result<Self, StorageError> {
         if u16::try_from(event.table_name.len()).is_err() {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::format_error(format!(
                 "CDC table_name exceeds u16::MAX bytes ({})",
                 event.table_name.len()
             )));
         }
         if event.key.len() >= NONE_SENTINEL as usize {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::format_error(format!(
                 "CDC key exceeds maximum serializable length ({})",
                 event.key.len()
             )));
@@ -253,7 +253,7 @@ impl CdcRecord {
             .as_ref()
             .is_some_and(|v| v.len() >= NONE_SENTINEL as usize)
         {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::format_error(format!(
                 "CDC new_value exceeds maximum serializable length ({})",
                 event.new_value.as_ref().unwrap().len()
             )));
@@ -263,7 +263,7 @@ impl CdcRecord {
             .as_ref()
             .is_some_and(|v| v.len() >= NONE_SENTINEL as usize)
         {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::format_error(format!(
                 "CDC old_value exceeds maximum serializable length ({})",
                 event.old_value.as_ref().unwrap().len()
             )));
@@ -330,7 +330,7 @@ impl CdcRecord {
         let mut pos = 0;
 
         if data.is_empty() {
-            return Err(StorageError::Corrupted("CDC record is empty".into()));
+            return Err(StorageError::format_error("CDC record is empty"));
         }
 
         // Detect format: if first byte is the magic, this is a versioned
@@ -339,37 +339,37 @@ impl CdcRecord {
         if data[pos] == CDC_FORMAT_MAGIC {
             pos += 1; // skip magic
             if pos >= data.len() {
-                return Err(StorageError::Corrupted(
-                    "CDC record truncated at version byte".into(),
+                return Err(StorageError::format_error(
+                    "CDC record truncated at version byte",
                 ));
             }
             let version = data[pos];
             pos += 1;
             if version != CDC_FORMAT_VERSION {
-                return Err(StorageError::Corrupted(format!(
+                return Err(StorageError::format_error(format!(
                     "unsupported CDC record version {version} (expected {CDC_FORMAT_VERSION})"
                 )));
             }
         }
 
         if pos >= data.len() {
-            return Err(StorageError::Corrupted(
-                "CDC record truncated at op byte".into(),
+            return Err(StorageError::format_error(
+                "CDC record truncated at op byte",
             ));
         }
         let op = ChangeOp::from_u8(data[pos])?;
         pos += 1;
 
         if pos + 2 > data.len() {
-            return Err(StorageError::Corrupted(
-                "CDC record truncated at table name length".into(),
+            return Err(StorageError::format_error(
+                "CDC record truncated at table name length",
             ));
         }
         let name_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap());
         pos += 2;
         if pos + usize::from(name_len) > data.len() {
-            return Err(StorageError::Corrupted(
-                "CDC record truncated at table name".into(),
+            return Err(StorageError::format_error(
+                "CDC record truncated at table name",
             ));
         }
         let table_name =
@@ -377,23 +377,23 @@ impl CdcRecord {
         pos += usize::from(name_len);
 
         if pos + 4 > data.len() {
-            return Err(StorageError::Corrupted(
-                "CDC record truncated at key length".into(),
+            return Err(StorageError::format_error(
+                "CDC record truncated at key length",
             ));
         }
         let key_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
         pos += 4;
         if pos + key_len as usize > data.len() {
-            return Err(StorageError::Corrupted(
-                "CDC record truncated at key data".into(),
+            return Err(StorageError::format_error(
+                "CDC record truncated at key data",
             ));
         }
         let key = data[pos..pos + key_len as usize].to_vec();
         pos += key_len as usize;
 
         if pos + 4 > data.len() {
-            return Err(StorageError::Corrupted(
-                "CDC record truncated at new value length".into(),
+            return Err(StorageError::format_error(
+                "CDC record truncated at new value length",
             ));
         }
         let new_val_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
@@ -402,8 +402,8 @@ impl CdcRecord {
             None
         } else {
             if pos + new_val_len as usize > data.len() {
-                return Err(StorageError::Corrupted(
-                    "CDC record truncated at new value data".into(),
+                return Err(StorageError::format_error(
+                    "CDC record truncated at new value data",
                 ));
             }
             let v = data[pos..pos + new_val_len as usize].to_vec();
@@ -412,8 +412,8 @@ impl CdcRecord {
         };
 
         if pos + 4 > data.len() {
-            return Err(StorageError::Corrupted(
-                "CDC record truncated at old value length".into(),
+            return Err(StorageError::format_error(
+                "CDC record truncated at old value length",
             ));
         }
         let old_val_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
@@ -422,8 +422,8 @@ impl CdcRecord {
             None
         } else {
             if pos + old_val_len as usize > data.len() {
-                return Err(StorageError::Corrupted(
-                    "CDC record truncated at old value data".into(),
+                return Err(StorageError::format_error(
+                    "CDC record truncated at old value data",
                 ));
             }
             let v = data[pos..pos + old_val_len as usize].to_vec();
@@ -631,10 +631,10 @@ mod tests {
     fn cdc_change_op_invalid_discriminant() {
         let err = ChangeOp::from_u8(255).unwrap_err();
         match err {
-            crate::error::StorageError::Corrupted(msg) => {
-                assert!(msg.contains("invalid ChangeOp discriminant"));
+            crate::error::StorageError::FormatError { detail } => {
+                assert!(detail.contains("invalid ChangeOp discriminant"));
             }
-            other => panic!("expected StorageError::Corrupted, got: {other:?}"),
+            other => panic!("expected StorageError::FormatError, got: {other:?}"),
         }
     }
 
@@ -642,10 +642,10 @@ mod tests {
     fn cdc_record_deserialize_empty_data() {
         let err = CdcRecord::deserialize(&[]).unwrap_err();
         match err {
-            crate::error::StorageError::Corrupted(msg) => {
-                assert!(msg.contains("empty"));
+            crate::error::StorageError::FormatError { detail } => {
+                assert!(detail.contains("empty"));
             }
-            other => panic!("expected StorageError::Corrupted, got: {other:?}"),
+            other => panic!("expected StorageError::FormatError, got: {other:?}"),
         }
     }
 
@@ -663,10 +663,10 @@ mod tests {
         bytes[0] = 99;
         let err = CdcRecord::deserialize(&bytes).unwrap_err();
         match err {
-            crate::error::StorageError::Corrupted(msg) => {
-                assert!(msg.contains("invalid ChangeOp discriminant"));
+            crate::error::StorageError::FormatError { detail } => {
+                assert!(detail.contains("invalid ChangeOp discriminant"));
             }
-            other => panic!("expected StorageError::Corrupted, got: {other:?}"),
+            other => panic!("expected StorageError::FormatError, got: {other:?}"),
         }
     }
 }

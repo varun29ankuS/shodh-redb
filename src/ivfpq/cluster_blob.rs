@@ -180,7 +180,7 @@ impl<'a> ClusterBlobRef<'a> {
     /// `dim` is the vector dimensionality (needed to validate raw vector sizes).
     pub fn new(data: &'a [u8], expected_pq_len: u16, dim: usize) -> crate::Result<Self> {
         if data.len() < HEADER_SIZE {
-            return Err(StorageError::Corrupted(alloc::format!(
+            return Err(StorageError::format_error(alloc::format!(
                 "cluster blob too small: {} < {HEADER_SIZE}",
                 data.len()
             )));
@@ -188,14 +188,14 @@ impl<'a> ClusterBlobRef<'a> {
 
         let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         if magic != MAGIC {
-            return Err(StorageError::Corrupted(alloc::format!(
+            return Err(StorageError::format_error(alloc::format!(
                 "cluster blob bad magic: {magic:#010x}"
             )));
         }
 
         let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         if version != VERSION {
-            return Err(StorageError::Corrupted(alloc::format!(
+            return Err(StorageError::format_error(alloc::format!(
                 "cluster blob version {version} != {VERSION}"
             )));
         }
@@ -206,7 +206,7 @@ impl<'a> ClusterBlobRef<'a> {
         let has_raw = flags & FLAG_HAS_RAW_VECTORS != 0;
 
         if pq_len != expected_pq_len {
-            return Err(StorageError::Corrupted(alloc::format!(
+            return Err(StorageError::format_error(alloc::format!(
                 "cluster blob pq_len {pq_len} != expected {expected_pq_len}"
             )));
         }

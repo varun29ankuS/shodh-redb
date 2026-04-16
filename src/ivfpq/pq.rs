@@ -157,9 +157,9 @@ pub fn train_codebooks(
     _metric: DistanceMetric,
 ) -> Result<Codebooks, crate::StorageError> {
     if dim == 0 || num_subvectors == 0 || dim % num_subvectors != 0 {
-        return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+        return Err(crate::StorageError::invalid_index_config(
             "PQ training: dim must be non-zero and divisible by num_subvectors",
-        )));
+        ));
     }
     let n = flat_vectors.len() / dim;
     let sub_dim = dim / num_subvectors;

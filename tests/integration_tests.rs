@@ -1658,8 +1658,8 @@ fn does_not_exist() {
     let tmpfile = create_tempfile();
 
     let result = Database::open(tmpfile.path());
-    if let Err(DatabaseError::Storage(StorageError::Corrupted(_))) = result {
-        // Empty file is detected as corrupted
+    if let Err(DatabaseError::Storage(StorageError::FormatError { .. })) = result {
+        // Empty file is detected as format error
     } else {
         panic!();
     }
@@ -1670,15 +1670,15 @@ fn invalid_database_file() {
     let mut tmpfile = create_tempfile();
     tmpfile.write_all(b"hi").unwrap();
     let result = Database::open(tmpfile.path());
-    if let Err(DatabaseError::Storage(StorageError::Corrupted(_))) = result {
-        // Invalid magic number is detected as corrupted
+    if let Err(DatabaseError::Storage(StorageError::FormatError { .. })) = result {
+        // Invalid magic number is detected as format error
     } else {
         panic!();
     }
 
     let result = Database::create(tmpfile.path());
-    if let Err(DatabaseError::Storage(StorageError::Corrupted(_))) = result {
-        // Invalid existing file is detected as corrupted
+    if let Err(DatabaseError::Storage(StorageError::FormatError { .. })) = result {
+        // Invalid existing file is detected as format error
     } else {
         panic!();
     }

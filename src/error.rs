@@ -532,6 +532,42 @@ impl StorageError {
             detail,
         }
     }
+
+    pub(crate) fn invalid_config(message: impl Into<String>) -> Self {
+        StorageError::InvalidConfiguration {
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn index_not_trained(index_name: impl Into<String>) -> Self {
+        StorageError::IndexNotTrained {
+            index_name: index_name.into(),
+        }
+    }
+
+    pub(crate) fn dimension_mismatch(
+        index_name: impl Into<String>,
+        expected: usize,
+        actual: usize,
+    ) -> Self {
+        StorageError::DimensionMismatch {
+            index_name: index_name.into(),
+            expected,
+            actual,
+        }
+    }
+
+    pub(crate) fn invalid_index_config(detail: impl Into<String>) -> Self {
+        StorageError::InvalidIndexConfig {
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn format_error(detail: impl Into<String>) -> Self {
+        StorageError::FormatError {
+            detail: detail.into(),
+        }
+    }
 }
 
 /// Errors related to opening tables

@@ -11,6 +11,21 @@ use crate::error::BackendError;
 use core::fmt::{Debug, Formatter};
 use ftl::FlashTranslationLayer;
 
+/// Aggregate wear statistics for the flash device.
+#[derive(Debug, Clone, Copy)]
+pub struct FlashWearStats {
+    /// Lowest erase count across all physical blocks.
+    pub min_erase_count: u32,
+    /// Highest erase count across all physical blocks.
+    pub max_erase_count: u32,
+    /// Sum of all erase counts (divide by `total_blocks` for mean).
+    pub total_erase_count: u64,
+    /// Total number of physical blocks tracked.
+    pub total_blocks: u32,
+    /// Number of blocks marked as bad.
+    pub bad_block_count: u32,
+}
+
 /// Storage backend for bare-metal flash devices.
 ///
 /// Wraps a user-provided [`FlashHardware`] implementation with a full Flash
@@ -63,6 +78,28 @@ impl<H: FlashHardware> FlashBackend<H> {
     pub fn mount(hw: H) -> core::result::Result<Self, BackendError> {
         let ftl = FlashTranslationLayer::mount(hw)?;
         Ok(Self { ftl })
+    }
+
+    /// Aggregate wear statistics for the flash device.
+    pub fn wear_stats(&self) -> FlashWearStats {
+        self.ftl.wear_stats()
+    }
+
+    /// Set the static wear-leveling threshold (default: 100 erase cycles).
+    ///
+    /// A swap between hot and cold blocks is triggered when the erase count
+    /// delta exceeds this value. Lower values spread wear more aggressively
+    /// but increase block moves. Higher values reduce churn for low-write
+    /// workloads.
+    pub fn set_wear_leveling_threshold(&self, threshold: u32) {
+        self.ftl.set_wl_threshold(threshold);
+    }
+
+    /// Set the static wear-leveling check interval (default: every 256 erases).
+    ///
+    /// Controls how often the FTL scans for hot/cold block imbalance.
+    pub fn set_wear_leveling_interval(&self, interval: u32) {
+        self.ftl.set_wl_interval(interval);
     }
 
     /// Format the flash device and create a fresh FTL.

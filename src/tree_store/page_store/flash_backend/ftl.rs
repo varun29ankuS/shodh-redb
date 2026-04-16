@@ -153,6 +153,10 @@ struct FtlState<H: FlashHardware> {
     data_region_start: u32,
     /// Erase operations since last static wear-level check.
     ops_since_static_wl: u32,
+    /// Configurable wear-leveling threshold (default: `STATIC_WL_THRESHOLD`).
+    wl_threshold: u32,
+    /// Configurable wear-leveling check interval (default: `STATIC_WL_INTERVAL`).
+    wl_interval: u32,
 }
 
 /// Flash Translation Layer providing logical-to-physical block mapping, wear
@@ -216,6 +220,8 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
                         logical_len,
                         data_region_start,
                         ops_since_static_wl: 0,
+                        wl_threshold: STATIC_WL_THRESHOLD,
+                        wl_interval: STATIC_WL_INTERVAL,
                     }),
                 })
             }
@@ -286,6 +292,8 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             logical_len: 0,
             data_region_start,
             ops_since_static_wl: 0,
+            wl_threshold: STATIC_WL_THRESHOLD,
+            wl_interval: STATIC_WL_INTERVAL,
         };
 
         // Persist initial metadata
@@ -489,7 +497,7 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             }
 
             // Check for static wear leveling
-            if state.ops_since_static_wl >= STATIC_WL_INTERVAL {
+            if state.ops_since_static_wl >= state.wl_interval {
                 Self::try_static_wear_level(&mut state)?;
                 state.ops_since_static_wl = 0;
             }
@@ -572,6 +580,29 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         } = *state;
         journal.commit(hw, &metadata)?;
         hw.sync()
+    }
+
+    pub fn set_wl_threshold(&self, threshold: u32) {
+        self.state.write().wl_threshold = threshold;
+    }
+
+    pub fn set_wl_interval(&self, interval: u32) {
+        self.state.write().wl_interval = interval.max(1);
+    }
+
+    /// Aggregate wear statistics for the flash device.
+    pub fn wear_stats(&self) -> super::FlashWearStats {
+        let state = self.state.read();
+        let (min_erase, max_erase, total_erase) = state.erase_counts.stats();
+        let total_blocks = state.erase_counts.len();
+        let bad_block_count = total_blocks.saturating_sub(state.bad_blocks.usable_block_count());
+        super::FlashWearStats {
+            min_erase_count: min_erase,
+            max_erase_count: max_erase,
+            total_erase_count: total_erase,
+            total_blocks,
+            bad_block_count,
+        }
     }
 
     /// Shutdown: final metadata persist.
@@ -668,7 +699,7 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         let swap =
             state
                 .erase_counts
-                .check_static_swap(STATIC_WL_THRESHOLD, &in_use_global, &free_global);
+                .check_static_swap(state.wl_threshold, &in_use_global, &free_global);
 
         if swap.is_some() {
             // check_static_swap confirmed the erase count delta exceeds the

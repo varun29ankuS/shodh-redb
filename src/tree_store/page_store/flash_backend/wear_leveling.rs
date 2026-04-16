@@ -107,4 +107,20 @@ impl EraseCountTable {
     pub fn len(&self) -> u32 {
         self.counts.len() as u32
     }
+
+    /// Compute aggregate wear statistics across all tracked blocks.
+    pub fn stats(&self) -> (u32, u32, u64) {
+        let mut min_count = u32::MAX;
+        let mut max_count = 0u32;
+        let mut total = 0u64;
+        for &c in &self.counts {
+            min_count = min_count.min(c);
+            max_count = max_count.max(c);
+            total += u64::from(c);
+        }
+        if self.counts.is_empty() {
+            min_count = 0;
+        }
+        (min_count, max_count, total)
+    }
 }

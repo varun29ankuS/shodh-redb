@@ -23,6 +23,30 @@ use super::types::{decode_index_config, encode_index_config};
 /// Owned entry for cluster blob operations: `(vector_id, pq_codes, optional_raw_bytes)`.
 type OwnedBlobEntry = (u64, Vec<u8>, Option<Vec<u8>>);
 
+/// Maximum number of rerank candidates to prevent pathological allocations.
+/// 1M entries * 12 bytes each = ~12 MB, well within reasonable bounds.
+const MAX_RERANK_CANDIDATES: usize = 1_000_000;
+
+/// Progress report emitted during IVF-PQ index training.
+#[derive(Debug, Clone)]
+pub enum TrainProgress {
+    /// Collecting and validating training vectors.
+    CollectingVectors { count: usize },
+    /// Training IVF centroids via k-means.
+    TrainingCentroids {
+        num_clusters: usize,
+        num_vectors: usize,
+    },
+    /// Computing residual vectors for PQ training.
+    ComputingResiduals { num_vectors: usize },
+    /// Training PQ codebooks.
+    TrainingCodebooks { num_subvectors: usize },
+    /// Persisting trained data to storage.
+    Persisting,
+    /// Training complete.
+    Done,
+}
+
 // ---------------------------------------------------------------------------
 // Table name helpers
 // ---------------------------------------------------------------------------
@@ -300,6 +324,129 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         self.centroids = Some(centroid_data);
         self.codebooks = Some(codebooks_trained);
 
+        Ok(())
+    }
+
+    /// Train the IVF-PQ index with a progress callback.
+    ///
+    /// Behaves identically to [`train`](Self::train) but invokes `progress`
+    /// at each major phase of training so callers can display progress bars
+    /// or log status.
+    pub fn train_with_progress<I, F>(
+        &mut self,
+        training_vectors: I,
+        max_iter: usize,
+        progress: F,
+    ) -> crate::Result<()>
+    where
+        I: Iterator<Item = (u64, Vec<f32>)>,
+        F: Fn(&TrainProgress),
+    {
+        validate_config(&self.config)?;
+        let dim = self.config.dim as usize;
+        let num_clusters = self.requested_num_clusters as usize;
+        let num_subvectors = self.config.num_subvectors as usize;
+
+        let mut flat: Vec<f32> = Vec::new();
+        let mut count = 0usize;
+        for (_id, mut vec) in training_vectors {
+            if vec.len() != dim {
+                return Err(StorageError::Corrupted(alloc::format!(
+                    "IVF-PQ '{}': training vector dim {} != {}",
+                    self.name,
+                    vec.len(),
+                    dim,
+                )));
+            }
+            if self.config.metric == DistanceMetric::Cosine {
+                l2_normalize(&mut vec);
+            }
+            flat.extend_from_slice(&vec);
+            count += 1;
+        }
+        progress(&TrainProgress::CollectingVectors { count });
+
+        let n = flat.len() / dim;
+        if n == 0 {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "IVF-PQ '{}': no training vectors provided",
+                self.name,
+            )));
+        }
+
+        progress(&TrainProgress::TrainingCentroids {
+            num_clusters,
+            num_vectors: n,
+        });
+        let centroid_data = kmeans::kmeans(&flat, dim, num_clusters, max_iter, self.config.metric);
+
+        let actual_k = centroid_data.len() / dim;
+        let old_k = self.config.num_clusters as usize;
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.config.num_clusters = actual_k as u32;
+        }
+
+        progress(&TrainProgress::ComputingResiduals { num_vectors: n });
+        let mut residuals = Vec::with_capacity(flat.len());
+        for i in 0..n {
+            let vec_slice = &flat[i * dim..(i + 1) * dim];
+            let (cid, _) = kmeans::assign_nearest(
+                vec_slice,
+                &centroid_data,
+                dim,
+                actual_k,
+                self.config.metric,
+            );
+            let c_offset = cid as usize * dim;
+            for d in 0..dim {
+                residuals.push(vec_slice[d] - centroid_data[c_offset + d]);
+            }
+        }
+
+        progress(&TrainProgress::TrainingCodebooks { num_subvectors });
+        let codebooks_trained = pq::train_codebooks(
+            &residuals,
+            dim,
+            num_subvectors,
+            max_iter,
+            self.config.metric,
+        )?;
+
+        self.clear_stale_training_data(old_k, actual_k)?;
+
+        progress(&TrainProgress::Persisting);
+        {
+            let tn = centroids_name(&self.name);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
+            let mut table = self.txn.open_storage_table(def)?;
+            for c in 0..actual_k {
+                let bytes = f32_slice_to_le_bytes(&centroid_data[c * dim..(c + 1) * dim]);
+                #[allow(clippy::cast_possible_truncation)]
+                table.st_insert(&(c as u32), &bytes.as_slice())?;
+            }
+        }
+
+        {
+            let tn = codebooks_name(&self.name);
+            let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
+            let mut table = self.txn.open_storage_table(def)?;
+            for m in 0..num_subvectors {
+                let bytes = codebooks_trained.serialize_codebook(m);
+                #[allow(clippy::cast_possible_truncation)]
+                table.st_insert(&(m as u32), &bytes.as_slice())?;
+            }
+        }
+
+        self.config.state = STATE_TRAINED;
+        self.config.num_vectors = 0;
+        self.persist_config_inner()?;
+        self.config_dirty = false;
+
+        self.centroids = Some(centroid_data);
+        self.codebooks = Some(codebooks_trained);
+
+        progress(&TrainProgress::Done);
         Ok(())
     }
 
@@ -645,7 +792,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         );
 
         let cap = if params.rerank && self.config.store_raw_vectors {
-            params.candidates.max(params.k)
+            params.candidates.max(params.k).min(MAX_RERANK_CANDIDATES)
         } else {
             params.k
         };
@@ -1111,7 +1258,7 @@ impl ReadOnlyIvfPqIndex {
         );
 
         let cap = if params.rerank && self.config.store_raw_vectors {
-            params.candidates.max(params.k)
+            params.candidates.max(params.k).min(MAX_RERANK_CANDIDATES)
         } else {
             params.k
         };

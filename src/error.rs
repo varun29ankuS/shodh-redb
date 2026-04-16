@@ -75,6 +75,8 @@ pub enum StorageError {
     },
     /// A streaming blob writer is already active on this transaction
     BlobWriterActive,
+    /// The streaming blob writer has already been finished
+    BlobWriterFinished,
     /// The requested byte range exceeds the blob's length
     BlobRangeOutOfBounds {
         /// Total blob length in bytes
@@ -139,6 +141,14 @@ pub enum StorageError {
         /// Static description of the corruption
         detail: &'static str,
     },
+    /// A CDC cursor position falls behind the retention window, meaning
+    /// entries have been pruned and the consumer may have missed changes.
+    CdcCursorBehindRetention {
+        /// The cursor position (transaction ID the consumer last processed)
+        cursor_txn_id: u64,
+        /// The oldest transaction ID still in the CDC log
+        oldest_retained_txn_id: u64,
+    },
     /// Timed out waiting for a write transaction lock (`no_std` spin-lock).
     /// This is transient contention, not corruption.
     LockTimeout(String),
@@ -184,6 +194,7 @@ impl From<StorageError> for Error {
                 actual,
             },
             StorageError::BlobWriterActive => Error::BlobWriterActive,
+            StorageError::BlobWriterFinished => Error::BlobWriterFinished,
             StorageError::BlobRangeOutOfBounds {
                 blob_length,
                 requested_offset,
@@ -243,6 +254,13 @@ impl From<StorageError> for Error {
                 page_order,
                 detail,
             },
+            StorageError::CdcCursorBehindRetention {
+                cursor_txn_id,
+                oldest_retained_txn_id,
+            } => Error::CdcCursorBehindRetention {
+                cursor_txn_id,
+                oldest_retained_txn_id,
+            },
             StorageError::LockTimeout(msg) => Error::LockTimeout(msg),
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
@@ -283,6 +301,9 @@ impl Display for StorageError {
                     f,
                     "Cannot create blob writer or store blob while another writer is active"
                 )
+            }
+            StorageError::BlobWriterFinished => {
+                write!(f, "Blob writer has already been finished")
             }
             StorageError::BlobRangeOutOfBounds {
                 blob_length,
@@ -347,6 +368,15 @@ impl Display for StorageError {
                 write!(
                     f,
                     "Page ({page_region}, {page_index}, order={page_order}) corrupted: {detail}"
+                )
+            }
+            StorageError::CdcCursorBehindRetention {
+                cursor_txn_id,
+                oldest_retained_txn_id,
+            } => {
+                write!(
+                    f,
+                    "CDC cursor (txn_id={cursor_txn_id}) is behind the retention window (oldest retained txn_id={oldest_retained_txn_id})"
                 )
             }
             StorageError::LockTimeout(msg) => {
@@ -902,6 +932,8 @@ pub enum Error {
     },
     /// A streaming blob writer is already active on this transaction
     BlobWriterActive,
+    /// The streaming blob writer has already been finished
+    BlobWriterFinished,
     /// The requested byte range exceeds the blob's length
     BlobRangeOutOfBounds {
         /// Total blob length in bytes
@@ -948,6 +980,13 @@ pub enum Error {
         page_index: u32,
         page_order: u8,
         detail: &'static str,
+    },
+    /// A CDC cursor position falls behind the retention window
+    CdcCursorBehindRetention {
+        /// The cursor position (transaction ID the consumer last processed)
+        cursor_txn_id: u64,
+        /// The oldest transaction ID still in the CDC log
+        oldest_retained_txn_id: u64,
     },
     /// Timed out waiting for a write transaction lock (`no_std` spin-lock).
     LockTimeout(String),
@@ -1073,6 +1112,9 @@ impl Display for Error {
                     "Cannot create blob writer or store blob while another writer is active"
                 )
             }
+            Error::BlobWriterFinished => {
+                write!(f, "Blob writer has already been finished")
+            }
             Error::BlobRangeOutOfBounds {
                 blob_length,
                 requested_offset,
@@ -1136,6 +1178,15 @@ impl Display for Error {
                 write!(
                     f,
                     "Page ({page_region}, {page_index}, order={page_order}) corrupted: {detail}"
+                )
+            }
+            Error::CdcCursorBehindRetention {
+                cursor_txn_id,
+                oldest_retained_txn_id,
+            } => {
+                write!(
+                    f,
+                    "CDC cursor (txn_id={cursor_txn_id}) is behind the retention window (oldest retained txn_id={oldest_retained_txn_id})"
                 )
             }
             Error::LockTimeout(msg) => {

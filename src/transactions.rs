@@ -482,6 +482,7 @@ pub struct DatabaseStats {
     pub(crate) tree_height: u32,
     pub(crate) allocated_pages: u64,
     pub(crate) free_pages: u64,
+    pub(crate) trailing_free_pages: u64,
     pub(crate) leaf_pages: u64,
     pub(crate) branch_pages: u64,
     pub(crate) stored_leaf_bytes: u64,
@@ -504,6 +505,12 @@ impl DatabaseStats {
     /// Number of pages currently free in the buddy allocator, available for immediate reuse
     pub fn free_pages(&self) -> u64 {
         self.free_pages
+    }
+
+    /// Number of contiguous free pages at the end of the database file.
+    /// These can be reclaimed by compaction to shrink the file.
+    pub fn trailing_free_pages(&self) -> u64 {
+        self.trailing_free_pages
     }
 
     /// Number of leaf pages that store user data
@@ -3185,6 +3192,7 @@ impl WriteTransaction {
             tree_height: data_tree_stats.tree_height(),
             allocated_pages: self.mem.count_allocated_pages()?,
             free_pages: self.mem.count_free_pages()?,
+            trailing_free_pages: self.mem.trailing_free_pages()?,
             leaf_pages: data_tree_stats.leaf_pages(),
             branch_pages: data_tree_stats.branch_pages(),
             stored_leaf_bytes: data_tree_stats.stored_bytes(),
@@ -4098,6 +4106,23 @@ impl ReadTransaction {
             return Ok(Vec::new());
         };
 
+        // Detect if the cursor is behind the retention window.
+        // If the oldest retained entry is newer than the requested position,
+        // entries have been pruned and the consumer may have missed changes.
+        if after_txn_id > 0 {
+            let mut all_range = btree.range::<core::ops::RangeFull, CdcKey>(&(..))?;
+            if let Some(first) = all_range.next() {
+                let first = first?;
+                let oldest_txn = first.key().transaction_id;
+                if oldest_txn > after_txn_id.saturating_add(1) {
+                    return Err(StorageError::CdcCursorBehindRetention {
+                        cursor_txn_id: after_txn_id,
+                        oldest_retained_txn_id: oldest_txn,
+                    });
+                }
+            }
+        }
+
         let start = CdcKey::new(after_txn_id.saturating_add(1), 0);
         let end = CdcKey::new(u64::MAX, u32::MAX);
         let range = btree.range::<core::ops::RangeInclusive<CdcKey>, CdcKey>(&(start..=end))?;
@@ -4122,6 +4147,21 @@ impl ReadTransaction {
         let Some(btree) = self.open_system_btree(CDC_LOG_TABLE)? else {
             return Ok(Vec::new());
         };
+
+        // Detect if the requested range start is behind the retention window.
+        if start_txn > 0 {
+            let mut all_range = btree.range::<core::ops::RangeFull, CdcKey>(&(..))?;
+            if let Some(first) = all_range.next() {
+                let first = first?;
+                let oldest_txn = first.key().transaction_id;
+                if oldest_txn > start_txn {
+                    return Err(StorageError::CdcCursorBehindRetention {
+                        cursor_txn_id: start_txn,
+                        oldest_retained_txn_id: oldest_txn,
+                    });
+                }
+            }
+        }
 
         let start = CdcKey::new(start_txn, 0);
         let end = CdcKey::new(end_txn, u32::MAX);

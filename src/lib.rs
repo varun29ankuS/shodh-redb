@@ -108,7 +108,7 @@ pub use table::{
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
 pub use tree_store::{
     AccessGuard, AccessGuardMut, AccessGuardMutInPlace, CompressionConfig, FlashBackend,
-    FlashGeometry, FlashHardware, RawEntryGuard, RawEntryIter, Savepoint,
+    FlashGeometry, FlashHardware, FlashWearStats, RawEntryGuard, RawEntryIter, Savepoint,
 };
 pub use types::{Key, MutInPlaceValue, TypeName, Value};
 

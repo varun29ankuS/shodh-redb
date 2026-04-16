@@ -3041,7 +3041,7 @@ mod test {
         let err = Database::builder().open(tmpfile.path()).unwrap_err();
 
         match err {
-            DatabaseError::Storage(StorageError::Corrupted(_)) => {}
+            DatabaseError::Storage(StorageError::FormatError { .. }) => {}
             err => panic!("Unexpected error for empty file: {err}"),
         }
     }

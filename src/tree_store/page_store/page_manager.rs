@@ -23,7 +23,6 @@ use crate::{DatabaseError, Result, StorageError};
 use alloc::boxed::Box;
 #[cfg(feature = "std")]
 use alloc::format;
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -179,9 +178,9 @@ impl TransactionalMemory {
         read_verification_callback: Option<Arc<ReadVerificationCallback>>,
     ) -> Result<Self, DatabaseError> {
         if !page_size.is_power_of_two() || page_size < DB_HEADER_SIZE {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
+            return Err(StorageError::invalid_config(
                 "page_size must be a power of two and at least DB_HEADER_SIZE",
-            ))
+            )
             .into());
         }
 
@@ -191,10 +190,7 @@ impl TransactionalMemory {
             (u64::from(MAX_PAGE_INDEX) + 1) * page_size as u64,
         );
         if !region_size.is_power_of_two() {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
-                "region_size must be a power of two",
-            ))
-            .into());
+            return Err(StorageError::invalid_config("region_size must be a power of two").into());
         }
 
         let storage = PagedCachedFile::new(
@@ -213,8 +209,8 @@ impl TransactionalMemory {
                     .read_direct(0, MAGICNUMBER.len())?
                     .try_into()
                     .map_err(|_| {
-                        StorageError::Corrupted(
-                            "Failed to read magic number: unexpected byte length".to_string(),
+                        StorageError::format_error(
+                            "Failed to read magic number: unexpected byte length",
                         )
                     })?
             } else {
@@ -224,18 +220,12 @@ impl TransactionalMemory {
         if initial_storage_len > 0 {
             // File already exists check that the magic number matches
             if magic_number != MAGICNUMBER {
-                return Err(StorageError::Corrupted(alloc::string::String::from(
-                    "Invalid database file",
-                ))
-                .into());
+                return Err(StorageError::format_error("Invalid database file").into());
             }
         } else {
             // File is empty, check that we're allowed to initialize a new database (i.e. the caller is Database::create() and not open())
             if !allow_initialize {
-                return Err(StorageError::Corrupted(alloc::string::String::from(
-                    "Invalid database file",
-                ))
-                .into());
+                return Err(StorageError::format_error("Invalid database file").into());
             }
         }
 
@@ -255,16 +245,16 @@ impl TransactionalMemory {
             let starting_size = size + tracker_space;
 
             let page_size_u64 = u64::try_from(page_size)
-                .map_err(|_| StorageError::Corrupted("page_size exceeds u64 range".to_string()))?;
-            let page_capacity = (region_size / page_size_u64).try_into().map_err(|_| {
-                StorageError::Corrupted("page_capacity exceeds u32 range".to_string())
-            })?;
+                .map_err(|_| StorageError::invalid_config("page_size exceeds u64 range"))?;
+            let page_capacity = (region_size / page_size_u64)
+                .try_into()
+                .map_err(|_| StorageError::invalid_config("page_capacity exceeds u32 range"))?;
             let layout = DatabaseLayout::calculate(
                 starting_size,
                 page_capacity,
                 NO_HEADER,
                 page_size.try_into().map_err(|_| {
-                    StorageError::Corrupted("page_size exceeds target integer range".to_string())
+                    StorageError::invalid_config("page_size exceeds target integer range")
                 })?,
             );
 
@@ -319,9 +309,9 @@ impl TransactionalMemory {
         let compression = header.compression;
 
         if header.page_size() as usize != page_size {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
+            return Err(StorageError::invalid_config(
                 "Database page_size does not match requested page_size",
-            ))
+            )
             .into());
         }
         // The blob region (if any) is appended after the B-tree region.
@@ -330,9 +320,9 @@ impl TransactionalMemory {
         let blob_region_offset = header.primary_slot().blob_region_offset;
         let btree_file_len = Self::effective_btree_file_len(&storage, blob_region_offset)?;
         if btree_file_len < header.layout().len() {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
+            return Err(StorageError::format_error(
                 "B-tree file length is less than the database layout length",
-            ))
+            )
             .into());
         }
         let needs_recovery = header.recovery_required || header.layout().len() != btree_file_len;
@@ -351,10 +341,9 @@ impl TransactionalMemory {
             ));
             header.pick_primary_for_repair(repair_info)?;
             if repair_info.invalid_magic_number {
-                return Err(StorageError::Corrupted(alloc::string::String::from(
-                    "Invalid magic number during recovery",
-                ))
-                .into());
+                return Err(
+                    StorageError::format_error("Invalid magic number during recovery").into(),
+                );
             }
             storage
                 .write(0, DB_HEADER_SIZE, true)?
@@ -365,9 +354,9 @@ impl TransactionalMemory {
 
         let layout = header.layout();
         if layout.len() != btree_file_len {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
+            return Err(StorageError::format_error(
                 "Database layout length does not match B-tree file length",
-            ))
+            )
             .into());
         }
         let region_size = layout.full_region_layout().len();
@@ -435,10 +424,7 @@ impl TransactionalMemory {
 
         let initial_storage_len = storage.raw_file_len()?;
         if initial_storage_len < DB_HEADER_SIZE as u64 {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
-                "Invalid database file",
-            ))
-            .into());
+            return Err(StorageError::format_error("Invalid database file").into());
         }
 
         let magic_number: [u8; MAGICNUMBER.len()] = storage
@@ -447,10 +433,7 @@ impl TransactionalMemory {
             .unwrap();
 
         if magic_number != MAGICNUMBER {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
-                "Invalid database file",
-            ))
-            .into());
+            return Err(StorageError::format_error("Invalid database file").into());
         }
 
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
@@ -495,7 +478,7 @@ impl TransactionalMemory {
         let layout = header.layout();
         let file_len = storage.raw_file_len()?;
         if file_len < layout.len() {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::format_error(format!(
                 "File too short: {file_len} bytes, expected at least {} bytes",
                 layout.len()
             ))
@@ -692,7 +675,7 @@ impl TransactionalMemory {
                 was_clean = false;
             }
             if repair_info.invalid_magic_number {
-                return Err(StorageError::Corrupted("Invalid magic number".to_string()).into());
+                return Err(StorageError::format_error("Invalid magic number").into());
             }
             self.storage
                 .write(0, DB_HEADER_SIZE, true)?
@@ -711,9 +694,7 @@ impl TransactionalMemory {
     pub(crate) fn begin_writable(&self) -> Result {
         let mut state = self.state.lock();
         if state.header.recovery_required {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
-                "Cannot begin writable transaction: recovery is already required",
-            )));
+            return Err(StorageError::RecoveryRequired);
         }
         state.header.recovery_required = true;
         self.write_header(&state.header)?;
@@ -951,9 +932,7 @@ impl TransactionalMemory {
 
     pub(crate) fn load_allocator_state(&self, tree: &AllocatorStateTree) -> Result {
         if !self.is_valid_allocator_state(tree)? {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
-                "Allocator state is stale or invalid for current transaction",
-            )));
+            return Err(StorageError::RecoveryRequired);
         }
 
         // Load the allocator state
@@ -1039,9 +1018,7 @@ impl TransactionalMemory {
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().is_empty());
         if self.needs_recovery.load(Ordering::Acquire) {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
-                "Cannot proceed: database recovery is required",
-            )));
+            return Err(StorageError::RecoveryRequired);
         }
 
         let mut state = self.state.lock();
@@ -1160,9 +1137,7 @@ impl TransactionalMemory {
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().is_empty());
         if self.needs_recovery.load(Ordering::Acquire) {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
-                "Cannot proceed: database recovery is required",
-            )));
+            return Err(StorageError::RecoveryRequired);
         }
 
         // Verify that recovery_required is set on disk. This is the invariant
@@ -1225,9 +1200,7 @@ impl TransactionalMemory {
             );
         }
         if self.needs_recovery.load(Ordering::Acquire) {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
-                "Cannot proceed: database recovery is required",
-            )));
+            return Err(StorageError::RecoveryRequired);
         }
         let mut state = self.state.lock();
         let mut guard = self.allocated_since_commit.lock();

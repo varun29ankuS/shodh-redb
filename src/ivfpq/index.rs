@@ -1,5 +1,5 @@
 use alloc::collections::BinaryHeap;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
@@ -76,25 +76,25 @@ fn vector_meta_name(name: &str) -> String {
 /// Validate that an index configuration is internally consistent.
 fn validate_config(config: &IndexConfig) -> crate::Result<()> {
     if config.num_subvectors == 0 {
-        return Err(StorageError::Corrupted(
-            "IVF-PQ: num_subvectors must be > 0".to_string(),
+        return Err(StorageError::invalid_index_config(
+            "IVF-PQ: num_subvectors must be > 0",
         ));
     }
     if config.dim == 0 {
-        return Err(StorageError::Corrupted(
-            "IVF-PQ: dim must be > 0".to_string(),
+        return Err(StorageError::invalid_index_config(
+            "IVF-PQ: dim must be > 0",
         ));
     }
     if config.dim as usize % config.num_subvectors as usize != 0 {
-        return Err(StorageError::Corrupted(alloc::format!(
+        return Err(StorageError::invalid_index_config(alloc::format!(
             "IVF-PQ: dim ({}) must be divisible by num_subvectors ({})",
             config.dim,
             config.num_subvectors,
         )));
     }
     if config.num_clusters == 0 {
-        return Err(StorageError::Corrupted(
-            "IVF-PQ: num_clusters must be > 0".to_string(),
+        return Err(StorageError::invalid_index_config(
+            "IVF-PQ: num_clusters must be > 0",
         ));
     }
     Ok(())
@@ -149,7 +149,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         // Reject legacy format -- re-training is required.
         if config.format_version == FORMAT_V0_LEGACY && config.state != 0 {
-            return Err(StorageError::Corrupted(alloc::format!(
+            return Err(StorageError::format_error(alloc::format!(
                 "IVF-PQ '{name}': legacy format v0 -- re-train required for blob format v1",
             )));
         }
@@ -224,12 +224,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         let mut flat: Vec<f32> = Vec::new();
         for (_id, mut vec) in training_vectors {
             if vec.len() != dim {
-                return Err(StorageError::Corrupted(alloc::format!(
-                    "IVF-PQ '{}': training vector dim {} != {}",
-                    self.name,
-                    vec.len(),
-                    dim,
-                )));
+                return Err(StorageError::dimension_mismatch(&self.name, dim, vec.len()));
             }
             if self.config.metric == DistanceMetric::Cosine {
                 l2_normalize(&mut vec);
@@ -239,7 +234,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         let n = flat.len() / dim;
         if n == 0 {
-            return Err(StorageError::Corrupted(alloc::format!(
+            return Err(StorageError::invalid_index_config(alloc::format!(
                 "IVF-PQ '{}': no training vectors provided",
                 self.name,
             )));
@@ -351,12 +346,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         let mut count = 0usize;
         for (_id, mut vec) in training_vectors {
             if vec.len() != dim {
-                return Err(StorageError::Corrupted(alloc::format!(
-                    "IVF-PQ '{}': training vector dim {} != {}",
-                    self.name,
-                    vec.len(),
-                    dim,
-                )));
+                return Err(StorageError::dimension_mismatch(&self.name, dim, vec.len()));
             }
             if self.config.metric == DistanceMetric::Cosine {
                 l2_normalize(&mut vec);
@@ -368,7 +358,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         let n = flat.len() / dim;
         if n == 0 {
-            return Err(StorageError::Corrupted(alloc::format!(
+            return Err(StorageError::invalid_index_config(alloc::format!(
                 "IVF-PQ '{}': no training vectors provided",
                 self.name,
             )));
@@ -463,12 +453,11 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         self.ensure_trained()?;
         let dim = self.config.dim as usize;
         if vector.len() != dim {
-            return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}': vector dim {} != {}",
-                self.name,
-                vector.len(),
+            return Err(StorageError::dimension_mismatch(
+                &self.name,
                 dim,
-            )));
+                vector.len(),
+            ));
         }
         Self::validate_finite(vector, &self.name)?;
 
@@ -597,12 +586,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         for (vector_id, mut vec) in vectors {
             if vec.len() != dim {
-                return Err(StorageError::Corrupted(alloc::format!(
-                    "IVF-PQ '{}': vector dim {} != {}",
-                    self.name,
-                    vec.len(),
-                    dim,
-                )));
+                return Err(StorageError::dimension_mismatch(&self.name, dim, vec.len()));
             }
             Self::validate_finite(&vec, &self.name)?;
             if metric == DistanceMetric::Cosine {
@@ -758,12 +742,11 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         self.flush()?;
         let dim = self.config.dim as usize;
         if query.len() != dim {
-            return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}': query dim {} != {}",
-                self.name,
-                query.len(),
+            return Err(StorageError::dimension_mismatch(
+                &self.name,
                 dim,
-            )));
+                query.len(),
+            ));
         }
 
         let centroids = self.load_centroids()?;
@@ -865,7 +848,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     fn validate_finite(vector: &[f32], name: &str) -> crate::Result<()> {
         for (i, &v) in vector.iter().enumerate() {
             if !v.is_finite() {
-                return Err(StorageError::Corrupted(alloc::format!(
+                return Err(StorageError::invalid_index_config(alloc::format!(
                     "IVF-PQ '{name}': vector contains non-finite value ({v}) at index {i}",
                 )));
             }
@@ -918,10 +901,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
     fn ensure_trained(&self) -> crate::Result<()> {
         if self.config.state != STATE_TRAINED {
-            return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}' not trained -- call train() first",
-                self.name,
-            )));
+            return Err(StorageError::index_not_trained(&self.name));
         }
         Ok(())
     }
@@ -1144,8 +1124,8 @@ impl ReadOnlyIvfPqIndex {
         let config = match mt.st_get(&"config")? {
             Some(guard) => decode_index_config(guard.value()),
             None => {
-                return Err(StorageError::Corrupted(alloc::format!(
-                    "IVF-PQ index '{mn}' not found (missing config)",
+                return Err(StorageError::index_not_trained(alloc::format!(
+                    "{name} (missing config)",
                 )));
             }
         };
@@ -1219,20 +1199,16 @@ impl ReadOnlyIvfPqIndex {
         params: &SearchParams,
     ) -> crate::Result<Vec<Neighbor<u64>>> {
         if self.config.state != STATE_TRAINED {
-            return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}' not trained",
-                self.name,
-            )));
+            return Err(StorageError::index_not_trained(&self.name));
         }
 
         let dim = self.config.dim as usize;
         if query.len() != dim {
-            return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}': query dim {} != {}",
-                self.name,
-                query.len(),
+            return Err(StorageError::dimension_mismatch(
+                &self.name,
                 dim,
-            )));
+                query.len(),
+            ));
         }
 
         let query_owned;

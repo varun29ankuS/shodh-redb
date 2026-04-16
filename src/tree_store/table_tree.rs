@@ -971,6 +971,7 @@ impl TableTreeMut<'_> {
             metadata_bytes: total_metadata_bytes,
             fragmented_bytes: total_fragmented,
             page_size: self.mem.get_page_size(),
+            trailing_free_pages: self.mem.trailing_free_pages()?,
         })
     }
 }

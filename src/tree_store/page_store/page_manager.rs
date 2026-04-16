@@ -1669,6 +1669,18 @@ impl TransactionalMemory {
         Ok(count)
     }
 
+    pub(crate) fn trailing_free_pages(&self) -> Result<u64> {
+        let state = self.state.lock();
+        let layout = state.header.layout();
+        if layout.num_regions() == 0 {
+            return Ok(0);
+        }
+        let last_region = layout.num_regions() - 1;
+        Ok(u64::from(
+            state.get_region(last_region).trailing_free_pages(),
+        ))
+    }
+
     pub(crate) fn get_page_size(&self) -> usize {
         self.page_size.try_into().unwrap()
     }

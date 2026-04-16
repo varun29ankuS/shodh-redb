@@ -482,6 +482,7 @@ pub struct DatabaseStats {
     pub(crate) tree_height: u32,
     pub(crate) allocated_pages: u64,
     pub(crate) free_pages: u64,
+    pub(crate) trailing_free_pages: u64,
     pub(crate) leaf_pages: u64,
     pub(crate) branch_pages: u64,
     pub(crate) stored_leaf_bytes: u64,
@@ -504,6 +505,12 @@ impl DatabaseStats {
     /// Number of pages currently free in the buddy allocator, available for immediate reuse
     pub fn free_pages(&self) -> u64 {
         self.free_pages
+    }
+
+    /// Number of contiguous free pages at the end of the database file.
+    /// These can be reclaimed by compaction to shrink the file.
+    pub fn trailing_free_pages(&self) -> u64 {
+        self.trailing_free_pages
     }
 
     /// Number of leaf pages that store user data
@@ -3185,6 +3192,7 @@ impl WriteTransaction {
             tree_height: data_tree_stats.tree_height(),
             allocated_pages: self.mem.count_allocated_pages()?,
             free_pages: self.mem.count_free_pages()?,
+            trailing_free_pages: self.mem.trailing_free_pages()?,
             leaf_pages: data_tree_stats.leaf_pages(),
             branch_pages: data_tree_stats.branch_pages(),
             stored_leaf_bytes: data_tree_stats.stored_bytes(),

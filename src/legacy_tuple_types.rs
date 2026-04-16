@@ -38,8 +38,16 @@ fn serialize_tuple_elements_fixed(slices: &[&[u8]]) -> Vec<u8> {
 
 fn parse_lens<const N: usize>(data: &[u8]) -> [usize; N] {
     let mut result = [0; N];
-    for i in 0..N {
-        result[i] = u32::from_le_bytes(data[4 * i..4 * (i + 1)].try_into().unwrap()) as usize;
+    for (i, slot) in result.iter_mut().enumerate() {
+        let start = 4 * i;
+        let end = start + 4;
+        if end > data.len() {
+            // Truncated data: remaining entries stay zero, preventing a
+            // panic on corrupted or short legacy tuple data.
+            break;
+        }
+        // Infallible: the length check above guarantees 4 bytes are available.
+        *slot = u32::from_le_bytes(data[start..end].try_into().unwrap()) as usize;
     }
     result
 }
@@ -104,9 +112,10 @@ macro_rules! from_bytes_variable_impl {
         #[allow(clippy::manual_bits)]
         {
             let lens: [usize; $i_last] = parse_lens($data);
-            let mut offset = $i_last * size_of::<u32>();
+            let data_len = $data.len();
+            let mut offset = ($i_last * size_of::<u32>()).min(data_len);
             $(
-                let len = lens[$i];
+                let len = lens[$i].min(data_len.saturating_sub(offset));
                 let $v = <$t>::from_bytes(&$data[offset..(offset + len)]);
                 offset += len;
             )+
@@ -123,13 +132,15 @@ macro_rules! from_bytes_variable_impl {
 macro_rules! from_bytes_fixed_impl {
     ( $data:expr $(,$t:ty, $v:ident )+ ) => {
         {
+            let data_len = $data.len();
             let mut offset = 0;
             $(
                 let len = <$t>::fixed_width().unwrap();
-                let $v = <$t>::from_bytes(&$data[offset..(offset + len)]);
+                let end = (offset + len).min(data_len);
+                let $v = <$t>::from_bytes(&$data[offset..end]);
                 #[allow(unused_assignments)]
                 {
-                    offset += len;
+                    offset = end;
                 }
             )+
 
@@ -146,12 +157,14 @@ macro_rules! compare_variable_impl {
         {
             let lens0: [usize; $i_last] = parse_lens($data0);
             let lens1: [usize; $i_last] = parse_lens($data1);
-            let mut offset0 = $i_last * size_of::<u32>();
-            let mut offset1 = $i_last * size_of::<u32>();
+            let data0_len = $data0.len();
+            let data1_len = $data1.len();
+            let mut offset0 = ($i_last * size_of::<u32>()).min(data0_len);
+            let mut offset1 = ($i_last * size_of::<u32>()).min(data1_len);
             $(
                 let index = $i;
-                let len0 = lens0[index];
-                let len1 = lens1[index];
+                let len0 = lens0[index].min(data0_len.saturating_sub(offset0));
+                let len1 = lens1[index].min(data1_len.saturating_sub(offset1));
                 if let Some(order) = not_equal::<$t>(
                     &$data0[offset0..(offset0 + len0)],
                     &$data1[offset1..(offset1 + len1)],
@@ -170,20 +183,24 @@ macro_rules! compare_variable_impl {
 macro_rules! compare_fixed_impl {
     ( $data0:expr, $data1:expr, $($t:ty),+ ) => {
         {
+            let data0_len = $data0.len();
+            let data1_len = $data1.len();
             let mut offset0 = 0;
             let mut offset1 = 0;
             $(
                 let len = <$t>::fixed_width().unwrap();
+                let end0 = (offset0 + len).min(data0_len);
+                let end1 = (offset1 + len).min(data1_len);
                 if let Some(order) = not_equal::<$t>(
-                    &$data0[offset0..(offset0 + len)],
-                    &$data1[offset1..(offset1 + len)],
+                    &$data0[offset0..end0],
+                    &$data1[offset1..end1],
                 ) {
                     return order;
                 }
                 #[allow(unused_assignments)]
                 {
-                    offset0 += len;
-                    offset1 += len;
+                    offset0 = end0;
+                    offset1 = end1;
                 }
             )+
 

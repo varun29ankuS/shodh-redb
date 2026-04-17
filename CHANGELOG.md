@@ -1,5 +1,37 @@
 # redb - Changelog
 
+## 0.4.0 - 2026-04-17
+
+### Breaking changes
+* Add `StorageError::Internal(String)` variant for invariant violations (previously `Corrupted`).
+  Any exhaustive `match` on `StorageError`, `Error`, or `CompactionError` must be updated.
+* Add `CompactionError::Cancelled` and `Error::CompactionCancelled` variants.
+
+### New features
+* **Observability**: `DatabaseObserver` trait with 10 lifecycle callbacks (commit, abort, read begin/end,
+  compaction step/complete, train progress, blob write/dedup, checksum failure). Register via
+  `Builder::set_observer()`. Zero-cost when unused (devirtualized `NoopObserver`).
+* **Metrics**: `DbMetrics` struct with 12 atomic counters (behind `metrics` feature flag). Access via
+  `Database::metrics()`. Covers write/read txn counts, pages alloc/freed, bytes written
+  logical/physical, blob writes/dedup, vector searches, compaction pages relocated.
+* **Blob compaction policy**: `BlobCompactionPolicy` struct with `fragmentation_threshold` and
+  `min_dead_bytes`. Configure via `Builder::set_blob_compaction_policy()`. Advisory
+  `Database::should_compact_blobs()` checks stats against policy.
+* **Blob compaction with progress**: `Database::compact_blobs_with_progress()` accepts a callback
+  invoked after each pass. Return `false` to cancel gracefully.
+* **Online blob compaction**: `Database::start_blob_compaction()` returns `BlobCompactionHandle`
+  that splits work into two phases, allowing concurrent readers between steps.
+* IVF-PQ `search()` increments `vector_searches` metric. `train_with_progress()` fires
+  `on_train_progress` observer callback at all 6 training phases.
+
+### Bug fixes & hardening
+* Reclassify ~38 `StorageError::Corrupted` sites to `StorageError::Internal` where the error
+  indicates an internal invariant violation rather than on-disk corruption.
+* 7 new fuzz targets (blob store, cluster blob, B-tree ops, IVF-PQ lifecycle).
+* Parallel k-means training for IVF-PQ index.
+* Accessor validation, CDC version byte hardening, savepoint hardening.
+* `BlobWriterFinished` error variant, rerank candidates cap at 1M, CDC cursor-behind-retention detection.
+
 ## 3.1.1 - 2026-03-08
 * Fix panic which could occur when inserting into a table with fixed size keys when `debug_assertions` are enabled
 * Add additional information to the stats returned by `cache_stats()`

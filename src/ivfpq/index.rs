@@ -1,11 +1,15 @@
 use alloc::collections::BinaryHeap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
 
 use crate::TableDefinition;
 use crate::error::StorageError;
+use crate::observer::DatabaseObserver;
+#[cfg(feature = "metrics")]
+use crate::observer::DbMetrics;
 use crate::storage_traits::{ReadTable, StorageRead, StorageWrite, WriteTable};
 use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
 
@@ -122,11 +126,19 @@ pub struct IvfPqIndex<'txn, T: StorageWrite> {
     codebooks: Option<Codebooks>,
     /// Tracks whether config has been modified since last persist.
     config_dirty: bool,
+    observer: Arc<dyn DatabaseObserver>,
+    #[cfg(feature = "metrics")]
+    db_metrics: Arc<DbMetrics>,
 }
 
 impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     /// Open or create. Called by `WriteTransaction::open_ivfpq_index`.
-    pub(crate) fn open(txn: &'txn T, definition: &IvfPqIndexDefinition) -> crate::Result<Self> {
+    pub(crate) fn open(
+        txn: &'txn T,
+        definition: &IvfPqIndexDefinition,
+        observer: Arc<dyn DatabaseObserver>,
+        #[cfg(feature = "metrics")] db_metrics: Arc<DbMetrics>,
+    ) -> crate::Result<Self> {
         let name = String::from(definition.name());
 
         let mn = meta_name(&name);
@@ -178,6 +190,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             centroids: None,
             codebooks: None,
             config_dirty: false,
+            observer,
+            #[cfg(feature = "metrics")]
+            db_metrics,
         })
     }
 
@@ -354,7 +369,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             flat.extend_from_slice(&vec);
             count += 1;
         }
-        progress(&TrainProgress::CollectingVectors { count });
+        let p = TrainProgress::CollectingVectors { count };
+        progress(&p);
+        self.observer.on_train_progress(&self.name, &p);
 
         let n = flat.len() / dim;
         if n == 0 {
@@ -364,10 +381,12 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             )));
         }
 
-        progress(&TrainProgress::TrainingCentroids {
+        let p = TrainProgress::TrainingCentroids {
             num_clusters,
             num_vectors: n,
-        });
+        };
+        progress(&p);
+        self.observer.on_train_progress(&self.name, &p);
         let centroid_data = kmeans::kmeans(&flat, dim, num_clusters, max_iter, self.config.metric);
 
         let actual_k = centroid_data.len() / dim;
@@ -377,7 +396,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             self.config.num_clusters = actual_k as u32;
         }
 
-        progress(&TrainProgress::ComputingResiduals { num_vectors: n });
+        let p = TrainProgress::ComputingResiduals { num_vectors: n };
+        progress(&p);
+        self.observer.on_train_progress(&self.name, &p);
         let mut residuals = Vec::with_capacity(flat.len());
         for i in 0..n {
             let vec_slice = &flat[i * dim..(i + 1) * dim];
@@ -394,7 +415,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             }
         }
 
-        progress(&TrainProgress::TrainingCodebooks { num_subvectors });
+        let p = TrainProgress::TrainingCodebooks { num_subvectors };
+        progress(&p);
+        self.observer.on_train_progress(&self.name, &p);
         let codebooks_trained = pq::train_codebooks(
             &residuals,
             dim,
@@ -405,7 +428,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         self.clear_stale_training_data(old_k, actual_k)?;
 
-        progress(&TrainProgress::Persisting);
+        let p = TrainProgress::Persisting;
+        progress(&p);
+        self.observer.on_train_progress(&self.name, &p);
         {
             let tn = centroids_name(&self.name);
             let def = TableDefinition::<u32, &[u8]>::new_internal(&tn);
@@ -436,7 +461,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         self.centroids = Some(centroid_data);
         self.codebooks = Some(codebooks_trained);
 
-        progress(&TrainProgress::Done);
+        let p = TrainProgress::Done;
+        progress(&p);
+        self.observer.on_train_progress(&self.name, &p);
         Ok(())
     }
 
@@ -832,6 +859,11 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             }
         }
 
+        #[cfg(feature = "metrics")]
+        self.db_metrics
+            .vector_searches
+            .fetch_add(1, portable_atomic::Ordering::Relaxed);
+
         if want_rerank {
             let sorted = heap.into_sorted();
             rerank_from_vectors_table_write(self.txn, q, &sorted, &self.name, dim, metric, params.k)
@@ -1107,6 +1139,8 @@ pub struct ReadOnlyIvfPqIndex {
     name: String,
     centroids: Vec<f32>,
     codebooks: Codebooks,
+    #[cfg(feature = "metrics")]
+    db_metrics: Arc<DbMetrics>,
 }
 
 impl ReadOnlyIvfPqIndex {
@@ -1114,6 +1148,7 @@ impl ReadOnlyIvfPqIndex {
     pub(crate) fn open<R: StorageRead>(
         txn: &R,
         definition: &IvfPqIndexDefinition,
+        #[cfg(feature = "metrics")] db_metrics: Arc<DbMetrics>,
     ) -> crate::Result<Self> {
         let name = String::from(definition.name());
 
@@ -1182,6 +1217,8 @@ impl ReadOnlyIvfPqIndex {
             name,
             centroids,
             codebooks,
+            #[cfg(feature = "metrics")]
+            db_metrics,
         })
     }
 
@@ -1290,6 +1327,11 @@ impl ReadOnlyIvfPqIndex {
                 }
             }
         }
+
+        #[cfg(feature = "metrics")]
+        self.db_metrics
+            .vector_searches
+            .fetch_add(1, portable_atomic::Ordering::Relaxed);
 
         if want_rerank {
             let sorted = heap.into_sorted();

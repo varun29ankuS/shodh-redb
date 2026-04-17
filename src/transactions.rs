@@ -1517,7 +1517,14 @@ impl WriteTransaction {
         &self,
         definition: &crate::ivfpq::config::IvfPqIndexDefinition,
     ) -> Result<crate::ivfpq::index::IvfPqIndex<'_, Self>, TableError> {
-        crate::ivfpq::index::IvfPqIndex::open(self, definition).map_err(TableError::Storage)
+        crate::ivfpq::index::IvfPqIndex::open(
+            self,
+            definition,
+            Arc::clone(&self.observer),
+            #[cfg(feature = "metrics")]
+            Arc::clone(&self.db_metrics),
+        )
+        .map_err(TableError::Storage)
     }
 
     /// Open the given table
@@ -3422,7 +3429,13 @@ impl ReadTransaction {
         &self,
         definition: &crate::ivfpq::config::IvfPqIndexDefinition,
     ) -> Result<crate::ivfpq::index::ReadOnlyIvfPqIndex, TableError> {
-        crate::ivfpq::index::ReadOnlyIvfPqIndex::open(self, definition).map_err(TableError::Storage)
+        crate::ivfpq::index::ReadOnlyIvfPqIndex::open(
+            self,
+            definition,
+            #[cfg(feature = "metrics")]
+            Arc::clone(&self.db_metrics),
+        )
+        .map_err(TableError::Storage)
     }
 
     /// Open the given table without a type

@@ -69,6 +69,8 @@ std = []
 logging = ["dep:log"]
 # Enable cache hit metrics
 cache_metrics = []
+# Enable database-wide metrics (transaction counts, write amplification, etc.)
+metrics = ["cache_metrics"]
 # Enable LZ4 page compression
 compression_lz4 = ["dep:lz4_flex"]
 # Enable zstd page compression

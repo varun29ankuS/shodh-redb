@@ -3,6 +3,9 @@ use crate::cdc::CdcConfig;
 use crate::error::{BackendError, TransactionError};
 #[cfg(feature = "std")]
 use crate::group_commit::{GroupCommitError, GroupCommitter, WriteBatch};
+#[cfg(feature = "metrics")]
+use crate::observer::DbMetrics;
+use crate::observer::{DatabaseObserver, default_observer};
 use crate::sealed::Sealed;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::transactions::{
@@ -541,7 +544,13 @@ impl ReadableDatabase for ReadOnlyDatabase {
 
         let guard = TransactionGuard::new_read(id, self.transaction_tracker.clone());
 
-        ReadTransaction::new(self.mem.clone(), guard)
+        ReadTransaction::new(
+            self.mem.clone(),
+            guard,
+            default_observer(),
+            #[cfg(feature = "metrics")]
+            Arc::new(DbMetrics::new()),
+        )
     }
 
     fn cache_stats(&self) -> CacheStats {
@@ -666,6 +675,9 @@ pub struct Database {
     blob_dedup_config: BlobDedupConfig,
     cdc_config: CdcConfig,
     history_retention: u64,
+    observer: Arc<dyn DatabaseObserver>,
+    #[cfg(feature = "metrics")]
+    db_metrics: Arc<DbMetrics>,
     #[cfg(feature = "std")]
     group_committer: GroupCommitter,
 }
@@ -673,9 +685,24 @@ pub struct Database {
 impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
         let guard = self.allocate_read_transaction()?;
+        let txn_id = guard.id().ok();
         #[cfg(feature = "logging")]
-        debug!("Beginning read transaction id={:?}", guard.id().ok());
-        ReadTransaction::new(self.get_memory(), guard)
+        debug!("Beginning read transaction id={txn_id:?}");
+        let txn = ReadTransaction::new(
+            self.get_memory(),
+            guard,
+            Arc::clone(&self.observer),
+            #[cfg(feature = "metrics")]
+            Arc::clone(&self.db_metrics),
+        )?;
+        if let Some(id) = txn_id {
+            self.observer.on_read_begin(id.raw_id());
+            #[cfg(feature = "metrics")]
+            self.db_metrics
+                .read_txn_opened
+                .fetch_add(1, portable_atomic::Ordering::Relaxed);
+        }
+        Ok(txn)
     }
 
     fn cache_stats(&self) -> CacheStats {
@@ -1707,6 +1734,8 @@ impl Database {
         history_retention: u64,
         read_verification: ReadVerification,
         read_verification_callback: Option<Arc<ReadVerificationCallback>>,
+        observer: Arc<dyn DatabaseObserver>,
+        #[cfg(feature = "metrics")] db_metrics: Arc<DbMetrics>,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -1762,6 +1791,9 @@ impl Database {
             blob_dedup_config: blob_dedup_config.clone(),
             cdc_config,
             history_retention,
+            observer,
+            #[cfg(feature = "metrics")]
+            db_metrics,
             #[cfg(feature = "std")]
             group_committer: GroupCommitter::new(),
         };
@@ -1892,8 +1924,22 @@ impl Database {
             self.blob_dedup_config.clone(),
             self.cdc_config.clone(),
             self.history_retention,
+            Arc::clone(&self.observer),
+            #[cfg(feature = "metrics")]
+            Arc::clone(&self.db_metrics),
         )
         .map_err(|e| e.into())
+    }
+
+    /// Returns the observer registered with this database.
+    pub fn observer(&self) -> &Arc<dyn DatabaseObserver> {
+        &self.observer
+    }
+
+    /// Returns the database metrics counters.
+    #[cfg(feature = "metrics")]
+    pub fn metrics(&self) -> &DbMetrics {
+        &self.db_metrics
     }
 
     /// Begin a read transaction at a specific historical transaction ID.
@@ -1914,7 +1960,14 @@ impl Database {
         let user_root = snapshot.user_root();
         let guard = self.allocate_read_transaction()?;
         drop(lookup_txn);
-        ReadTransaction::new_historical(self.mem.clone(), guard, user_root)
+        ReadTransaction::new_historical(
+            self.mem.clone(),
+            guard,
+            user_root,
+            Arc::clone(&self.observer),
+            #[cfg(feature = "metrics")]
+            Arc::clone(&self.db_metrics),
+        )
     }
 
     /// Begin a read transaction at the latest snapshot whose timestamp is <= the given
@@ -1945,7 +1998,14 @@ impl Database {
         ))?;
         let guard = self.allocate_read_transaction()?;
         drop(lookup_txn);
-        ReadTransaction::new_historical(self.mem.clone(), guard, best_root)
+        ReadTransaction::new_historical(
+            self.mem.clone(),
+            guard,
+            best_root,
+            Arc::clone(&self.observer),
+            #[cfg(feature = "metrics")]
+            Arc::clone(&self.db_metrics),
+        )
     }
 
     /// List all retained transaction snapshots.
@@ -2187,10 +2247,17 @@ impl CompactionHandle<'_> {
         txn.set_shrink_policy(ShrinkPolicy::Maximum);
         txn.commit().map_err(|e| e.into_storage_error())?;
 
-        Ok(CompactionProgress {
+        let progress = CompactionProgress {
             pages_relocated: 1, // at least one batch was relocated
             complete: false,
-        })
+        };
+        self.db.observer.on_compaction_step(&progress);
+        #[cfg(feature = "metrics")]
+        self.db
+            .db_metrics
+            .compaction_pages_relocated
+            .fetch_add(1, portable_atomic::Ordering::Relaxed);
+        Ok(progress)
     }
 
     /// Runs compaction to completion, returning the total number of steps performed.
@@ -2203,6 +2270,7 @@ impl CompactionHandle<'_> {
             }
             steps += 1;
         }
+        self.db.observer.on_compaction_complete(steps);
         Ok(steps)
     }
 }
@@ -2294,6 +2362,7 @@ pub struct Builder {
     history_retention: u64,
     read_verification: ReadVerification,
     read_verification_callback: Option<Arc<ReadVerificationCallback>>,
+    observer: Option<Arc<dyn DatabaseObserver>>,
 }
 
 impl Builder {
@@ -2322,6 +2391,7 @@ impl Builder {
             history_retention: 0,
             read_verification: ReadVerification::None,
             read_verification_callback: None,
+            observer: None,
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
@@ -2340,6 +2410,17 @@ impl Builder {
         callback: impl Fn(&mut RepairSession) + 'static,
     ) -> &mut Self {
         self.repair_callback = Box::new(callback);
+        self
+    }
+
+    /// Register an observer for database lifecycle events.
+    ///
+    /// The observer receives synchronous callbacks on the committing/reading
+    /// thread. Implementations must not block, panic, or perform fallible I/O.
+    ///
+    /// See [`DatabaseObserver`] for the full list of events.
+    pub fn set_observer(&mut self, observer: impl DatabaseObserver) -> &mut Self {
+        self.observer = Some(Arc::new(observer));
         self
     }
 
@@ -2514,6 +2595,9 @@ impl Builder {
             self.history_retention,
             self.read_verification,
             self.read_verification_callback.clone(),
+            self.resolve_observer(),
+            #[cfg(feature = "metrics")]
+            Self::resolve_metrics(),
         )
     }
 
@@ -2537,6 +2621,9 @@ impl Builder {
             self.history_retention,
             self.read_verification,
             self.read_verification_callback.clone(),
+            self.resolve_observer(),
+            #[cfg(feature = "metrics")]
+            Self::resolve_metrics(),
         )
     }
 
@@ -2584,6 +2671,9 @@ impl Builder {
             self.history_retention,
             self.read_verification,
             self.read_verification_callback.clone(),
+            self.resolve_observer(),
+            #[cfg(feature = "metrics")]
+            Self::resolve_metrics(),
         )
     }
 
@@ -2607,7 +2697,21 @@ impl Builder {
             self.history_retention,
             self.read_verification,
             self.read_verification_callback.clone(),
+            self.resolve_observer(),
+            #[cfg(feature = "metrics")]
+            Self::resolve_metrics(),
         )
+    }
+
+    fn resolve_observer(&self) -> Arc<dyn DatabaseObserver> {
+        self.observer
+            .as_ref()
+            .map_or_else(default_observer, Arc::clone)
+    }
+
+    #[cfg(feature = "metrics")]
+    fn resolve_metrics() -> Arc<DbMetrics> {
+        Arc::new(DbMetrics::new())
     }
 }
 

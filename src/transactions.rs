@@ -724,7 +724,7 @@ impl<'db> SystemNamespace<'db> {
             .table_tree
             .get_or_create_table::<K, V>(definition.name(), TableType::Normal)
             .map_err(|e| {
-                e.into_storage_error_or_corrupted("Internal error. System table is corrupted")
+                e.into_storage_error_or_internal("Internal error. System table is corrupted")
             })?;
         transaction.dirty.store(true, Ordering::Release);
 
@@ -796,7 +796,7 @@ impl TableNamespace<'_> {
 
     fn set_root(&mut self, root: Option<BtreeHeader>) -> Result<(), StorageError> {
         if !self.open_tables.is_empty() {
-            return Err(StorageError::Corrupted(
+            return Err(StorageError::Internal(
                 "set_root called with open tables".into(),
             ));
         }
@@ -2736,7 +2736,7 @@ impl WriteTransaction {
                 Ok(_) => {}
                 Err(err) => match err {
                     SavepointError::InvalidSavepoint => {
-                        return Err(StorageError::Corrupted(
+                        return Err(StorageError::Internal(
                             "invalid savepoint encountered during transaction abort".to_string(),
                         ));
                     }
@@ -2806,7 +2806,7 @@ impl WriteTransaction {
         let system_tree = system_tables.table_tree.flush_table_root_updates()?;
         system_tree
             .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
-            .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?;
+            .map_err(|e| e.into_storage_error_or_internal("Unexpected TableError"))?;
 
         if self.quick_repair {
             system_tree.create_table_and_flush_table_root(
@@ -3327,7 +3327,7 @@ impl ReadTransaction {
                 self.mem.clone(),
             )?),
             InternalTableDefinition::Multimap { .. } => {
-                Err(TableError::Storage(StorageError::Corrupted(
+                Err(TableError::Storage(StorageError::Internal(
                     "unexpected multimap table type when opening normal table".to_string(),
                 )))
             }
@@ -3379,7 +3379,7 @@ impl ReadTransaction {
                 self.mem.clone(),
             )),
             InternalTableDefinition::Multimap { .. } => {
-                Err(TableError::Storage(StorageError::Corrupted(
+                Err(TableError::Storage(StorageError::Internal(
                     "unexpected multimap table type when opening untyped normal table".to_string(),
                 )))
             }
@@ -3398,7 +3398,7 @@ impl ReadTransaction {
 
         match header {
             InternalTableDefinition::Normal { .. } => {
-                Err(TableError::Storage(StorageError::Corrupted(
+                Err(TableError::Storage(StorageError::Internal(
                     "unexpected normal table type when opening multimap table".to_string(),
                 )))
             }
@@ -3428,7 +3428,7 @@ impl ReadTransaction {
 
         match header {
             InternalTableDefinition::Normal { .. } => {
-                Err(TableError::Storage(StorageError::Corrupted(
+                Err(TableError::Storage(StorageError::Internal(
                     "unexpected normal table type when opening untyped multimap table".to_string(),
                 )))
             }
@@ -3488,13 +3488,12 @@ impl ReadTransaction {
                 )?;
                 Ok(Some(btree))
             }
-            Ok(Some(InternalTableDefinition::Multimap { .. })) => Err(StorageError::Corrupted(
+            Ok(Some(InternalTableDefinition::Multimap { .. })) => Err(StorageError::Internal(
                 "unexpected multimap table type in system table lookup".to_string(),
             )),
             Ok(None) => Ok(None),
             Err(e) => {
-                Err(e
-                    .into_storage_error_or_corrupted("Internal error: blob system table corrupted"))
+                Err(e.into_storage_error_or_internal("Internal error: blob system table corrupted"))
             }
         }
     }
@@ -4242,7 +4241,7 @@ impl crate::storage_traits::StorageWrite for WriteTransaction {
         definition: TableDefinition<K, V>,
     ) -> Result<Self::Table<'_, K, V>> {
         self.open_table(definition)
-            .map_err(|e| e.into_storage_error_or_corrupted("open_storage_table"))
+            .map_err(|e| e.into_storage_error_or_internal("open_storage_table"))
     }
 }
 
@@ -4261,7 +4260,7 @@ impl crate::storage_traits::StorageRead for ReadTransaction {
         definition: TableDefinition<K, V>,
     ) -> Result<Self::Table<'_, K, V>> {
         self.open_table(definition)
-            .map_err(|e| e.into_storage_error_or_corrupted("open_storage_table"))
+            .map_err(|e| e.into_storage_error_or_internal("open_storage_table"))
     }
 }
 

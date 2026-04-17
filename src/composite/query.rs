@@ -235,7 +235,7 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
         // 1a: Semantic candidates (IVF-PQ)
         if sem_active {
             let query = self.query_vector.ok_or_else(|| {
-                StorageError::Corrupted(
+                StorageError::Internal(
                     "semantic search enabled but no query vector provided".to_string(),
                 )
             })?;
@@ -243,13 +243,13 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
 
             // Vector index search requires a StorageRead implementation.
             let reader = self.storage_reader.ok_or_else(|| {
-                StorageError::Corrupted(
+                StorageError::Internal(
                     "semantic search requires a StorageRead (use with_storage_reader)".to_string(),
                 )
             })?;
 
             let index = self.vector_index.ok_or_else(|| {
-                StorageError::Corrupted(
+                StorageError::Internal(
                     "semantic search enabled but no vector index provided".to_string(),
                 )
             })?;

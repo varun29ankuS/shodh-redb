@@ -662,7 +662,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         );
         operation.insert_inplace(key, value)?;
         if !fake_freed_pages.is_empty() {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::Internal(format!(
                 "insert_inplace unexpectedly freed {} pages",
                 fake_freed_pages.len()
             )));
@@ -966,7 +966,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         for entry in iter {
             let entry = entry?;
             if !predicate(entry.key(), entry.value()) && operation.delete(&entry.key())?.is_none() {
-                return Err(StorageError::Corrupted(String::from(
+                return Err(StorageError::Internal(String::from(
                     "retain_in: delete returned None for existing key",
                 )));
             }

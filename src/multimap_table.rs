@@ -340,7 +340,7 @@ pub(crate) fn relocate_subtrees(
                     );
                     tree.relocate(relocation_map)?;
                     let new_root = tree.get_root().ok_or_else(|| {
-                        StorageError::Corrupted(
+                        StorageError::Internal(
                             "missing subtree root after relocate in relocate_subtrees".to_string(),
                         )
                     })?;
@@ -1267,7 +1267,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         let existed = subtree.insert(value.borrow(), &())?.is_some();
                         assert_eq!(existed, found);
                         let subtree_root = subtree.get_root().ok_or_else(|| {
-                            StorageError::Corrupted(
+                            StorageError::Internal(
                                 "missing subtree root after insert in inline-to-subtree conversion"
                                     .to_string(),
                             )
@@ -1290,7 +1290,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     drop(guard);
                     let existed = subtree.insert(value.borrow(), &())?.is_some();
                     let subtree_root = subtree.get_root().ok_or_else(|| {
-                        StorageError::Corrupted(
+                        StorageError::Internal(
                             "missing subtree root after insert into existing subtree".to_string(),
                         )
                     })?;
@@ -1333,7 +1333,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 );
                 subtree.insert(value.borrow(), &())?;
                 let subtree_root = subtree.get_root().ok_or_else(|| {
-                    StorageError::Corrupted(
+                    StorageError::Internal(
                         "missing subtree root after insert into new subtree".to_string(),
                     )
                 })?;

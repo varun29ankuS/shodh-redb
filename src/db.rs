@@ -431,9 +431,9 @@ impl TransactionGuard {
     pub(crate) fn id(&self) -> Result<TransactionId, StorageError> {
         match self {
             Self::Active { transaction_id, .. } => transaction_id.ok_or_else(|| {
-                StorageError::Corrupted(String::from("TransactionGuard::id() called after leak()"))
+                StorageError::Internal(String::from("TransactionGuard::id() called after leak()"))
             }),
-            Self::Verification => Err(StorageError::Corrupted(String::from(
+            Self::Verification => Err(StorageError::Internal(String::from(
                 "TransactionGuard::id() called on Verification guard",
             ))),
         }
@@ -442,11 +442,11 @@ impl TransactionGuard {
     pub(crate) fn leak(&mut self) -> Result<TransactionId, StorageError> {
         match self {
             Self::Active { transaction_id, .. } => transaction_id.take().ok_or_else(|| {
-                StorageError::Corrupted(String::from(
+                StorageError::Internal(String::from(
                     "TransactionGuard::leak() called after prior leak()",
                 ))
             }),
-            Self::Verification => Err(StorageError::Corrupted(String::from(
+            Self::Verification => Err(StorageError::Internal(String::from(
                 "TransactionGuard::leak() called on Verification guard",
             ))),
         }
@@ -993,7 +993,7 @@ impl Database {
                 {
                     let mut table = write_txn.open_table(raw_def).map_err(|e| {
                         DatabaseError::Storage(
-                            e.into_storage_error_or_corrupted("salvage: open_table"),
+                            e.into_storage_error_or_internal("salvage: open_table"),
                         )
                     })?;
                     for (key, value) in &pairs {
@@ -1149,7 +1149,7 @@ impl Database {
 
         let new_roots = Self::do_repair(&mut self.mem, &|_| {}).map_err(|err| match err {
             DatabaseError::Storage(storage_err) => storage_err,
-            _ => StorageError::Corrupted(
+            _ => StorageError::Internal(
                 "unexpected non-storage error during integrity check repair".to_string(),
             ),
         })?;
@@ -1487,10 +1487,10 @@ impl Database {
                 DATA_ALLOCATED_TABLE.name(),
                 TableType::Normal,
             )
-            .map_err(|e| e.into_storage_error_or_corrupted("Allocated pages table corrupted"))?
+            .map_err(|e| e.into_storage_error_or_internal("Allocated pages table corrupted"))?
         {
             let InternalTableDefinition::Normal { table_root, .. } = table_def else {
-                return Err(StorageError::Corrupted(
+                return Err(StorageError::Internal(
                     "unexpected non-normal table type for allocated pages table".to_string(),
                 ));
             };
@@ -1831,7 +1831,7 @@ impl Database {
         )?;
         let Some(allocator_state_table) = system_table_tree
             .get_table::<AllocatorStateKey, &[u8]>(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
-            .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?
+            .map_err(|e| e.into_storage_error_or_internal("Unexpected TableError"))?
         else {
             return Ok(None);
         };

@@ -60,6 +60,10 @@ impl BackendError {
 pub enum StorageError {
     /// The Database is corrupted
     Corrupted(String),
+    /// An internal invariant was violated, indicating a bug in the database engine.
+    /// This is NOT caused by on-disk corruption -- it means the code has a logic error.
+    /// If you encounter this error, please file a bug report.
+    Internal(String),
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
     /// A blob with the given sequence ID was not found in the blob store
@@ -215,6 +219,7 @@ impl From<StorageError> for Error {
     fn from(err: StorageError) -> Error {
         match err {
             StorageError::Corrupted(msg) => Error::Corrupted(msg),
+            StorageError::Internal(msg) => Error::Internal(msg),
             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
             StorageError::BlobNotFound(seq) => Error::BlobNotFound(seq),
             StorageError::BlobChecksumMismatch {
@@ -325,6 +330,9 @@ impl Display for StorageError {
         match self {
             StorageError::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
+            }
+            StorageError::Internal(msg) => {
+                write!(f, "Internal error (this is a bug): {msg}")
             }
             StorageError::ValueTooLarge(len) => {
                 write!(
@@ -601,7 +609,7 @@ pub enum TableError {
 }
 
 impl TableError {
-    pub(crate) fn into_storage_error_or_corrupted(self, msg: &str) -> StorageError {
+    pub(crate) fn into_storage_error_or_internal(self, msg: &str) -> StorageError {
         match self {
             TableError::TableTypeMismatch { .. }
             | TableError::TableIsMultimap(_)
@@ -610,7 +618,7 @@ impl TableError {
             | TableError::TableDoesNotExist(_)
             | TableError::TableExists(_)
             | TableError::TableAlreadyOpen(_, _) => {
-                StorageError::Corrupted(format!("{msg}: {self}"))
+                StorageError::Internal(format!("{msg}: {self}"))
             }
             TableError::Storage(storage) => storage,
         }
@@ -910,7 +918,7 @@ impl TransactionError {
     pub(crate) fn into_storage_error(self) -> StorageError {
         match self {
             TransactionError::Storage(storage) => storage,
-            _ => StorageError::Corrupted(String::from("unexpected non-storage transaction error")),
+            _ => StorageError::Internal(String::from("unexpected non-storage transaction error")),
         }
     }
 }
@@ -1010,6 +1018,10 @@ pub enum Error {
     TransactionInProgress,
     /// The Database is corrupted
     Corrupted(String),
+    /// An internal invariant was violated, indicating a bug in the database engine.
+    /// This is NOT caused by on-disk corruption -- it means the code has a logic error.
+    /// If you encounter this error, please file a bug report.
+    Internal(String),
     /// The database file is in an old file format and must be manually upgraded
     UpgradeRequired(u8),
     /// The value being inserted exceeds the maximum of 3GiB
@@ -1193,6 +1205,9 @@ impl Display for Error {
         match self {
             Error::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
+            }
+            Error::Internal(msg) => {
+                write!(f, "Internal error (this is a bug): {msg}")
             }
             Error::UpgradeRequired(actual) => {
                 write!(

@@ -656,7 +656,7 @@ impl TransactionalMemory {
 
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
         if !self.allocated_since_commit.lock().is_empty() {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
+            return Err(StorageError::Internal(alloc::string::String::from(
                 "Cannot reload: uncommitted page allocations still pending",
             ))
             .into());
@@ -1126,7 +1126,7 @@ impl TransactionalMemory {
 
         let mut state = self.state.lock();
         if state.header.secondary_slot().transaction_id != old_transaction_id {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
+            return Err(StorageError::Internal(alloc::string::String::from(
                 "Secondary slot transaction_id changed unexpectedly during commit",
             )));
         }
@@ -1171,7 +1171,7 @@ impl TransactionalMemory {
         // Without this flag, a crash would leave pages in `unpersisted`
         // allocated but unreferenced, permanently leaking disk space.
         if !self.state.lock().header.recovery_required {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
+            return Err(StorageError::Internal(alloc::string::String::from(
                 "non_durable_commit requires recovery_required flag to be set \
                  for crash-safe page reclamation",
             )));
@@ -1568,7 +1568,7 @@ impl TransactionalMemory {
         new_layout.reduce_last_region(reduce_by);
         state.allocators.resize_to(new_layout);
         if new_layout.len() > layout.len() {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
+            return Err(StorageError::Internal(alloc::string::String::from(
                 "Shrink produced a layout larger than the original",
             )));
         }
@@ -1613,7 +1613,7 @@ impl TransactionalMemory {
             self.page_size,
         );
         if new_layout.len() < layout.len() {
-            return Err(StorageError::Corrupted(alloc::string::String::from(
+            return Err(StorageError::Internal(alloc::string::String::from(
                 "Grow produced a layout smaller than the original",
             )));
         }

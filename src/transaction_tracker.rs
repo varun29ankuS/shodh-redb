@@ -136,7 +136,7 @@ impl TransactionTracker {
             state = self.live_write_transaction_available.wait(state)?;
         }
         if state.live_write_transaction.is_some() {
-            return Err(StorageError::Corrupted(
+            return Err(StorageError::Internal(
                 "Write transaction still active after condvar wait".into(),
             ));
         }
@@ -194,10 +194,10 @@ impl TransactionTracker {
                 self.live_write_transaction_available.notify_one();
                 Ok(())
             }
-            Some(active_id) => Err(StorageError::Corrupted(format!(
+            Some(active_id) => Err(StorageError::Internal(format!(
                 "end_write_transaction called with id {id:?}, but active transaction is {active_id:?}"
             ))),
-            None => Err(StorageError::Corrupted(format!(
+            None => Err(StorageError::Internal(format!(
                 "end_write_transaction called with id {id:?}, but no write transaction is active"
             ))),
         }
@@ -212,10 +212,10 @@ impl TransactionTracker {
                 state.live_write_transaction = None;
                 Ok(())
             }
-            Some(active_id) => Err(StorageError::Corrupted(format!(
+            Some(active_id) => Err(StorageError::Internal(format!(
                 "end_write_transaction called with id {id:?}, but active transaction is {active_id:?}"
             ))),
-            None => Err(StorageError::Corrupted(format!(
+            None => Err(StorageError::Internal(format!(
                 "end_write_transaction called with id {id:?}, but no write transaction is active"
             ))),
         }
@@ -294,7 +294,7 @@ impl TransactionTracker {
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
         if !state.valid_savepoints.is_empty() {
-            return Err(StorageError::Corrupted(
+            return Err(StorageError::Internal(
                 "restore_savepoint_counter_state called with active savepoints".into(),
             ));
         }

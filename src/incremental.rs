@@ -98,7 +98,7 @@ fn table_checksum(txn: &ReadTransaction, name: &str) -> Result<(u128, u64), Stor
             table_root: None, ..
         })) => Ok(EMPTY_CHECKSUM),
         Ok(Some(InternalTableDefinition::Multimap { .. }) | None) => Ok(NO_CHECKSUM),
-        Err(e) => Err(e.into_storage_error_or_corrupted("get table root header")),
+        Err(e) => Err(e.into_storage_error_or_internal("get table root header")),
     }
 }
 
@@ -248,7 +248,7 @@ pub(crate) fn import_incremental(
             let def = TableDefinition::<&[u8], &[u8]>::new(&delta.name);
             let mut table = txn
                 .open_table(def)
-                .map_err(|e| e.into_storage_error_or_corrupted("open table during import"))?;
+                .map_err(|e| e.into_storage_error_or_internal("open table during import"))?;
             for (key, value) in &delta.upserts {
                 table.insert(key.as_slice(), value.as_slice())?;
                 report.entries_upserted += 1;
@@ -264,7 +264,7 @@ pub(crate) fn import_incremental(
         let handle = UntypedTableHandle::new(name.clone());
         let deleted = txn
             .delete_table(handle)
-            .map_err(|e| e.into_storage_error_or_corrupted("delete table during import"))?;
+            .map_err(|e| e.into_storage_error_or_internal("delete table during import"))?;
         if deleted {
             report.tables_dropped += 1;
         }

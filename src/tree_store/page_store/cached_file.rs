@@ -25,7 +25,7 @@ impl WritablePage {
     }
 
     pub(super) fn mem_mut(&mut self) -> core::result::Result<&mut [u8], StorageError> {
-        Arc::get_mut(&mut self.data).ok_or(StorageError::Corrupted(String::from(
+        Arc::get_mut(&mut self.data).ok_or(StorageError::Internal(String::from(
             "WritablePage::mem_mut() called while other Arc references exist",
         )))
     }
@@ -394,7 +394,7 @@ impl PagedCachedFile {
 
         for (offset, buffer) in write_buffer.cache.iter() {
             let raw = buffer.as_ref().ok_or_else(|| {
-                StorageError::Corrupted(String::from(
+                StorageError::Internal(String::from(
                     "flush_write_buffer: write cache entry has no data",
                 ))
             })?;
@@ -402,7 +402,7 @@ impl PagedCachedFile {
         }
         for (offset, buffer) in write_buffer.cache.iter_mut() {
             let buffer = buffer.take().ok_or_else(|| {
-                StorageError::Corrupted(String::from(
+                StorageError::Internal(String::from(
                     "flush_write_buffer: write cache entry has no data during promotion",
                 ))
             })?;
@@ -606,7 +606,7 @@ impl PagedCachedFile {
     // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
     pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
         if offset % self.page_size != 0 {
-            return Err(StorageError::Corrupted(String::from(
+            return Err(StorageError::Internal(String::from(
                 "write: offset not page-aligned",
             )));
         }
@@ -618,7 +618,7 @@ impl PagedCachedFile {
             let mut lock = self.read_cache[cache_slot].write();
             if let Some(removed) = lock.remove(offset) {
                 if len != removed.len() {
-                    return Err(StorageError::Corrupted(String::from(
+                    return Err(StorageError::Internal(String::from(
                         "write: cache inconsistency, length mismatch for cached page",
                     )));
                 }
@@ -679,7 +679,7 @@ impl PagedCachedFile {
             };
             lock.insert(offset, result);
             lock.take_value(offset).ok_or_else(|| {
-                StorageError::Corrupted(String::from(
+                StorageError::Internal(String::from(
                     "write: take_value failed immediately after insert",
                 ))
             })?

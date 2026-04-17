@@ -349,9 +349,9 @@ impl TableTree {
         for entry in self.list_tables(TableType::Normal)? {
             let definition = self
                 .get_table_untyped(&entry, TableType::Normal)
-                .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
+                .map_err(|e| e.into_storage_error_or_internal("Internal corruption"))?
                 .ok_or_else(|| {
-                    StorageError::Corrupted(alloc::string::String::from(
+                    StorageError::Internal(alloc::string::String::from(
                         "listed table not found during page visit",
                     ))
                 })?;
@@ -361,9 +361,9 @@ impl TableTree {
         for entry in self.list_tables(TableType::Multimap)? {
             let definition = self
                 .get_table_untyped(&entry, TableType::Multimap)
-                .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
+                .map_err(|e| e.into_storage_error_or_internal("Internal corruption"))?
                 .ok_or_else(|| {
-                    StorageError::Corrupted(alloc::string::String::from(
+                    StorageError::Internal(alloc::string::String::from(
                         "listed multimap not found during page visit",
                     ))
                 })?;
@@ -425,9 +425,9 @@ impl TableTreeMut<'_> {
         for entry in self.list_tables(TableType::Normal)? {
             let definition = self
                 .get_table_untyped(&entry, TableType::Normal)
-                .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
+                .map_err(|e| e.into_storage_error_or_internal("Internal corruption"))?
                 .ok_or_else(|| {
-                    StorageError::Corrupted(alloc::string::String::from(
+                    StorageError::Internal(alloc::string::String::from(
                         "listed table not found during page visit",
                     ))
                 })?;
@@ -437,9 +437,9 @@ impl TableTreeMut<'_> {
         for entry in self.list_tables(TableType::Multimap)? {
             let definition = self
                 .get_table_untyped(&entry, TableType::Multimap)
-                .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
+                .map_err(|e| e.into_storage_error_or_internal("Internal corruption"))?
                 .ok_or_else(|| {
-                    StorageError::Corrupted(alloc::string::String::from(
+                    StorageError::Internal(alloc::string::String::from(
                         "listed multimap not found during page visit",
                     ))
                 })?;
@@ -500,7 +500,7 @@ impl TableTreeMut<'_> {
                 .tree
                 .get(&name.as_str())?
                 .ok_or_else(|| {
-                    StorageError::Corrupted(alloc::format!(
+                    StorageError::Internal(alloc::format!(
                         "pending table '{name}' not found in table tree"
                     ))
                 })?
@@ -575,7 +575,7 @@ impl TableTreeMut<'_> {
         f: impl FnOnce(&mut BtreeMut<K, V>) -> Result,
     ) -> Result {
         if !self.pending_table_updates.is_empty() {
-            return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+            return Err(crate::StorageError::Internal(alloc::string::String::from(
                 "open_table_and_flush_table_root called with pending updates",
             )));
         }
@@ -597,13 +597,13 @@ impl TableTreeMut<'_> {
             .tree
             .get(&name)?
             .ok_or_else(|| {
-                StorageError::Corrupted(alloc::format!("table '{name}' missing after insert"))
+                StorageError::Internal(alloc::format!("table '{name}' missing after insert"))
             })?
             .value()
         {
             InternalTableDefinition::Normal { table_root, .. } => table_root,
             InternalTableDefinition::Multimap { .. } => {
-                return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+                return Err(crate::StorageError::Internal(alloc::string::String::from(
                     "expected Normal table but found Multimap",
                 )));
             }
@@ -643,12 +643,12 @@ impl TableTreeMut<'_> {
         f: impl FnOnce(&mut Self, &mut BtreeMut<K, V>) -> Result,
     ) -> Result {
         if !self.pending_table_updates.is_empty() {
-            return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+            return Err(crate::StorageError::Internal(alloc::string::String::from(
                 "create_table_and_flush_table_root called with pending updates",
             )));
         }
         if self.tree.get(&name)?.is_some() {
-            return Err(crate::StorageError::Corrupted(alloc::format!(
+            return Err(crate::StorageError::Internal(alloc::format!(
                 "create_table_and_flush_table_root: table '{name}' already exists"
             )));
         }
@@ -759,13 +759,13 @@ impl TableTreeMut<'_> {
                     .insert(new_name.to_string(), update);
             }
             if self.tree.remove(&name)?.is_none() {
-                return Err(StorageError::Corrupted(alloc::format!(
+                return Err(StorageError::Internal(alloc::format!(
                     "rename_table: table '{name}' disappeared during rename"
                 ))
                 .into());
             }
             if self.tree.insert(&new_name, &definition)?.is_some() {
-                return Err(StorageError::Corrupted(alloc::format!(
+                return Err(StorageError::Internal(alloc::format!(
                     "rename_table: destination '{new_name}' appeared during rename"
                 ))
                 .into());

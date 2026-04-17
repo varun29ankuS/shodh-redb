@@ -822,6 +822,8 @@ pub enum CompactionError {
     EphemeralSavepointExists,
     /// A transaction is still in-progress
     TransactionInProgress,
+    /// Compaction was cancelled by the progress callback.
+    Cancelled,
     /// Error from underlying storage
     Storage(StorageError),
 }
@@ -832,6 +834,7 @@ impl From<CompactionError> for Error {
             CompactionError::PersistentSavepointExists => Error::PersistentSavepointExists,
             CompactionError::EphemeralSavepointExists => Error::EphemeralSavepointExists,
             CompactionError::TransactionInProgress => Error::TransactionInProgress,
+            CompactionError::Cancelled => Error::CompactionCancelled,
             CompactionError::Storage(storage) => storage.into(),
         }
     }
@@ -863,6 +866,9 @@ impl Display for CompactionError {
                     f,
                     "A transaction is still in progress. Operation cannot be performed."
                 )
+            }
+            CompactionError::Cancelled => {
+                write!(f, "Compaction cancelled by progress callback")
             }
             CompactionError::Storage(storage) => storage.fmt(f),
         }
@@ -1165,6 +1171,8 @@ pub enum Error {
     /// The database group committer is shutting down
     #[cfg(feature = "std")]
     GroupCommitShutdown,
+    /// Blob compaction was cancelled by the progress callback.
+    CompactionCancelled,
 }
 
 #[cfg(feature = "std")]
@@ -1449,6 +1457,9 @@ impl Display for Error {
             #[cfg(feature = "std")]
             Error::GroupCommitShutdown => {
                 write!(f, "Group commit failed: database is shutting down")
+            }
+            Error::CompactionCancelled => {
+                write!(f, "Compaction cancelled by progress callback")
             }
         }
     }

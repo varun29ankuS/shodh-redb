@@ -1,4 +1,4 @@
-use crate::blob_store::{BlobCompactionReport, BlobDedupConfig};
+use crate::blob_store::{BlobCompactionPolicy, BlobCompactionReport, BlobDedupConfig, BlobStats};
 use crate::cdc::CdcConfig;
 use crate::error::{BackendError, TransactionError};
 #[cfg(feature = "std")]
@@ -675,6 +675,7 @@ pub struct Database {
     blob_dedup_config: BlobDedupConfig,
     cdc_config: CdcConfig,
     history_retention: u64,
+    blob_compaction_policy: BlobCompactionPolicy,
     observer: Arc<dyn DatabaseObserver>,
     #[cfg(feature = "metrics")]
     db_metrics: Arc<DbMetrics>,
@@ -1392,6 +1393,149 @@ impl Database {
         })
     }
 
+    /// Checks blob region statistics against the configured
+    /// [`BlobCompactionPolicy`] and returns `Some(stats)` if compaction is
+    /// recommended, or `None` if the region is healthy.
+    ///
+    /// This is purely advisory -- the database never auto-compacts.
+    pub fn should_compact_blobs(&self) -> Result<Option<BlobStats>, TransactionError> {
+        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        let stats = txn.blob_stats().map_err(TransactionError::Storage)?;
+        txn.abort().map_err(TransactionError::Storage)?;
+
+        let policy = &self.blob_compaction_policy;
+        if stats.dead_bytes >= policy.min_dead_bytes
+            && stats.fragmentation_ratio >= policy.fragmentation_threshold
+        {
+            Ok(Some(stats))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Like [`compact_blobs()`](Self::compact_blobs), but invokes `callback`
+    /// after each pass with `(blobs_processed, total_blobs, bytes_processed,
+    /// total_bytes)`. Return `false` from the callback to cancel compaction.
+    ///
+    /// Same constraints as `compact_blobs`: no active read transactions or
+    /// persistent/ephemeral savepoints.
+    pub fn compact_blobs_with_progress(
+        &mut self,
+        mut callback: impl FnMut(u64, u64, u64, u64) -> bool,
+    ) -> core::result::Result<BlobCompactionReport, CompactionError> {
+        if self
+            .transaction_tracker
+            .oldest_live_read_transaction()
+            .map_err(CompactionError::Storage)?
+            .is_some()
+        {
+            return Err(CompactionError::TransactionInProgress);
+        }
+
+        // Check savepoint constraints
+        {
+            let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            if txn.list_persistent_savepoints()?.next().is_some() {
+                txn.abort().map_err(CompactionError::Storage)?;
+                return Err(CompactionError::PersistentSavepointExists);
+            }
+            if self
+                .transaction_tracker
+                .any_savepoint_exists()
+                .map_err(CompactionError::Storage)?
+            {
+                txn.abort().map_err(CompactionError::Storage)?;
+                return Err(CompactionError::EphemeralSavepointExists);
+            }
+            txn.abort().map_err(CompactionError::Storage)?;
+        }
+
+        // Gather stats
+        let stats = {
+            let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            let s = txn.blob_stats().map_err(CompactionError::Storage)?;
+            txn.abort().map_err(CompactionError::Storage)?;
+            s
+        };
+
+        if stats.dead_bytes == 0 {
+            return Ok(BlobCompactionReport {
+                blobs_relocated: 0,
+                live_bytes: stats.live_bytes,
+                bytes_reclaimed: 0,
+                was_noop: true,
+            });
+        }
+
+        let old_region_length = stats.region_bytes;
+        let total_blobs = stats.blob_count;
+        let total_bytes = stats.live_bytes;
+
+        // Progress: 0% before pass 1
+        if !callback(0, total_blobs, 0, total_bytes) {
+            return Err(CompactionError::Cancelled);
+        }
+
+        // -- Pass 1: Append live blobs after current region end ----------------
+        let (blobs_relocated, total_live_size) = {
+            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            let result = txn.compact_blobs_pass(false);
+            match result {
+                Ok(r) => {
+                    txn.set_two_phase_commit(true);
+                    txn.commit().map_err(|e| e.into_storage_error())?;
+                    r
+                }
+                Err(e) => {
+                    txn.abort().map_err(CompactionError::Storage)?;
+                    return Err(CompactionError::Storage(e));
+                }
+            }
+        };
+
+        // Progress: ~50% after pass 1
+        if !callback(blobs_relocated, total_blobs, total_live_size, total_bytes) {
+            // Pass 1 data is committed but pass 2 hasn't shifted yet.
+            // The database is consistent -- blobs point to appended area.
+            return Err(CompactionError::Cancelled);
+        }
+
+        // -- Pass 2: Shift data to region start -------------------------------
+        {
+            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            let result = txn.compact_blobs_pass(true);
+            match result {
+                Ok(_) => {
+                    txn.set_two_phase_commit(true);
+                    txn.commit().map_err(|e| e.into_storage_error())?;
+                }
+                Err(e) => {
+                    txn.abort().map_err(CompactionError::Storage)?;
+                    return Err(CompactionError::Storage(e));
+                }
+            }
+        }
+
+        // -- Truncate the file ------------------------------------------------
+        let blob_state = self.mem.get_committed_blob_state();
+        let target_len = blob_state.region_offset + blob_state.region_length;
+        if target_len > 0 {
+            self.mem
+                .truncate_to(target_len)
+                .map_err(CompactionError::Storage)?;
+        }
+
+        // Final progress: 100%
+        let _ = callback(blobs_relocated, total_blobs, total_live_size, total_bytes);
+
+        Ok(BlobCompactionReport {
+            blobs_relocated,
+            live_bytes: total_live_size,
+            bytes_reclaimed: old_region_length - total_live_size,
+            was_noop: false,
+        })
+    }
+
     /// Starts an incremental online compaction that allows concurrent readers.
     ///
     /// Unlike [`compact()`](Self::compact) which requires `&mut self` and blocks
@@ -1429,6 +1573,73 @@ impl Database {
         txn.abort().map_err(CompactionError::Storage)?;
 
         Ok(CompactionHandle { db: self })
+    }
+
+    /// Starts online blob compaction that allows concurrent readers between
+    /// phases.
+    ///
+    /// Unlike [`compact_blobs()`](Self::compact_blobs), this takes `&self`
+    /// and splits the work into two phases. Between phases, read transactions
+    /// can proceed normally.
+    ///
+    /// No active read transactions may exist when the handle is created.
+    /// Persistent and ephemeral savepoints are not allowed.
+    pub fn start_blob_compaction(
+        &self,
+    ) -> core::result::Result<BlobCompactionHandle<'_>, CompactionError> {
+        if self
+            .transaction_tracker
+            .oldest_live_read_transaction()
+            .map_err(CompactionError::Storage)?
+            .is_some()
+        {
+            return Err(CompactionError::TransactionInProgress);
+        }
+
+        // Check savepoint constraints
+        {
+            let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            if txn.list_persistent_savepoints()?.next().is_some() {
+                txn.abort().map_err(CompactionError::Storage)?;
+                return Err(CompactionError::PersistentSavepointExists);
+            }
+            if self
+                .transaction_tracker
+                .any_savepoint_exists()
+                .map_err(CompactionError::Storage)?
+            {
+                txn.abort().map_err(CompactionError::Storage)?;
+                return Err(CompactionError::EphemeralSavepointExists);
+            }
+            txn.abort().map_err(CompactionError::Storage)?;
+        }
+
+        // Gather stats
+        let stats = {
+            let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            let s = txn.blob_stats().map_err(CompactionError::Storage)?;
+            txn.abort().map_err(CompactionError::Storage)?;
+            s
+        };
+
+        if stats.dead_bytes == 0 {
+            // No dead space -- return a handle that reports complete immediately
+            return Ok(BlobCompactionHandle {
+                db: self,
+                stats,
+                phase: 2,
+                blobs_relocated: 0,
+                live_bytes: stats.live_bytes,
+            });
+        }
+
+        Ok(BlobCompactionHandle {
+            db: self,
+            stats,
+            phase: 0,
+            blobs_relocated: 0,
+            live_bytes: 0,
+        })
     }
 
     /// Starts a background integrity scanner that periodically walks all
@@ -1734,6 +1945,7 @@ impl Database {
         history_retention: u64,
         read_verification: ReadVerification,
         read_verification_callback: Option<Arc<ReadVerificationCallback>>,
+        blob_compaction_policy: BlobCompactionPolicy,
         observer: Arc<dyn DatabaseObserver>,
         #[cfg(feature = "metrics")] db_metrics: Arc<DbMetrics>,
     ) -> Result<Self, DatabaseError> {
@@ -1791,6 +2003,7 @@ impl Database {
             blob_dedup_config: blob_dedup_config.clone(),
             cdc_config,
             history_retention,
+            blob_compaction_policy,
             observer,
             #[cfg(feature = "metrics")]
             db_metrics,
@@ -2275,6 +2488,126 @@ impl CompactionHandle<'_> {
     }
 }
 
+/// Progress report from a blob compaction step.
+#[derive(Debug, Clone, Copy)]
+pub struct BlobCompactionProgress {
+    /// Number of blobs relocated so far.
+    pub blobs_relocated: u64,
+    /// Total live bytes relocated so far.
+    pub live_bytes: u64,
+    /// Which phase just completed (1 = append, 2 = shift+truncate).
+    pub phase: u8,
+    /// Whether blob compaction is complete.
+    pub complete: bool,
+}
+
+/// Handle for online blob compaction that allows concurrent readers between
+/// phases.
+///
+/// Created by [`Database::start_blob_compaction()`]. The compaction runs in
+/// two phases:
+/// 1. **Append**: Live blobs are appended after the current region end (crash-safe).
+/// 2. **Shift + truncate**: Data is shifted to region start and the file is truncated.
+///
+/// Between phases, read transactions can proceed normally.
+/// Use [`run()`](Self::run) for a simple all-at-once call.
+pub struct BlobCompactionHandle<'db> {
+    db: &'db Database,
+    stats: BlobStats,
+    phase: u8,
+    blobs_relocated: u64,
+    live_bytes: u64,
+}
+
+impl BlobCompactionHandle<'_> {
+    /// Performs one phase of blob compaction.
+    ///
+    /// Call repeatedly until `complete` is `true`. Each call acquires and
+    /// releases a write transaction, allowing readers in between.
+    pub fn step(&mut self) -> core::result::Result<BlobCompactionProgress, CompactionError> {
+        if self.phase == 0 {
+            // Phase 1: Append live blobs after current region end
+            let mut txn = self.db.begin_write().map_err(|e| e.into_storage_error())?;
+            let result = txn.compact_blobs_pass(false);
+            match result {
+                Ok((relocated, live_size)) => {
+                    txn.set_two_phase_commit(true);
+                    txn.commit().map_err(|e| e.into_storage_error())?;
+                    self.blobs_relocated = relocated;
+                    self.live_bytes = live_size;
+                    self.phase = 1;
+                    Ok(BlobCompactionProgress {
+                        blobs_relocated: relocated,
+                        live_bytes: live_size,
+                        phase: 1,
+                        complete: false,
+                    })
+                }
+                Err(e) => {
+                    txn.abort().map_err(CompactionError::Storage)?;
+                    Err(CompactionError::Storage(e))
+                }
+            }
+        } else if self.phase == 1 {
+            // Phase 2: Shift data to region start
+            let mut txn = self.db.begin_write().map_err(|e| e.into_storage_error())?;
+            let result = txn.compact_blobs_pass(true);
+            match result {
+                Ok(_) => {
+                    txn.set_two_phase_commit(true);
+                    txn.commit().map_err(|e| e.into_storage_error())?;
+                }
+                Err(e) => {
+                    txn.abort().map_err(CompactionError::Storage)?;
+                    return Err(CompactionError::Storage(e));
+                }
+            }
+
+            // Truncate the file
+            let blob_state = self.db.mem.get_committed_blob_state();
+            let target_len = blob_state.region_offset + blob_state.region_length;
+            if target_len > 0 {
+                self.db
+                    .mem
+                    .truncate_to(target_len)
+                    .map_err(CompactionError::Storage)?;
+            }
+
+            self.phase = 2;
+            Ok(BlobCompactionProgress {
+                blobs_relocated: self.blobs_relocated,
+                live_bytes: self.live_bytes,
+                phase: 2,
+                complete: true,
+            })
+        } else {
+            // Already complete
+            Ok(BlobCompactionProgress {
+                blobs_relocated: self.blobs_relocated,
+                live_bytes: self.live_bytes,
+                phase: 2,
+                complete: true,
+            })
+        }
+    }
+
+    /// Runs both phases to completion, returning a compaction report.
+    pub fn run(&mut self) -> core::result::Result<BlobCompactionReport, CompactionError> {
+        loop {
+            let progress = self.step()?;
+            if progress.complete {
+                let bytes_reclaimed = self.stats.region_bytes.saturating_sub(self.live_bytes);
+                return Ok(BlobCompactionReport {
+                    blobs_relocated: self.blobs_relocated,
+                    live_bytes: self.live_bytes,
+                    bytes_reclaimed,
+                    was_noop: false,
+                });
+            }
+        }
+    }
+}
+
 pub struct RepairSession {
     progress: f64,
     aborted: bool,
@@ -2363,6 +2696,7 @@ pub struct Builder {
     read_verification: ReadVerification,
     read_verification_callback: Option<Arc<ReadVerificationCallback>>,
     observer: Option<Arc<dyn DatabaseObserver>>,
+    blob_compaction_policy: BlobCompactionPolicy,
 }
 
 impl Builder {
@@ -2392,6 +2726,7 @@ impl Builder {
             read_verification: ReadVerification::None,
             read_verification_callback: None,
             observer: None,
+            blob_compaction_policy: BlobCompactionPolicy::default(),
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
@@ -2421,6 +2756,16 @@ impl Builder {
     /// See [`DatabaseObserver`] for the full list of events.
     pub fn set_observer(&mut self, observer: impl DatabaseObserver) -> &mut Self {
         self.observer = Some(Arc::new(observer));
+        self
+    }
+
+    /// Set the advisory policy used by
+    /// [`Database::should_compact_blobs()`](crate::Database::should_compact_blobs).
+    ///
+    /// This only affects the advisory recommendation; the database never
+    /// auto-compacts blobs.
+    pub fn set_blob_compaction_policy(&mut self, policy: BlobCompactionPolicy) -> &mut Self {
+        self.blob_compaction_policy = policy;
         self
     }
 
@@ -2595,6 +2940,7 @@ impl Builder {
             self.history_retention,
             self.read_verification,
             self.read_verification_callback.clone(),
+            self.blob_compaction_policy,
             self.resolve_observer(),
             #[cfg(feature = "metrics")]
             Self::resolve_metrics(),
@@ -2621,6 +2967,7 @@ impl Builder {
             self.history_retention,
             self.read_verification,
             self.read_verification_callback.clone(),
+            self.blob_compaction_policy,
             self.resolve_observer(),
             #[cfg(feature = "metrics")]
             Self::resolve_metrics(),
@@ -2671,6 +3018,7 @@ impl Builder {
             self.history_retention,
             self.read_verification,
             self.read_verification_callback.clone(),
+            self.blob_compaction_policy,
             self.resolve_observer(),
             #[cfg(feature = "metrics")]
             Self::resolve_metrics(),
@@ -2697,6 +3045,7 @@ impl Builder {
             self.history_retention,
             self.read_verification,
             self.read_verification_callback.clone(),
+            self.blob_compaction_policy,
             self.resolve_observer(),
             #[cfg(feature = "metrics")]
             Self::resolve_metrics(),

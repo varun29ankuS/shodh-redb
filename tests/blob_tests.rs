@@ -2872,3 +2872,293 @@ fn blob_stats_read_txn() {
     assert_eq!(stats.dead_bytes, 0);
     assert_eq!(stats.fragmentation_ratio, 0.0);
 }
+
+#[test]
+fn blob_should_compact_no_dead_space() {
+    use shodh_redb::BlobCompactionPolicy;
+
+    let tmpfile = create_tempfile();
+    let mut builder = Builder::new();
+    builder.set_blob_compaction_policy(BlobCompactionPolicy::default());
+    let db = builder.create(tmpfile.path()).unwrap();
+
+    // Store a blob
+    {
+        let txn = db.begin_write().unwrap();
+        txn.store_blob(
+            b"data",
+            ContentType::OctetStream,
+            "a",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    // No dead space => should_compact_blobs returns None
+    let result = db.should_compact_blobs().unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn blob_should_compact_with_dead_space() {
+    use shodh_redb::BlobCompactionPolicy;
+
+    let tmpfile = create_tempfile();
+    let mut builder = Builder::new();
+    builder.set_blob_compaction_policy(BlobCompactionPolicy {
+        fragmentation_threshold: 0.1,
+        min_dead_bytes: 1,
+    });
+    let mut db = builder.create(tmpfile.path()).unwrap();
+
+    // Store two blobs, delete one to create dead space
+    let blob_id;
+    {
+        let txn = db.begin_write().unwrap();
+        blob_id = txn
+            .store_blob(
+                &[0u8; 1024],
+                ContentType::OctetStream,
+                "a",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.store_blob(
+            &[1u8; 1024],
+            ContentType::OctetStream,
+            "b",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&blob_id).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // With low thresholds, should recommend compaction
+    let result = db.should_compact_blobs().unwrap();
+    assert!(result.is_some());
+    let stats = result.unwrap();
+    assert!(stats.dead_bytes > 0);
+
+    // Compact and verify
+    let report = db.compact_blobs().unwrap();
+    assert!(!report.was_noop);
+    assert!(report.bytes_reclaimed > 0);
+}
+
+#[test]
+fn blob_compact_with_progress_callback() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let blob_id;
+    {
+        let txn = db.begin_write().unwrap();
+        blob_id = txn
+            .store_blob(
+                &[0u8; 512],
+                ContentType::OctetStream,
+                "a",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.store_blob(
+            &[1u8; 512],
+            ContentType::OctetStream,
+            "b",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&blob_id).unwrap();
+        txn.commit().unwrap();
+    }
+
+    let mut calls = 0u32;
+    let report = db
+        .compact_blobs_with_progress(|_blobs, _total_blobs, _bytes, _total_bytes| {
+            calls += 1;
+            true // continue
+        })
+        .unwrap();
+    assert!(!report.was_noop);
+    assert!(calls >= 2); // at least initial + after pass 1
+}
+
+#[test]
+fn blob_compact_with_progress_cancelled() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let blob_id;
+    {
+        let txn = db.begin_write().unwrap();
+        blob_id = txn
+            .store_blob(
+                &[0u8; 512],
+                ContentType::OctetStream,
+                "a",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.store_blob(
+            &[1u8; 512],
+            ContentType::OctetStream,
+            "b",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&blob_id).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Cancel immediately
+    let result = db.compact_blobs_with_progress(|_, _, _, _| false);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, shodh_redb::CompactionError::Cancelled),
+        "Expected Cancelled, got: {err:?}"
+    );
+
+    // Database should still be usable after cancellation
+    let txn = db.begin_write().unwrap();
+    let stats = txn.blob_stats().unwrap();
+    assert!(stats.blob_count > 0);
+    txn.abort().unwrap();
+}
+
+#[test]
+fn blob_compaction_handle_basic() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let blob_id;
+    {
+        let txn = db.begin_write().unwrap();
+        blob_id = txn
+            .store_blob(
+                &[0u8; 512],
+                ContentType::OctetStream,
+                "a",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.store_blob(
+            &[1u8; 512],
+            ContentType::OctetStream,
+            "b",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&blob_id).unwrap();
+        txn.commit().unwrap();
+    }
+
+    let mut handle = db.start_blob_compaction().unwrap();
+    let report = handle.run().unwrap();
+    assert!(!report.was_noop);
+    assert!(report.bytes_reclaimed > 0);
+
+    // Verify data is intact
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.blob_stats().unwrap();
+    assert_eq!(stats.blob_count, 1);
+    assert_eq!(stats.dead_bytes, 0);
+}
+
+#[test]
+fn blob_compaction_handle_noop() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Store a blob but don't delete anything
+    {
+        let txn = db.begin_write().unwrap();
+        txn.store_blob(
+            b"data",
+            ContentType::OctetStream,
+            "a",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let mut handle = db.start_blob_compaction().unwrap();
+    // step() should report complete immediately (no dead space)
+    let progress = handle.step().unwrap();
+    assert!(progress.complete);
+}
+
+#[test]
+fn blob_compaction_handle_step_by_step() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let blob_id;
+    {
+        let txn = db.begin_write().unwrap();
+        blob_id = txn
+            .store_blob(
+                &[0u8; 512],
+                ContentType::OctetStream,
+                "a",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.store_blob(
+            &[1u8; 512],
+            ContentType::OctetStream,
+            "b",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&blob_id).unwrap();
+        txn.commit().unwrap();
+    }
+
+    let mut handle = db.start_blob_compaction().unwrap();
+
+    // Phase 1: Append
+    let p1 = handle.step().unwrap();
+    assert_eq!(p1.phase, 1);
+    assert!(!p1.complete);
+    assert!(p1.blobs_relocated > 0);
+
+    // Read transaction can proceed between phases
+    {
+        let read_txn = db.begin_read().unwrap();
+        let stats = read_txn.blob_stats().unwrap();
+        assert_eq!(stats.blob_count, 1);
+    }
+
+    // Phase 2: Shift + truncate
+    let p2 = handle.step().unwrap();
+    assert_eq!(p2.phase, 2);
+    assert!(p2.complete);
+
+    // Extra step after completion is idempotent
+    let p3 = handle.step().unwrap();
+    assert!(p3.complete);
+}

@@ -384,7 +384,7 @@ impl TransactionHeader {
             }
             FILE_FORMAT_VERSION3 | FILE_FORMAT_VERSION4 | FILE_FORMAT_VERSION5 => {}
             _ => {
-                return Err(StorageError::Corrupted(format!(
+                return Err(StorageError::format_error(format!(
                     "Expected file format version <= {FILE_FORMAT_VERSION5}, found {version}",
                 ))
                 .into());

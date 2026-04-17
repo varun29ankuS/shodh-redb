@@ -1139,8 +1139,8 @@ impl Database {
         let allocator_hash = self.mem.allocator_hash();
         let mut was_clean = Arc::get_mut(&mut self.mem)
             .ok_or_else(|| {
-                DatabaseError::Storage(StorageError::Corrupted(
-                    "check_integrity() requires exclusive database access, but other references to the memory exist".into(),
+                DatabaseError::Storage(StorageError::invalid_config(
+                    "check_integrity() requires exclusive database access, but other references to the memory exist",
                 ))
             })?
             .clear_cache_and_reload()?;

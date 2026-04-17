@@ -17,7 +17,6 @@
 use crate::{Result, StorageError};
 use alloc::borrow::Cow;
 use alloc::format;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 
 /// User-facing compression configuration.
@@ -71,16 +70,14 @@ impl CompressionConfig {
             #[cfg(feature = "compression_zstd")]
             2 => Ok(Self::Zstd { level: 0 }),
             #[cfg(not(feature = "compression_lz4"))]
-            1 => Err(StorageError::Corrupted(
-                "database uses LZ4 compression but compression_lz4 feature is not enabled"
-                    .to_string(),
+            1 => Err(StorageError::invalid_config(
+                "database uses LZ4 compression but compression_lz4 feature is not enabled",
             )),
             #[cfg(not(feature = "compression_zstd"))]
-            2 => Err(StorageError::Corrupted(
-                "database uses zstd compression but compression_zstd feature is not enabled"
-                    .to_string(),
+            2 => Err(StorageError::invalid_config(
+                "database uses zstd compression but compression_zstd feature is not enabled",
             )),
-            other => Err(StorageError::Corrupted(format!(
+            other => Err(StorageError::format_error(format!(
                 "unknown compression algorithm in header: {other}"
             ))),
         }
@@ -172,8 +169,8 @@ pub(crate) fn decompress_value(data: &[u8]) -> Result<Cow<'_, [u8]>> {
     }
 
     if data.len() < VALUE_ENVELOPE_SIZE {
-        return Err(StorageError::Corrupted(
-            "compressed value too short for envelope header".to_string(),
+        return Err(StorageError::format_error(
+            "compressed value too short for envelope header",
         ));
     }
 
@@ -212,14 +209,14 @@ pub(crate) fn decompress_value(data: &[u8]) -> Result<Cow<'_, [u8]>> {
             Ok(Cow::Owned(decompressed))
         }
         #[cfg(not(feature = "compression_lz4"))]
-        0x02 => Err(StorageError::Corrupted(
-            "value uses LZ4 compression but compression_lz4 feature is not enabled".to_string(),
+        0x02 => Err(StorageError::invalid_config(
+            "value uses LZ4 compression but compression_lz4 feature is not enabled",
         )),
         #[cfg(not(feature = "compression_zstd"))]
-        0x04 => Err(StorageError::Corrupted(
-            "value uses zstd compression but compression_zstd feature is not enabled".to_string(),
+        0x04 => Err(StorageError::invalid_config(
+            "value uses zstd compression but compression_zstd feature is not enabled",
         )),
-        _ => Err(StorageError::Corrupted(format!(
+        _ => Err(StorageError::format_error(format!(
             "unknown value compression algorithm bits: {algo_bits:#04x}"
         ))),
     }

@@ -18,7 +18,7 @@ rand_distr = "0.4.3"
 [dependencies.redb]
 package = "shodh-redb"
 path = ".."
-features = []
+features = ["std"]
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -51,6 +51,36 @@ doc = false
 [[bin]]
 name = "fuzz_ivfpq_kmeans"
 path = "fuzz_targets/fuzz_ivfpq_kmeans.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_cdc_deser"
+path = "fuzz_targets/fuzz_cdc_deser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_cluster_blob"
+path = "fuzz_targets/fuzz_cluster_blob.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_incremental_deser"
+path = "fuzz_targets/fuzz_incremental_deser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_merge_ops"
+path = "fuzz_targets/fuzz_merge_ops.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_pq_codebook"
+path = "fuzz_targets/fuzz_pq_codebook.rs"
 test = false
 doc = false
 

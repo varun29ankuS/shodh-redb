@@ -79,7 +79,7 @@ pub(crate) struct CdcEvent {
 /// Encoded as 12 bytes big-endian: `[transaction_id: u64][sequence: u32]`.
 /// Big-endian ensures lexicographic byte order matches numeric order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct CdcKey {
+pub struct CdcKey {
     pub transaction_id: u64,
     pub sequence: u32,
 }
@@ -214,7 +214,7 @@ const CDC_FORMAT_VERSION: u8 = 1;
 /// the `op` byte. The deserializer distinguishes the two: if the first byte
 /// equals `CDC_FORMAT_MAGIC` it is a versioned record, otherwise legacy.
 #[derive(Clone)]
-pub(crate) struct CdcRecord {
+pub struct CdcRecord {
     pub op: ChangeOp,
     pub table_name: String,
     pub key: Vec<u8>,
@@ -235,7 +235,7 @@ impl fmt::Debug for CdcRecord {
 }
 
 impl CdcRecord {
-    pub fn from_event(event: &CdcEvent) -> Result<Self, StorageError> {
+    pub(crate) fn from_event(event: &CdcEvent) -> Result<Self, StorageError> {
         if u16::try_from(event.table_name.len()).is_err() {
             return Err(StorageError::format_error(format!(
                 "CDC table_name exceeds u16::MAX bytes ({})",
@@ -286,7 +286,7 @@ impl CdcRecord {
         + 4 + self.old_value.as_ref().map_or(0, Vec::len) // old_val_len + old_val
     }
 
-    pub(crate) fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.serialized_size());
 
         buf.push(CDC_FORMAT_MAGIC);
@@ -326,7 +326,7 @@ impl CdcRecord {
         buf
     }
 
-    pub(crate) fn deserialize(data: &[u8]) -> Result<Self, StorageError> {
+    pub fn deserialize(data: &[u8]) -> Result<Self, StorageError> {
         let mut pos = 0;
 
         if data.is_empty() {

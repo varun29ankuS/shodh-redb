@@ -1,3 +1,3 @@
-pub(crate) mod types;
+pub mod types;
 
-pub use types::{CdcConfig, ChangeOp, ChangeStream};
+pub use types::{CdcConfig, CdcKey, CdcRecord, ChangeOp, ChangeStream};

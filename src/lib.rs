@@ -117,7 +117,7 @@ pub use blob_store::{
     CausalEdge, CausalLink, CausalPath, ContentType, DedupStats, MAX_TAGS_PER_BLOB, RelationType,
     StoreOptions,
 };
-pub use cdc::{CdcConfig, ChangeOp, ChangeStream};
+pub use cdc::{CdcConfig, CdcKey, CdcRecord, ChangeOp, ChangeStream};
 pub use composite::{BlobQueryProvider, CompositeQuery, ScoredBlob, SignalScores, SignalWeights};
 pub use ivfpq::{
     Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, MetadataFilter, MetadataMap,

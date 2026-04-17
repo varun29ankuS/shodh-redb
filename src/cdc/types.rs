@@ -365,7 +365,9 @@ impl CdcRecord {
                 "CDC record truncated at table name length",
             ));
         }
-        let name_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap());
+        let name_len = u16::from_le_bytes(data[pos..pos + 2].try_into().map_err(|_| {
+            StorageError::format_error("CDC record: invalid table name length bytes")
+        })?);
         pos += 2;
         if pos + usize::from(name_len) > data.len() {
             return Err(StorageError::format_error(
@@ -381,7 +383,11 @@ impl CdcRecord {
                 "CDC record truncated at key length",
             ));
         }
-        let key_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+        let key_len = u32::from_le_bytes(
+            data[pos..pos + 4]
+                .try_into()
+                .map_err(|_| StorageError::format_error("CDC record: invalid key length bytes"))?,
+        );
         pos += 4;
         if pos + key_len as usize > data.len() {
             return Err(StorageError::format_error(
@@ -396,7 +402,9 @@ impl CdcRecord {
                 "CDC record truncated at new value length",
             ));
         }
-        let new_val_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+        let new_val_len = u32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| {
+            StorageError::format_error("CDC record: invalid new value length bytes")
+        })?);
         pos += 4;
         let new_value = if new_val_len == NONE_SENTINEL {
             None
@@ -416,7 +424,9 @@ impl CdcRecord {
                 "CDC record truncated at old value length",
             ));
         }
-        let old_val_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+        let old_val_len = u32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| {
+            StorageError::format_error("CDC record: invalid old value length bytes")
+        })?);
         pos += 4;
         let old_value = if old_val_len == NONE_SENTINEL {
             None

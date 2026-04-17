@@ -319,6 +319,18 @@ fn check_bounds(payload: &[u8], pos: usize, need: usize) -> Result<(), StorageEr
     Ok(())
 }
 
+/// Convert a byte slice to a fixed-size array, returning a descriptive error
+/// on length mismatch instead of panicking.
+#[cfg(feature = "std")]
+fn try_into_array<const N: usize>(slice: &[u8], field: &str) -> Result<[u8; N], StorageError> {
+    slice.try_into().map_err(|_| {
+        StorageError::Corrupted(alloc::format!(
+            "incremental snapshot: invalid {field} bytes (expected {N}, got {})",
+            slice.len()
+        ))
+    })
+}
+
 impl IncrementalSnapshot {
     /// Encode this snapshot into a portable byte buffer.
     ///
@@ -422,19 +434,23 @@ impl IncrementalSnapshot {
         pos += 1 + 3; // version + padding
 
         check_bounds(payload, pos, 8)?;
-        let base_txn = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+        let base_txn = u64::from_le_bytes(try_into_array(&payload[pos..pos + 8], "base_txn")?);
         pos += 8;
         check_bounds(payload, pos, 8)?;
-        let current_txn = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+        let current_txn =
+            u64::from_le_bytes(try_into_array(&payload[pos..pos + 8], "current_txn")?);
         pos += 8;
         check_bounds(payload, pos, 8)?;
-        let table_count = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+        let table_count =
+            u64::from_le_bytes(try_into_array(&payload[pos..pos + 8], "table_count")?);
         pos += 8;
 
         let mut tables = Vec::new();
         for _ in 0..table_count {
             check_bounds(payload, pos, 2)?;
-            let name_len = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
+            let name_len =
+                u16::from_le_bytes(try_into_array(&payload[pos..pos + 2], "table name length")?)
+                    as usize;
             pos += 2;
             check_bounds(payload, pos, name_len)?;
             let name = core::str::from_utf8(&payload[pos..pos + name_len]).map_err(|_| {
@@ -444,26 +460,32 @@ impl IncrementalSnapshot {
 
             check_bounds(payload, pos, 8)?;
             let upsert_count =
-                u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()) as usize;
+                u64::from_le_bytes(try_into_array(&payload[pos..pos + 8], "upsert count")?)
+                    as usize;
             pos += 8;
             check_bounds(payload, pos, 8)?;
             let delete_count =
-                u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()) as usize;
+                u64::from_le_bytes(try_into_array(&payload[pos..pos + 8], "delete count")?)
+                    as usize;
             pos += 8;
 
             let mut upserts = Vec::with_capacity(upsert_count);
             for _ in 0..upsert_count {
                 check_bounds(payload, pos, 4)?;
-                let key_len =
-                    u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
+                let key_len = u32::from_le_bytes(try_into_array(
+                    &payload[pos..pos + 4],
+                    "upsert key length",
+                )?) as usize;
                 pos += 4;
                 check_bounds(payload, pos, key_len)?;
                 let key = payload[pos..pos + key_len].to_vec();
                 pos += key_len;
 
                 check_bounds(payload, pos, 4)?;
-                let val_len =
-                    u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
+                let val_len = u32::from_le_bytes(try_into_array(
+                    &payload[pos..pos + 4],
+                    "upsert value length",
+                )?) as usize;
                 pos += 4;
                 check_bounds(payload, pos, val_len)?;
                 let value = payload[pos..pos + val_len].to_vec();
@@ -471,7 +493,7 @@ impl IncrementalSnapshot {
 
                 check_bounds(payload, pos, 16)?;
                 let stored_checksum =
-                    u128::from_le_bytes(payload[pos..pos + 16].try_into().unwrap());
+                    u128::from_le_bytes(try_into_array(&payload[pos..pos + 16], "entry checksum")?);
                 pos += 16;
 
                 let mut combined = Vec::with_capacity(key_len + val_len);
@@ -490,8 +512,10 @@ impl IncrementalSnapshot {
             let mut deletes = Vec::with_capacity(delete_count);
             for _ in 0..delete_count {
                 check_bounds(payload, pos, 4)?;
-                let key_len =
-                    u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
+                let key_len = u32::from_le_bytes(try_into_array(
+                    &payload[pos..pos + 4],
+                    "delete key length",
+                )?) as usize;
                 pos += 4;
                 check_bounds(payload, pos, key_len)?;
                 let key = payload[pos..pos + key_len].to_vec();
@@ -508,12 +532,18 @@ impl IncrementalSnapshot {
 
         // Dropped tables
         check_bounds(payload, pos, 8)?;
-        let dropped_count = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()) as usize;
+        let dropped_count = u64::from_le_bytes(try_into_array(
+            &payload[pos..pos + 8],
+            "dropped table count",
+        )?) as usize;
         pos += 8;
         let mut dropped_tables = Vec::with_capacity(dropped_count);
         for _ in 0..dropped_count {
             check_bounds(payload, pos, 2)?;
-            let name_len = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
+            let name_len = u16::from_le_bytes(try_into_array(
+                &payload[pos..pos + 2],
+                "dropped table name length",
+            )?) as usize;
             pos += 2;
             check_bounds(payload, pos, name_len)?;
             let name = core::str::from_utf8(&payload[pos..pos + name_len]).map_err(|_| {

@@ -2044,3 +2044,27 @@ pub struct BlobCompactionReport {
     /// `true` if compaction was a no-op (no dead space existed).
     pub was_noop: bool,
 }
+
+/// Advisory policy for deciding when blob compaction is worthwhile.
+///
+/// Used by [`Database::should_compact_blobs`](crate::Database::should_compact_blobs)
+/// to recommend compaction. The database never auto-compacts; the caller
+/// decides when and whether to act on the recommendation.
+#[derive(Debug, Clone, Copy)]
+pub struct BlobCompactionPolicy {
+    /// Minimum fragmentation ratio (`dead_bytes / region_bytes`) before
+    /// compaction is recommended. Default: `0.3` (30%).
+    pub fragmentation_threshold: f64,
+    /// Minimum absolute dead bytes before compaction is recommended.
+    /// Prevents compacting tiny regions. Default: `1_048_576` (1 MiB).
+    pub min_dead_bytes: u64,
+}
+
+impl Default for BlobCompactionPolicy {
+    fn default() -> Self {
+        Self {
+            fragmentation_threshold: 0.3,
+            min_dead_bytes: 1_048_576,
+        }
+    }
+}

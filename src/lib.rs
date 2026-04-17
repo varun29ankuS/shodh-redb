@@ -79,10 +79,11 @@
 extern crate alloc;
 
 pub use db::{
-    Builder, CacheStats, CompactionHandle, CompactionProgress, CorruptPageInfo, Database,
-    MultimapTableDefinition, MultimapTableHandle, ReadOnlyDatabase, ReadVerification,
-    ReadVerificationAction, ReadableDatabase, RepairSession, StorageBackend, TableDefinition,
-    TableHandle, TransactionInfo, UntypedMultimapTableHandle, UntypedTableHandle, VerifyLevel,
+    BlobCompactionHandle, BlobCompactionProgress, Builder, CacheStats, CompactionHandle,
+    CompactionProgress, CorruptPageInfo, Database, MultimapTableDefinition, MultimapTableHandle,
+    ReadOnlyDatabase, ReadVerification, ReadVerificationAction, ReadableDatabase, RepairSession,
+    StorageBackend, TableDefinition, TableHandle, TransactionInfo, UntypedMultimapTableHandle,
+    UntypedTableHandle, VerifyLevel,
 };
 #[cfg(feature = "std")]
 pub use db::{SalvageReport, VerifyReport};
@@ -113,9 +114,9 @@ pub use tree_store::{
 pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
 pub use blob_store::{
-    BlobCompactionReport, BlobId, BlobInput, BlobMeta, BlobReader, BlobRef, BlobStats, BlobWriter,
-    CausalEdge, CausalLink, CausalPath, ContentType, DedupStats, MAX_TAGS_PER_BLOB, RelationType,
-    StoreOptions,
+    BlobCompactionPolicy, BlobCompactionReport, BlobId, BlobInput, BlobMeta, BlobReader, BlobRef,
+    BlobStats, BlobWriter, CausalEdge, CausalLink, CausalPath, ContentType, DedupStats,
+    MAX_TAGS_PER_BLOB, RelationType, StoreOptions,
 };
 pub use cdc::{CdcConfig, CdcKey, CdcRecord, ChangeOp, ChangeStream};
 pub use composite::{BlobQueryProvider, CompositeQuery, ScoredBlob, SignalScores, SignalWeights};

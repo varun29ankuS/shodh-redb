@@ -83,9 +83,14 @@ fuzz_target!(|op: FuzzOp| {
             }
 
             // Build entries with no raw vectors (simpler path).
+            // Deduplicate IDs to avoid encoding duplicates.
+            let mut seen_ids = std::collections::HashSet::new();
             let mut entries: Vec<(u64, Vec<u8>, Option<Vec<f32>>)> = Vec::with_capacity(n);
             for i in 0..n {
                 let id = vector_ids[i % vector_ids.len()];
+                if !seen_ids.insert(id) {
+                    continue;
+                }
                 let pq_start = (i * pq_len as usize) % pq_data.len().max(1);
                 let codes: Vec<u8> = (0..pq_len as usize)
                     .map(|j| {
@@ -104,10 +109,14 @@ fuzz_target!(|op: FuzzOp| {
                 .map(|(id, codes, _)| (*id, codes.as_slice(), None))
                 .collect();
 
+            if entries.is_empty() {
+                return;
+            }
+
             let blob = encode_cluster_blob(&entry_refs, pq_len);
             let parsed = ClusterBlobRef::new(&blob, pq_len, dim);
             if let Ok(parsed) = parsed {
-                assert_eq!(parsed.count() as usize, n);
+                assert_eq!(parsed.count() as usize, entries.len());
                 // Verify all IDs are findable.
                 for (id, _, _) in &entry_refs {
                     assert!(parsed.find_vector(*id).is_some());
@@ -130,8 +139,12 @@ fuzz_target!(|op: FuzzOp| {
             }
             let n = existing_ids.len().min(4);
 
+            let mut seen_ids = std::collections::HashSet::new();
             let mut entries: Vec<(u64, Vec<u8>, Option<Vec<f32>>)> = Vec::new();
             for i in 0..n {
+                if !seen_ids.insert(existing_ids[i]) {
+                    continue;
+                }
                 let codes: Vec<u8> = (0..pq_len as usize)
                     .map(|j| {
                         existing_pq
@@ -141,6 +154,9 @@ fuzz_target!(|op: FuzzOp| {
                     })
                     .collect();
                 entries.push((existing_ids[i], codes, None));
+            }
+            if entries.is_empty() {
+                return;
             }
             let entry_refs: Vec<(u64, &[u8], Option<&[f32]>)> = entries
                 .iter()
@@ -172,8 +188,12 @@ fuzz_target!(|op: FuzzOp| {
                 return;
             }
             let n = ids.len().min(4);
+            let mut seen_ids = std::collections::HashSet::new();
             let mut entries: Vec<(u64, Vec<u8>, Option<Vec<f32>>)> = Vec::new();
             for i in 0..n {
+                if !seen_ids.insert(ids[i]) {
+                    continue;
+                }
                 let codes: Vec<u8> = (0..pq_len as usize)
                     .map(|j| {
                         pq_data
@@ -183,6 +203,9 @@ fuzz_target!(|op: FuzzOp| {
                     })
                     .collect();
                 entries.push((ids[i], codes, None));
+            }
+            if entries.is_empty() {
+                return;
             }
             let entry_refs: Vec<(u64, &[u8], Option<&[f32]>)> = entries
                 .iter()

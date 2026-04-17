@@ -7,9 +7,9 @@ use redb::DistanceMetric;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzOp {
-    /// Deserialize arbitrary bytes as a codebook — must not panic.
+    /// Deserialize arbitrary bytes as a codebook -- must not panic.
     DeserializeRaw { data: Vec<u8>, sub_dim_sel: u8 },
-    /// Construct Codebooks, encode a vector, decode codes — roundtrip.
+    /// Construct Codebooks, encode a vector, decode codes -- roundtrip.
     EncodeDecodeRoundtrip {
         /// Number of sub-vectors: 1..4.
         num_sub_sel: u8,
@@ -20,17 +20,17 @@ enum FuzzOp {
         /// Raw f32 bits for test vector.
         vector_data: Vec<u8>,
     },
-    /// serialize_codebook → deserialize_codebook roundtrip.
+    /// serialize_codebook -> deserialize_codebook roundtrip.
     SerializeRoundtrip {
         num_sub_sel: u8,
         sub_dim_sel: u8,
         centroid_data: Vec<u8>,
     },
-    /// Train codebooks on small data (≤16 vectors, small dims).
+    /// Train codebooks on small data (<=16 vectors, small dims).
     Train {
         /// Number of vectors: clamped to 2..16.
         num_vectors: u8,
-        /// Dimension selector: 0..3 → 2/4/6/8.
+        /// Dimension selector: 0..3 -> 2/4/6/8.
         dim_sel: u8,
         /// Number of sub-vectors selector: 1 or 2.
         num_sub_sel: u8,

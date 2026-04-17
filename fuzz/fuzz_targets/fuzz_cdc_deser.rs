@@ -7,9 +7,9 @@ use redb::{ChangeOp, Key, Value};
 
 #[derive(Arbitrary, Debug)]
 enum FuzzOp {
-    /// Deserialize arbitrary bytes as a CDC record — must never panic.
+    /// Deserialize arbitrary bytes as a CDC record -- must never panic.
     DeserializeRecord { data: Vec<u8> },
-    /// Serialize then deserialize a constructed record — roundtrip.
+    /// Serialize then deserialize a constructed record -- roundtrip.
     RoundtripRecord {
         op_byte: u8,
         table_name: String,
@@ -105,7 +105,7 @@ fuzz_target!(|op: FuzzOp| {
         FuzzOp::ChangeOpFromByte { byte } => {
             // Valid discriminants are 0, 1, 2. All others must return Err.
             let result = CdcRecord::deserialize(&[byte]);
-            // Single byte is too short for a full record — always Err.
+            // Single byte is too short for a full record -- always Err.
             assert!(result.is_err());
         }
     }

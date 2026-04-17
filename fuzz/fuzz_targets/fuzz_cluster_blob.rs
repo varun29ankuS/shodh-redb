@@ -8,19 +8,19 @@ use redb::ivfpq::cluster_blob::{
 
 #[derive(Arbitrary, Debug)]
 enum FuzzOp {
-    /// Parse arbitrary bytes as a cluster blob — must not panic.
+    /// Parse arbitrary bytes as a cluster blob -- must not panic.
     ParseRaw {
         data: Vec<u8>,
         pq_len: u16,
         dim_sel: u8,
     },
-    /// Encode entries then parse — roundtrip.
+    /// Encode entries then parse -- roundtrip.
     EncodeRoundtrip {
         /// Number of entries (clamped to 1..8).
         num_entries: u8,
         /// PQ code length (clamped to 1..16).
         pq_len: u8,
-        /// Dimension selector: 0..3 → 2/4/8/16.
+        /// Dimension selector: 0..3 -> 2/4/8/16.
         dim_sel: u8,
         /// Raw u32 bits for vector IDs.
         vector_ids: Vec<u64>,

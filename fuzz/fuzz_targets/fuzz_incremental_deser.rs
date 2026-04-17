@@ -6,9 +6,9 @@ use redb::IncrementalSnapshot;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzOp {
-    /// Deserialize arbitrary bytes — must never panic.
+    /// Deserialize arbitrary bytes -- must never panic.
     DeserializeRaw { data: Vec<u8> },
-    /// If deserialization succeeds, roundtrip through to_bytes → from_bytes.
+    /// If deserialization succeeds, roundtrip through to_bytes -> from_bytes.
     DeserializeAndRoundtrip { data: Vec<u8> },
 }
 

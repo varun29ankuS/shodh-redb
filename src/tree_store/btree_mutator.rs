@@ -154,7 +154,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
                 DeletedLeaf => None,
                 PartialLeaf { page, deleted_pair } => {
-                    let accessor = LeafAccessor::new(&page, K::fixed_width(), self.value_width());
+                    let accessor = LeafAccessor::new(&page, K::fixed_width(), self.value_width())?;
                     let mut builder = LeafBuilder::new(
                         &self.mem,
                         &self.allocated,
@@ -203,7 +203,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
                 DeletedLeaf => None,
                 PartialLeaf { page, deleted_pair } => {
-                    let accessor = LeafAccessor::new(&page, K::fixed_width(), self.value_width());
+                    let accessor = LeafAccessor::new(&page, K::fixed_width(), self.value_width())?;
                     let mut builder = LeafBuilder::new(
                         &self.mem,
                         &self.allocated,
@@ -298,7 +298,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             builder.push(key_bytes, value_bytes_ref);
             let page = builder.build()?;
 
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())?;
             let offset = accessor.offset_of_first_value();
             let page_num = page.get_page_number();
             let guard = AccessGuardMutInPlace::new(page, offset, value_bytes_ref.len());
@@ -320,7 +320,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         Ok(match node_mem[0] {
             LEAF => {
                 let accessor =
-                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())?;
                 let (position, found) = accessor.position::<K>(key);
 
                 // Fast-path to avoid re-building and splitting pages with a single large value
@@ -338,7 +338,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let new_page = builder.build()?;
                     let new_page_number = new_page.get_page_number();
                     let new_page_accessor =
-                        LeafAccessor::new(new_page.memory(), K::fixed_width(), self.value_width());
+                        LeafAccessor::new(new_page.memory(), K::fixed_width(), self.value_width())?;
                     let offset = new_page_accessor.offset_of_first_value();
                     let guard = AccessGuardMutInPlace::new(new_page, offset, value.len());
                     return if position == 0 {
@@ -398,7 +398,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     );
                     mutator.insert(position, found, key, value);
                     let new_page_accessor =
-                        LeafAccessor::new(page_mut.memory(), K::fixed_width(), self.value_width());
+                        LeafAccessor::new(page_mut.memory(), K::fixed_width(), self.value_width())?;
                     let offset = new_page_accessor.offset_of_value(position).unwrap();
                     let guard = AccessGuardMutInPlace::new(page_mut, offset, value.len());
                     return Ok(Box::new(InsertionResult {
@@ -461,7 +461,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                     let new_page_number = new_page.get_page_number();
                     let accessor =
-                        LeafAccessor::new(new_page.memory(), K::fixed_width(), self.value_width());
+                        LeafAccessor::new(new_page.memory(), K::fixed_width(), self.value_width())?;
                     let offset = accessor.offset_of_value(position).unwrap();
                     let guard = AccessGuardMutInPlace::new(new_page, offset, value.len());
 
@@ -504,15 +504,18 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                     let new_page_number = new_page1.get_page_number();
                     let new_page_number2 = new_page2.get_page_number();
-                    let accessor =
-                        LeafAccessor::new(new_page1.memory(), K::fixed_width(), self.value_width());
+                    let accessor = LeafAccessor::new(
+                        new_page1.memory(),
+                        K::fixed_width(),
+                        self.value_width(),
+                    )?;
                     let division = accessor.num_pairs();
                     let guard = if position < division {
                         let accessor = LeafAccessor::new(
                             new_page1.memory(),
                             K::fixed_width(),
                             self.value_width(),
-                        );
+                        )?;
                         let offset = accessor.offset_of_value(position).unwrap();
                         AccessGuardMutInPlace::new(new_page1, offset, value.len())
                     } else {
@@ -520,7 +523,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             new_page2.memory(),
                             K::fixed_width(),
                             self.value_width(),
-                        );
+                        )?;
                         let offset = accessor.offset_of_value(position - division).unwrap();
                         AccessGuardMutInPlace::new(new_page2, offset, value.len())
                     };
@@ -535,7 +538,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 }
             }
             BRANCH => {
-                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let accessor = BranchAccessor::new(&page, K::fixed_width())?;
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
                 let child_checksum = accessor.child_checksum(child_index).unwrap();
                 let sub_result =
@@ -670,7 +673,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         match node_mem[0] {
             LEAF => {
                 let accessor =
-                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())?;
                 let (position, found) = accessor.position::<K>(key);
                 assert!(found);
                 let old_len = accessor.entry(position).unwrap().value().len();
@@ -680,7 +683,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 mutator.insert(position, true, key, value);
             }
             BRANCH => {
-                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let accessor = BranchAccessor::new(&page, K::fixed_width())?;
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
                 self.insert_inplace_helper(self.mem.get_page_mut(child_page)?, key, value)?;
                 let mut mutator = BranchMutator::new(page.memory_mut()?);
@@ -700,7 +703,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         checksum: Checksum,
         target: DeleteTarget<'_>,
     ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
-        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
+        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())?;
         let (position, found) = match target {
             DeleteTarget::Key(key) => accessor.position::<K>(key),
             DeleteTarget::First => {
@@ -828,7 +831,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             // TODO: can we optimize away this page allocation?
             // The PartialInternal gets returned, and then the caller has to merge it immediately
             let new_page = builder.build()?;
-            let accessor = BranchAccessor::new(&new_page, K::fixed_width());
+            let accessor = BranchAccessor::new(&new_page, K::fixed_width())?;
             // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
             // full pages, so we use 33% instead of 50% to avoid oscillating
             if accessor.total_length() < page_size / 3 {
@@ -846,7 +849,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         checksum: Checksum,
         target: DeleteTarget<'_>,
     ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
-        let accessor = BranchAccessor::new(&page, K::fixed_width());
+        let accessor = BranchAccessor::new(&page, K::fixed_width())?;
         let original_page_number = page.get_page_number();
         let (child_index, child_page_number) = match target {
             DeleteTarget::Key(key) => accessor.child_for_key::<K>(key),
@@ -933,7 +936,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 deleted_pair,
             } => {
                 let partial_child_accessor =
-                    LeafAccessor::new(&partial_child_page, K::fixed_width(), self.value_width());
+                    LeafAccessor::new(&partial_child_page, K::fixed_width(), self.value_width())?;
                 debug_assert!(partial_child_accessor.num_pairs() > 1);
 
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
@@ -945,7 +948,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     merge_with_page.memory(),
                     K::fixed_width(),
                     self.value_width(),
-                );
+                )?;
 
                 let single_large_value = merge_with_accessor.num_pairs() == 1
                     && merge_with_accessor.total_length() >= self.mem.get_page_size();
@@ -1034,7 +1037,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 let merge_with_page = self
                     .mem
                     .get_page(accessor.child_page(merge_with).unwrap())?;
-                let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
+                let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width())?;
                 debug_assert!(merge_with < accessor.count_children());
                 for i in 0..accessor.count_children() {
                     if i == child_index {
@@ -1091,12 +1094,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             PartialBranch(partial_child, ..) => {
                 let partial_child_page = self.mem.get_page(partial_child)?;
                 let partial_child_accessor =
-                    BranchAccessor::new(&partial_child_page, K::fixed_width());
+                    BranchAccessor::new(&partial_child_page, K::fixed_width())?;
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 let merge_with_page = self
                     .mem
                     .get_page(accessor.child_page(merge_with).unwrap())?;
-                let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
+                let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width())?;
                 debug_assert!(merge_with < accessor.count_children());
                 for i in 0..accessor.count_children() {
                     if i == child_index {

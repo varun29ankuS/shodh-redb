@@ -8,6 +8,7 @@ use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
@@ -28,7 +29,7 @@ pub(super) fn leaf_checksum<T: Page>(
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
 ) -> Result<Checksum, StorageError> {
-    let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+    let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size)?;
     let last_pair = accessor.num_pairs().checked_sub(1).ok_or_else(|| {
         StorageError::page_corrupted(page.get_page_number(), "leaf page has zero pairs")
     })?;
@@ -49,7 +50,7 @@ pub(super) fn branch_checksum<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
 ) -> Result<Checksum, StorageError> {
-    let accessor = BranchAccessor::new(page, fixed_key_size);
+    let accessor = BranchAccessor::new(page, fixed_key_size)?;
     let last_key = accessor.num_keys().checked_sub(1).ok_or_else(|| {
         StorageError::page_corrupted(page.get_page_number(), "branch page has zero keys")
     })?;
@@ -424,7 +425,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
 
         let key_bytes = {
             let accessor =
-                LeafAccessor::new(self.page.memory(), self.key_width, self.fixed_value_size);
+                LeafAccessor::new(self.page.memory(), self.key_width, self.fixed_value_size)?;
             accessor.key_unchecked(self.entry_index).to_vec()
         };
 
@@ -445,7 +446,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             mutator.insert(self.entry_index, true, &key_bytes, &stored_value);
         } else {
             let accessor =
-                LeafAccessor::new(self.page.memory(), self.key_width, self.fixed_value_size);
+                LeafAccessor::new(self.page.memory(), self.key_width, self.fixed_value_size)?;
             let mut builder = LeafBuilder::new(
                 &self.mem,
                 &self.allocated,
@@ -485,7 +486,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
 
         // Update our page reference to the new page and recalculate offset/length
         let new_accessor =
-            LeafAccessor::new(self.page.memory(), self.key_width, self.fixed_value_size);
+            LeafAccessor::new(self.page.memory(), self.key_width, self.fixed_value_size)?;
         let (new_start, new_end) = new_accessor.value_range(self.entry_index).unwrap();
 
         self.offset = new_start;
@@ -572,15 +573,37 @@ impl<'a> LeafAccessor<'a> {
         page: &'a [u8],
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
-    ) -> Self {
+    ) -> core::result::Result<Self, StorageError> {
+        if page.len() < 4 {
+            return Err(StorageError::Corrupted(
+                "Leaf page too small for header".into(),
+            ));
+        }
         debug_assert_eq!(page[0], LEAF);
-        let num_pairs = u16::from_le_bytes(page[2..4].try_into().unwrap()) as usize;
-        LeafAccessor {
+        let num_pairs = u16::from_le_bytes(
+            page[2..4]
+                .try_into()
+                .map_err(|_| StorageError::Corrupted("Leaf page: bad num_pairs".into()))?,
+        ) as usize;
+        let mut min_size = 4usize;
+        if fixed_key_size.is_none() {
+            min_size = min_size.saturating_add(size_of::<u32>().saturating_mul(num_pairs));
+        }
+        if fixed_value_size.is_none() {
+            min_size = min_size.saturating_add(size_of::<u32>().saturating_mul(num_pairs));
+        }
+        if min_size > page.len() {
+            return Err(StorageError::Corrupted(format!(
+                "Leaf page: num_pairs={num_pairs} requires {min_size}B for offset tables, page is {}B",
+                page.len()
+            )));
+        }
+        Ok(LeafAccessor {
             page,
             fixed_key_size,
             fixed_value_size,
             num_pairs,
-        }
+        })
     }
 
     #[cfg(feature = "std")]
@@ -1115,7 +1138,8 @@ impl<'b> LeafMutator<'b> {
         new_key: &[u8],
         new_value: &[u8],
     ) -> bool {
-        let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+        let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size)
+            .expect("internal: constructed page is valid");
         if overwrite {
             let remaining = page.memory().len() - accessor.total_length();
             let required_delta = isize::try_from(new_key.len() + new_value.len()).unwrap()
@@ -1143,7 +1167,8 @@ impl<'b> LeafMutator<'b> {
 
     // Insert the given key, value pair at index i and shift all following pairs to the right
     pub(crate) fn insert(&mut self, i: usize, overwrite: bool, key: &[u8], value: &[u8]) {
-        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
+        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size)
+            .expect("internal: constructed page is valid");
         let required_delta = if overwrite {
             isize::try_from(key.len() + value.len()).unwrap()
                 - isize::try_from(accessor.length_of_pairs(i, i + 1)).unwrap()
@@ -1275,7 +1300,8 @@ impl<'b> LeafMutator<'b> {
     }
 
     pub(super) fn remove(&mut self, i: usize) {
-        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
+        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size)
+            .expect("internal: constructed page is valid");
         let num_pairs = accessor.num_pairs();
         assert!(i < num_pairs);
         assert!(num_pairs > 1);
@@ -1372,7 +1398,8 @@ impl<'b> LeafMutator<'b> {
         if self.fixed_value_size.is_some() {
             return;
         }
-        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
+        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size)
+            .expect("internal: constructed page is valid");
         let num_pairs = accessor.num_pairs();
         let mut offset = 4 + size_of::<u32>() * i;
         if self.fixed_key_size.is_none() {
@@ -1398,15 +1425,41 @@ pub(crate) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
 }
 
 impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
-    pub(crate) fn new(page: &'b T, fixed_key_size: Option<usize>) -> Self {
-        debug_assert_eq!(page.memory()[0], BRANCH);
-        let num_keys = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
-        BranchAccessor {
+    pub(crate) fn new(
+        page: &'b T,
+        fixed_key_size: Option<usize>,
+    ) -> core::result::Result<Self, StorageError> {
+        let mem = page.memory();
+        if mem.len() < 8 {
+            return Err(StorageError::Corrupted(
+                "Branch page too small for header".into(),
+            ));
+        }
+        debug_assert_eq!(mem[0], BRANCH);
+        let num_keys = u16::from_le_bytes(
+            mem[2..4]
+                .try_into()
+                .map_err(|_| StorageError::Corrupted("Branch page: bad num_keys".into()))?,
+        ) as usize;
+        let num_children = num_keys + 1;
+        let child_table_size =
+            (PageNumber::serialized_size() + size_of::<Checksum>()) * num_children;
+        let mut min_size = 8usize.saturating_add(child_table_size);
+        if fixed_key_size.is_none() {
+            min_size = min_size.saturating_add(size_of::<u32>().saturating_mul(num_keys));
+        }
+        if min_size > mem.len() {
+            return Err(StorageError::Corrupted(format!(
+                "Branch page: num_keys={num_keys} requires {min_size}B for headers, page is {}B",
+                mem.len()
+            )));
+        }
+        Ok(BranchAccessor {
             page,
             num_keys,
             fixed_key_size,
             _page_lifetime: Default::default(),
-        }
+        })
     }
 
     #[cfg(feature = "std")]

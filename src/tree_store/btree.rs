@@ -118,7 +118,7 @@ impl UntypedBtree {
                 // No-op
             }
             BRANCH => {
-                let accessor = BranchAccessor::new(&page, self.key_width);
+                let accessor = BranchAccessor::new(&page, self.key_width)?;
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).ok_or_else(|| {
                         StorageError::invalid_child_pointer(page.get_page_number(), i)
@@ -198,7 +198,8 @@ fn salvage_node(
         LEAF => {
             // Use catch_unwind to handle panics from corrupt leaf data
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let accessor = LeafAccessor::new(node_mem, fixed_key_size, fixed_value_size);
+                let accessor = LeafAccessor::new(node_mem, fixed_key_size, fixed_value_size)
+                    .expect("internal: valid page");
                 let mut leaf_pairs = Vec::new();
                 for i in 0..accessor.num_pairs() {
                     if let Some(entry) = accessor.entry(i) {
@@ -225,7 +226,8 @@ fn salvage_node(
             // Use catch_unwind for the branch accessor too
             let children: Vec<PageNumber> =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let accessor = BranchAccessor::new(&page, fixed_key_size);
+                    let accessor =
+                        BranchAccessor::new(&page, fixed_key_size).expect("internal: valid page");
                     let mut kids = Vec::new();
                     for i in 0..accessor.count_children() {
                         if let Some(child) = accessor.child_page(i) {
@@ -328,7 +330,7 @@ impl UntypedBtreeMut {
         match page.memory()[0] {
             LEAF => leaf_checksum(&page, self.key_width, self.value_width),
             BRANCH => {
-                let accessor = BranchAccessor::new(&page, self.key_width);
+                let accessor = BranchAccessor::new(&page, self.key_width)?;
                 let mut new_children = vec![];
                 for i in 0..accessor.count_children() {
                     let child_page = accessor
@@ -401,7 +403,7 @@ impl UntypedBtreeMut {
                 visitor(page)?;
             }
             BRANCH => {
-                let accessor = BranchAccessor::new(&page, self.key_width);
+                let accessor = BranchAccessor::new(&page, self.key_width)?;
                 for i in 0..accessor.count_children() {
                     let child_page = accessor
                         .child_page(i)
@@ -453,7 +455,7 @@ impl UntypedBtreeMut {
                 // No-op
             }
             BRANCH => {
-                let accessor = BranchAccessor::new(&old_page, self.key_width);
+                let accessor = BranchAccessor::new(&old_page, self.key_width)?;
                 let mut mutator = BranchMutator::new(new_page.memory_mut()?);
                 for i in 0..accessor.count_children() {
                     let child = accessor
@@ -818,7 +820,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             LEAF => {
                 let value_width = self.value_width();
                 let compression = self.compression();
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), value_width);
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), value_width)?;
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).ok_or_else(|| {
                         StorageError::invalid_entry_index(page.get_page_number(), entry_index)
@@ -848,7 +850,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             }
             BRANCH => {
                 let (child_index, child_page) = {
-                    let accessor = BranchAccessor::new(&page, K::fixed_width());
+                    let accessor = BranchAccessor::new(&page, K::fixed_width())?;
                     accessor.child_for_key::<K>(query)
                 };
                 let child_page_mut = if self.mem.uncommitted(child_page) {
@@ -1097,7 +1099,7 @@ impl RawBtree {
                 } else {
                     return Ok(false);
                 }
-                let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+                let accessor = BranchAccessor::new(&page, self.fixed_key_size)?;
                 for i in 0..accessor.count_children() {
                     let child = accessor
                         .child_page(i)
@@ -1174,7 +1176,7 @@ impl RawBtree {
                         description: "branch page checksum mismatch".to_string(),
                     });
                 }
-                let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+                let accessor = BranchAccessor::new(&page, self.fixed_key_size)?;
                 for i in 0..accessor.count_children() {
                     let child = accessor.child_page(i).ok_or_else(|| {
                         StorageError::Corrupted(format!(
@@ -1228,7 +1230,7 @@ impl RawBtree {
         let page = self.mem.get_page(page_number)?;
         let node_mem = page.memory();
         if node_mem[0] == BRANCH {
-            let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+            let accessor = BranchAccessor::new(&page, self.fixed_key_size)?;
             if let Some(child) = accessor.child_page(0) {
                 return Ok(1 + self.measure_depth(child)?);
             }
@@ -1259,7 +1261,7 @@ impl RawBtree {
                     });
                 }
                 let accessor =
-                    LeafAccessor::new(node_mem, self.fixed_key_size, self.fixed_value_size);
+                    LeafAccessor::new(node_mem, self.fixed_key_size, self.fixed_value_size)?;
                 let num = accessor.num_pairs();
                 for i in 1..num {
                     if let (Some(prev), Some(curr)) = (accessor.entry(i - 1), accessor.entry(i))
@@ -1288,7 +1290,7 @@ impl RawBtree {
                     });
                     return Ok(());
                 }
-                let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+                let accessor = BranchAccessor::new(&page, self.fixed_key_size)?;
                 for i in 0..accessor.count_children() {
                     if let Some(child) = accessor.child_page(i) {
                         self.verify_structure_helper(
@@ -1494,7 +1496,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             LEAF => {
                 self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor =
-                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())?;
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).ok_or_else(|| {
                         StorageError::invalid_entry_index(page.get_page_number(), entry_index)
@@ -1511,7 +1513,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             }
             BRANCH => {
                 self.maybe_verify_page(&page, expected_checksum)?;
-                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let accessor = BranchAccessor::new(&page, K::fixed_width())?;
                 let (child_index, child_page_num) = accessor.child_for_key::<K>(query);
                 let child_checksum = accessor.child_checksum(child_index).ok_or_else(|| {
                     StorageError::invalid_child_checksum(page.get_page_number(), child_index)
@@ -1554,7 +1556,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             LEAF => {
                 self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor =
-                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())?;
                 let (key_range, value_range) = accessor
                     .entry_ranges(0)
                     .ok_or_else(|| StorageError::invalid_entry_index(page.get_page_number(), 0))?;
@@ -1568,7 +1570,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             }
             BRANCH => {
                 self.maybe_verify_page(&page, expected_checksum)?;
-                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let accessor = BranchAccessor::new(&page, K::fixed_width())?;
                 let child_page = accessor.child_page(0).ok_or_else(|| {
                     StorageError::invalid_child_pointer(page.get_page_number(), 0)
                 })?;
@@ -1612,7 +1614,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             LEAF => {
                 self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor =
-                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())?;
                 let last_index = accessor.num_pairs() - 1;
                 let (key_range, value_range) =
                     accessor.entry_ranges(last_index).ok_or_else(|| {
@@ -1628,7 +1630,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             }
             BRANCH => {
                 self.maybe_verify_page(&page, expected_checksum)?;
-                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let accessor = BranchAccessor::new(&page, K::fixed_width())?;
                 let last_child = accessor.count_children() - 1;
                 let child_page = accessor.child_page(last_child).ok_or_else(|| {
                     StorageError::invalid_child_pointer(page.get_page_number(), last_child)
@@ -1684,12 +1686,12 @@ impl<K: Key, V: Value> Btree<K, V> {
                     match node_mem[0] {
                         LEAF => {
                             eprint!("Leaf[ (page={:?})", page.get_page_number());
-                            LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())
+                            LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())?
                                 .print_node::<K, V>(include_values);
                             eprint!("]");
                         }
                         BRANCH => {
-                            let accessor = BranchAccessor::new(&page, K::fixed_width());
+                            let accessor = BranchAccessor::new(&page, K::fixed_width())?;
                             for i in 0..accessor.count_children() {
                                 let child = accessor.child_page(i).ok_or_else(|| {
                                     StorageError::Corrupted(format!(
@@ -1761,7 +1763,7 @@ fn stats_helper(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+            let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size)?;
             let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
             let overhead_bytes = accessor.total_length() - leaf_bytes;
             let fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
@@ -1781,7 +1783,7 @@ fn stats_helper(
             })
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page, fixed_key_size);
+            let accessor = BranchAccessor::new(&page, fixed_key_size)?;
             let mut max_child_height = 0;
             let mut leaf_pages = 0;
             let mut branch_pages = 1;

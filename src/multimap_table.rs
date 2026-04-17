@@ -61,7 +61,7 @@ fn multimap_stats_helper(
                 page.memory(),
                 fixed_key_size,
                 DynamicCollection::<()>::fixed_width_with(fixed_value_size),
-            );
+            )?;
             let mut leaf_bytes = 0u64;
             let mut is_branch = false;
             for i in 0..accessor.num_pairs() {
@@ -76,7 +76,7 @@ fn multimap_stats_helper(
                             collection.as_inline(),
                             fixed_value_size,
                             <() as Value>::fixed_width(),
-                        );
+                        )?;
                         leaf_bytes +=
                             inline_accessor.length_of_pairs(0, inline_accessor.num_pairs()) as u64;
                     }
@@ -128,7 +128,7 @@ fn multimap_stats_helper(
             })
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page, fixed_key_size);
+            let accessor = BranchAccessor::new(&page, fixed_key_size)?;
             let mut max_child_height = 0;
             let mut leaf_pages = 0;
             let mut branch_pages = 1;
@@ -317,7 +317,7 @@ pub(crate) fn relocate_subtrees(
                 old_page.memory(),
                 key_size,
                 UntypedDynamicCollection::fixed_width_with(value_size),
-            );
+            )?;
             // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
             let mut mutator = LeafMutator::new(
                 new_page.memory_mut()?,
@@ -352,7 +352,7 @@ pub(crate) fn relocate_subtrees(
             }
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&old_page, key_size);
+            let accessor = BranchAccessor::new(&old_page, key_size)?;
             let mut mutator = BranchMutator::new(new_page.memory_mut()?);
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
@@ -410,7 +410,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
             leaf_page.memory(),
             key_size,
             DynamicCollection::<()>::fixed_width_with(value_size),
-        );
+        )?;
         for i in 0..accessor.num_pairs() {
             let entry = accessor
                 .entry(i)
@@ -464,7 +464,7 @@ fn parse_subtree_roots<T: Page>(
                 page.memory(),
                 fixed_key_size,
                 DynamicCollection::<()>::fixed_width_with(fixed_value_size),
-            );
+            )?;
             for i in 0..accessor.num_pairs() {
                 let entry = accessor
                     .entry(i)
@@ -562,52 +562,58 @@ impl<'a, V: Key> LeafKeyIter<'a, V> {
         data: AccessGuard<'a, &'static DynamicCollection<V>>,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
-    ) -> Self {
+    ) -> Result<Self> {
         let accessor =
-            LeafAccessor::new(data.value().as_inline(), fixed_key_size, fixed_value_size);
+            LeafAccessor::new(data.value().as_inline(), fixed_key_size, fixed_value_size)?;
         let num_pairs = accessor.num_pairs();
         let end_entry = if num_pairs == 0 {
             -1
         } else {
             isize::try_from(num_pairs).unwrap_or(isize::MAX) - 1
         };
-        Self {
+        Ok(Self {
             inline_collection: data,
             fixed_key_size,
             fixed_value_size,
             start_entry: 0,
             end_entry,
-        }
+        })
     }
 
-    fn next_key(&mut self) -> Option<&[u8]> {
+    fn next_key(&mut self) -> Option<Result<&[u8]>> {
         if self.end_entry < self.start_entry {
             return None;
         }
-        let accessor = LeafAccessor::new(
+        let accessor = match LeafAccessor::new(
             self.inline_collection.value().as_inline(),
             self.fixed_key_size,
             self.fixed_value_size,
-        );
+        ) {
+            Ok(a) => a,
+            Err(e) => return Some(Err(e)),
+        };
         self.start_entry += 1;
         accessor
             .entry((self.start_entry - 1).try_into().unwrap())
-            .map(|e| e.key())
+            .map(|e| Ok(e.key()))
     }
 
-    fn next_key_back(&mut self) -> Option<&[u8]> {
+    fn next_key_back(&mut self) -> Option<Result<&[u8]>> {
         if self.end_entry < self.start_entry {
             return None;
         }
-        let accessor = LeafAccessor::new(
+        let accessor = match LeafAccessor::new(
             self.inline_collection.value().as_inline(),
             self.fixed_key_size,
             self.fixed_value_size,
-        );
+        ) {
+            Ok(a) => a,
+            Err(e) => return Some(Err(e)),
+        };
         self.end_entry -= 1;
         accessor
             .entry((self.end_entry + 1).try_into().unwrap())
-            .map(|e| e.key())
+            .map(|e| Ok(e.key()))
     }
 }
 
@@ -734,7 +740,7 @@ impl<V: Key> DynamicCollection<V> {
             Inline => {
                 let leaf_data = self.as_inline();
                 let accessor =
-                    LeafAccessor::new(leaf_data, V::fixed_width(), <() as Value>::fixed_width());
+                    LeafAccessor::new(leaf_data, V::fixed_width(), <() as Value>::fixed_width())?;
                 accessor.num_pairs() as u64
             }
             SubtreeV2 => {
@@ -775,7 +781,7 @@ impl<V: Key> DynamicCollection<V> {
         Ok(match collection.value().collection_type()? {
             Inline => {
                 let leaf_iter =
-                    LeafKeyIter::new(collection, V::fixed_width(), <() as Value>::fixed_width());
+                    LeafKeyIter::new(collection, V::fixed_width(), <() as Value>::fixed_width())?;
                 MultimapValue::new_inline(leaf_iter, guard)?
             }
             SubtreeV2 => {
@@ -812,7 +818,7 @@ impl<V: Key> DynamicCollection<V> {
         Ok(match collection.value().collection_type()? {
             Inline => {
                 let leaf_iter =
-                    LeafKeyIter::new(collection, V::fixed_width(), <() as Value>::fixed_width());
+                    LeafKeyIter::new(collection, V::fixed_width(), <() as Value>::fixed_width())?;
                 MultimapValue::new_inline(leaf_iter, guard)?
             }
             SubtreeV2 => {
@@ -980,7 +986,10 @@ impl<'a, V: Key + 'static> Iterator for MultimapValue<'a, V> {
                     return Some(Err(err));
                 }
             },
-            ValueIterState::InlineLeaf(iter) => iter.next_key()?.to_vec(),
+            ValueIterState::InlineLeaf(iter) => match iter.next_key()? {
+                Ok(bytes) => bytes.to_vec(),
+                Err(err) => return Some(Err(err)),
+            },
         };
         self.remaining -= 1;
         Some(Ok(AccessGuard::with_owned_value(bytes)))
@@ -996,7 +1005,10 @@ impl<V: Key + 'static> DoubleEndedIterator for MultimapValue<'_, V> {
                     return Some(Err(err));
                 }
             },
-            ValueIterState::InlineLeaf(iter) => iter.next_key_back()?.to_vec(),
+            ValueIterState::InlineLeaf(iter) => match iter.next_key_back()? {
+                Ok(bytes) => bytes.to_vec(),
+                Err(err) => return Some(Err(err)),
+            },
         };
         self.remaining -= 1;
         Some(Ok(AccessGuard::with_owned_value(bytes)))
@@ -1186,7 +1198,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         leaf_data,
                         V::fixed_width(),
                         <() as Value>::fixed_width(),
-                    );
+                    )?;
                     let (position, found) = accessor.position::<V>(value_bytes_ref);
                     if found {
                         return Ok(true);
@@ -1366,7 +1378,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
             Inline => {
                 let leaf_data = v.as_inline();
                 let accessor =
-                    LeafAccessor::new(leaf_data, V::fixed_width(), <() as Value>::fixed_width());
+                    LeafAccessor::new(leaf_data, V::fixed_width(), <() as Value>::fixed_width())?;
                 if let Some(position) = accessor.find_key::<V>(V::as_bytes(value.borrow()).as_ref())
                 {
                     let old_num_pairs = accessor.num_pairs();
@@ -1447,7 +1459,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                                 page.memory(),
                                 V::fixed_width(),
                                 <() as Value>::fixed_width(),
-                            );
+                            )?;
                             let len = accessor.total_length();
                             if len < self.mem.get_page_size() / 2 {
                                 let inline_data =

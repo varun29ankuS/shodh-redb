@@ -44,6 +44,9 @@
 //! ```
 
 pub(crate) mod adc;
+#[cfg(fuzzing)]
+pub mod cluster_blob;
+#[cfg(not(fuzzing))]
 #[allow(dead_code)] // Wired into index.rs in upcoming commit.
 pub(crate) mod cluster_blob;
 pub mod config;
@@ -53,6 +56,9 @@ pub mod kmeans;
 #[cfg(not(fuzzing))]
 pub(crate) mod kmeans;
 pub mod metadata;
+#[cfg(fuzzing)]
+pub mod pq;
+#[cfg(not(fuzzing))]
 pub(crate) mod pq;
 #[cfg(fuzzing)]
 pub mod types;

@@ -3493,8 +3493,7 @@ impl ReadTransaction {
             )),
             Ok(None) => Ok(None),
             Err(e) => {
-                Err(e
-                    .into_storage_error_or_internal("Internal error: blob system table corrupted"))
+                Err(e.into_storage_error_or_internal("Internal error: blob system table corrupted"))
             }
         }
     }

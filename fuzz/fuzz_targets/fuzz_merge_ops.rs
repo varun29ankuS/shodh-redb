@@ -130,7 +130,13 @@ fuzz_target!(|op: FuzzOp| {
             let result = BitwiseOr.merge(&key, Some(&existing), &operand);
             assert!(result.is_some());
             let result = result.unwrap();
-            assert_eq!(result.len(), existing.len().max(operand.len()));
+            if existing.len() == operand.len() {
+                // Same length: bitwise OR, result length matches.
+                assert_eq!(result.len(), existing.len());
+            } else {
+                // Different lengths: returns existing unchanged.
+                assert_eq!(result, existing);
+            }
         }
 
         FuzzOp::BytesAppend {

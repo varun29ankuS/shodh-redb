@@ -54,7 +54,7 @@ impl RangeIterState {
                 entry,
                 parent,
             } => {
-                let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+                let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size)?;
                 let num_pairs = accessor.num_pairs();
                 let next_entry = if reverse {
                     entry.checked_sub(1)
@@ -81,7 +81,7 @@ impl RangeIterState {
                 child,
                 mut parent,
             } => {
-                let accessor = BranchAccessor::new(&page, fixed_key_size);
+                let accessor = BranchAccessor::new(&page, fixed_key_size)?;
                 let child_page_num = accessor.child_page(child).ok_or_else(|| {
                     StorageError::invalid_child_pointer(page.get_page_number(), child)
                 })?;
@@ -130,7 +130,7 @@ impl RangeIterState {
                             child_page.memory(),
                             fixed_key_size,
                             fixed_value_size,
-                        );
+                        )?;
                         let entry = if reverse {
                             child_accessor.num_pairs().saturating_sub(1)
                         } else {
@@ -145,7 +145,7 @@ impl RangeIterState {
                         }))
                     }
                     BRANCH => {
-                        let child_accessor = BranchAccessor::new(&child_page, fixed_key_size);
+                        let child_accessor = BranchAccessor::new(&child_page, fixed_key_size)?;
                         let child = if reverse {
                             child_accessor.count_children().saturating_sub(1)
                         } else {
@@ -181,7 +181,7 @@ impl RangeIterState {
                 ..
             } => {
                 if let Some((key, value)) =
-                    LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size)
+                    LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size)?
                         .entry_ranges(*entry)
                 {
                     Ok(Some(EntryGuard::new(
@@ -798,7 +798,7 @@ fn find_iter_unbounded<K: Key, V: Value>(
     let page_type = page.memory()[0];
     match page_type {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size)?;
             let entry = if reverse {
                 accessor.num_pairs().saturating_sub(1)
             } else {
@@ -813,7 +813,7 @@ fn find_iter_unbounded<K: Key, V: Value>(
             }))
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page, K::fixed_width());
+            let accessor = BranchAccessor::new(&page, K::fixed_width())?;
             let child_index = if reverse {
                 accessor.count_children().saturating_sub(1)
             } else {
@@ -877,7 +877,7 @@ fn find_iter_left<K: Key, V: Value>(
     let page_type = page.memory()[0];
     match page_type {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size)?;
             if accessor.num_pairs() == 0 {
                 return Ok((false, None));
             }
@@ -900,7 +900,7 @@ fn find_iter_left<K: Key, V: Value>(
             Ok((include, Some(result)))
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page, K::fixed_width());
+            let accessor = BranchAccessor::new(&page, K::fixed_width())?;
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_checksum = accessor.child_checksum(child_index);
             let child_page = manager.get_page(child_page_number)?;
@@ -946,7 +946,7 @@ fn find_iter_right<K: Key, V: Value>(
     let page_type = page.memory()[0];
     match page_type {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size)?;
             if accessor.num_pairs() == 0 {
                 return Ok((false, None));
             }
@@ -969,7 +969,7 @@ fn find_iter_right<K: Key, V: Value>(
             Ok((include, Some(result)))
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page, K::fixed_width());
+            let accessor = BranchAccessor::new(&page, K::fixed_width())?;
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_checksum = accessor.child_checksum(child_index);
             let child_page = manager.get_page(child_page_number)?;
@@ -1025,7 +1025,7 @@ fn find_iter_unbounded_raw(
             parent,
         })),
         BRANCH => {
-            let accessor = BranchAccessor::new(&page, fixed_key_size);
+            let accessor = BranchAccessor::new(&page, fixed_key_size)?;
             let child_page_number = accessor
                 .child_page(0)
                 .ok_or_else(|| StorageError::invalid_child_pointer(page.get_page_number(), 0))?;
@@ -1123,8 +1123,14 @@ impl Iterator for RawEntryIter {
                     entry,
                     ..
                 } => {
-                    let accessor =
-                        LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size);
+                    let accessor = match LeafAccessor::new(
+                        page.memory(),
+                        *fixed_key_size,
+                        *fixed_value_size,
+                    ) {
+                        Ok(a) => a,
+                        Err(e) => return Some(Err(e)),
+                    };
                     if let Some((key_range, value_range)) = accessor.entry_ranges(*entry) {
                         return Some(Ok(RawEntryGuard {
                             page: page.clone(),

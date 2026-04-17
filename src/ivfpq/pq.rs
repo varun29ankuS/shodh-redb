@@ -139,6 +139,84 @@ impl core::fmt::Debug for Codebooks {
 }
 
 // ---------------------------------------------------------------------------
+// Sub-vector k-means training (parallel under std, sequential under no_std)
+// ---------------------------------------------------------------------------
+
+/// Train one sub-quantizer: extract sub-vectors for position `m`, run k-means,
+/// return a flat `Vec<f32>` of exactly `256 * sub_dim` floats (padded if k < 256).
+fn train_one_subvector(
+    flat_vectors: &[f32],
+    dim: usize,
+    n: usize,
+    m: usize,
+    sub_dim: usize,
+    k: usize,
+    max_iter: usize,
+) -> Vec<f32> {
+    let mut sub_flat = Vec::with_capacity(n * sub_dim);
+    for i in 0..n {
+        let start = i * dim + m * sub_dim;
+        sub_flat.extend_from_slice(&flat_vectors[start..start + sub_dim]);
+    }
+    let centroids = kmeans::kmeans(&sub_flat, sub_dim, k, max_iter, DistanceMetric::EuclideanSq);
+    let mut result = centroids;
+    if k < 256 {
+        result.resize(256 * sub_dim, 0.0);
+    }
+    result
+}
+
+/// Parallel sub-vector training using `std::thread::scope`.
+#[cfg(feature = "std")]
+fn train_subvectors(
+    flat_vectors: &[f32],
+    dim: usize,
+    n: usize,
+    num_subvectors: usize,
+    sub_dim: usize,
+    k: usize,
+    max_iter: usize,
+) -> Vec<f32> {
+    let mut results: Vec<Vec<f32>> = Vec::with_capacity(num_subvectors);
+
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..num_subvectors)
+            .map(|m| {
+                s.spawn(move || train_one_subvector(flat_vectors, dim, n, m, sub_dim, k, max_iter))
+            })
+            .collect();
+        for handle in handles {
+            results.push(handle.join().unwrap());
+        }
+    });
+
+    let mut all_data = Vec::with_capacity(num_subvectors * 256 * sub_dim);
+    for chunk in results {
+        all_data.extend_from_slice(&chunk);
+    }
+    all_data
+}
+
+/// Sequential sub-vector training for no_std environments.
+#[cfg(not(feature = "std"))]
+fn train_subvectors(
+    flat_vectors: &[f32],
+    dim: usize,
+    n: usize,
+    num_subvectors: usize,
+    sub_dim: usize,
+    k: usize,
+    max_iter: usize,
+) -> Vec<f32> {
+    let mut all_data = Vec::with_capacity(num_subvectors * 256 * sub_dim);
+    for m in 0..num_subvectors {
+        let chunk = train_one_subvector(flat_vectors, dim, n, m, sub_dim, k, max_iter);
+        all_data.extend_from_slice(&chunk);
+    }
+    all_data
+}
+
+// ---------------------------------------------------------------------------
 // PQ training
 // ---------------------------------------------------------------------------
 
@@ -166,31 +244,7 @@ pub fn train_codebooks(
 
     let k = 256usize.min(n); // Can't have more codewords than training vectors.
 
-    let mut all_data = Vec::with_capacity(num_subvectors * 256 * sub_dim);
-
-    for m in 0..num_subvectors {
-        // Extract the m-th sub-vector slice from each training vector into a
-        // contiguous buffer for k-means.
-        let mut sub_flat = Vec::with_capacity(n * sub_dim);
-        for i in 0..n {
-            let start = i * dim + m * sub_dim;
-            sub_flat.extend_from_slice(&flat_vectors[start..start + sub_dim]);
-        }
-
-        // For PQ sub-quantizer training we always use EuclideanSq for
-        // codebook construction (independent of the outer metric). This is
-        // standard practice as PQ codes represent distortion in Euclidean
-        // space, and the ADC table maps this to the requested metric at
-        // query time.
-        let centroids =
-            kmeans::kmeans(&sub_flat, sub_dim, k, max_iter, DistanceMetric::EuclideanSq);
-
-        // If k < 256, pad remaining codewords with zeros.
-        all_data.extend_from_slice(&centroids);
-        if k < 256 {
-            all_data.resize(all_data.len() + (256 - k) * sub_dim, 0.0);
-        }
-    }
+    let all_data = train_subvectors(flat_vectors, dim, n, num_subvectors, sub_dim, k, max_iter);
 
     Ok(Codebooks {
         data: all_data,

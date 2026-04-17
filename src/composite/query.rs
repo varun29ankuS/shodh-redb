@@ -451,29 +451,28 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
 
     fn validate(&self) -> crate::Result<()> {
         if !self.weights.any_active() {
-            return Err(StorageError::Corrupted(
-                "CompositeQuery: at least one signal must have weight > 0".to_string(),
+            return Err(StorageError::invalid_config(
+                "CompositeQuery: at least one signal must have weight > 0",
             ));
         }
         if self.weights.semantic > 0.0 && self.query_vector.is_none() {
-            return Err(StorageError::Corrupted(
-                "CompositeQuery: semantic signal requires a query vector".to_string(),
+            return Err(StorageError::invalid_config(
+                "CompositeQuery: semantic signal requires a query vector",
             ));
         }
         if self.weights.semantic > 0.0 && self.vector_index.is_none() {
-            return Err(StorageError::Corrupted(
-                "CompositeQuery: semantic signal requires an IVF-PQ index".to_string(),
+            return Err(StorageError::invalid_config(
+                "CompositeQuery: semantic signal requires an IVF-PQ index",
             ));
         }
         if self.weights.semantic > 0.0 && self.storage_reader.is_none() {
-            return Err(StorageError::Corrupted(
-                "CompositeQuery: semantic signal requires a StorageRead (use with_storage_reader)"
-                    .to_string(),
+            return Err(StorageError::invalid_config(
+                "CompositeQuery: semantic signal requires a StorageRead (use with_storage_reader)",
             ));
         }
         if self.weights.causal > 0.0 && self.causal_root.is_none() {
-            return Err(StorageError::Corrupted(
-                "CompositeQuery: causal signal requires a root blob_id".to_string(),
+            return Err(StorageError::invalid_config(
+                "CompositeQuery: causal signal requires a root blob_id",
             ));
         }
         // When temporal is the only active signal, time_range is required to
@@ -484,13 +483,13 @@ impl<'a, P: BlobQueryProvider, R: StorageRead> CompositeQuery<'a, P, R> {
             && self.weights.causal <= 0.0
             && self.time_range.is_none()
         {
-            return Err(StorageError::Corrupted(
-                "CompositeQuery: temporal-only signal requires a time_range".to_string(),
+            return Err(StorageError::invalid_config(
+                "CompositeQuery: temporal-only signal requires a time_range",
             ));
         }
         if self.top_k == 0 {
-            return Err(StorageError::Corrupted(
-                "CompositeQuery: top_k must be >= 1".to_string(),
+            return Err(StorageError::invalid_config(
+                "CompositeQuery: top_k must be >= 1",
             ));
         }
         Ok(())

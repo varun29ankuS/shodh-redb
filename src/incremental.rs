@@ -309,7 +309,7 @@ impl IncrementalSnapshot {
 #[cfg(feature = "std")]
 fn check_bounds(payload: &[u8], pos: usize, need: usize) -> Result<(), StorageError> {
     if pos.checked_add(need).is_none_or(|end| end > payload.len()) {
-        return Err(StorageError::Corrupted(alloc::format!(
+        return Err(StorageError::format_error(alloc::format!(
             "incremental snapshot truncated: need {} bytes at offset {}, have {}",
             need,
             pos,
@@ -397,9 +397,7 @@ impl IncrementalSnapshot {
     #[allow(clippy::cast_possible_truncation)]
     pub fn from_bytes(data: &[u8]) -> Result<Self, StorageError> {
         if data.len() < HEADER_SIZE + SHA256_SIZE {
-            return Err(StorageError::Corrupted(
-                "incremental delta too short".into(),
-            ));
+            return Err(StorageError::format_error("incremental delta too short"));
         }
 
         // Verify SHA-256 footer
@@ -407,8 +405,8 @@ impl IncrementalSnapshot {
         let stored_hash = &data[data.len() - SHA256_SIZE..];
         let computed_hash = Sha256::digest(payload);
         if computed_hash.as_slice() != stored_hash {
-            return Err(StorageError::Corrupted(
-                "incremental delta SHA-256 mismatch".into(),
+            return Err(StorageError::format_error(
+                "incremental delta SHA-256 mismatch",
             ));
         }
 
@@ -418,17 +416,15 @@ impl IncrementalSnapshot {
         check_bounds(payload, pos, 8)?;
         let magic = &payload[pos..pos + 8];
         if magic != DELTA_MAGIC {
-            return Err(StorageError::Corrupted(
-                "incremental delta bad magic".into(),
-            ));
+            return Err(StorageError::format_error("incremental delta bad magic"));
         }
         pos += 8;
 
         check_bounds(payload, pos, 4)?;
         let version = payload[pos];
         if version != DELTA_VERSION {
-            return Err(StorageError::Corrupted(
-                "incremental delta unsupported version".into(),
+            return Err(StorageError::format_error(
+                "incremental delta unsupported version",
             ));
         }
         pos += 1 + 3; // version + padding
@@ -453,9 +449,8 @@ impl IncrementalSnapshot {
                     as usize;
             pos += 2;
             check_bounds(payload, pos, name_len)?;
-            let name = core::str::from_utf8(&payload[pos..pos + name_len]).map_err(|_| {
-                StorageError::Corrupted("incremental delta invalid table name".into())
-            })?;
+            let name = core::str::from_utf8(&payload[pos..pos + name_len])
+                .map_err(|_| StorageError::format_error("incremental delta invalid table name"))?;
             pos += name_len;
 
             check_bounds(payload, pos, 8)?;
@@ -501,8 +496,8 @@ impl IncrementalSnapshot {
                 combined.extend_from_slice(&value);
                 let computed_checksum = hash128_with_seed(&combined, XXH3_SEED);
                 if stored_checksum != computed_checksum {
-                    return Err(StorageError::Corrupted(
-                        "incremental delta entry checksum mismatch".into(),
+                    return Err(StorageError::format_error(
+                        "incremental delta entry checksum mismatch",
                     ));
                 }
 
@@ -547,7 +542,7 @@ impl IncrementalSnapshot {
             pos += 2;
             check_bounds(payload, pos, name_len)?;
             let name = core::str::from_utf8(&payload[pos..pos + name_len]).map_err(|_| {
-                StorageError::Corrupted("incremental delta invalid dropped table name".into())
+                StorageError::format_error("incremental delta invalid dropped table name")
             })?;
             pos += name_len;
             dropped_tables.push(name.to_string());

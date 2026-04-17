@@ -8,6 +8,7 @@ use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::borrow::Borrow;

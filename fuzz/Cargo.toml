@@ -84,3 +84,8 @@ path = "fuzz_targets/fuzz_pq_codebook.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_ivfpq_index"
+path = "fuzz_targets/fuzz_ivfpq_index.rs"
+test = false
+doc = false

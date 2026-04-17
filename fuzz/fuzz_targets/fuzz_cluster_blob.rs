@@ -103,15 +103,18 @@ fuzz_target!(|op: FuzzOp| {
                 entries.push((id, codes, None));
             }
 
+            if entries.is_empty() {
+                return;
+            }
+
+            // Sort by ID -- encode_cluster_blob expects sorted order for binary search.
+            entries.sort_by_key(|(id, _, _)| *id);
+
             // Build the tuple refs that encode_cluster_blob expects.
             let entry_refs: Vec<(u64, &[u8], Option<&[f32]>)> = entries
                 .iter()
                 .map(|(id, codes, _)| (*id, codes.as_slice(), None))
                 .collect();
-
-            if entries.is_empty() {
-                return;
-            }
 
             let blob = encode_cluster_blob(&entry_refs, pq_len);
             let parsed = ClusterBlobRef::new(&blob, pq_len, dim);
@@ -158,6 +161,7 @@ fuzz_target!(|op: FuzzOp| {
             if entries.is_empty() {
                 return;
             }
+            entries.sort_by_key(|(id, _, _)| *id);
             let entry_refs: Vec<(u64, &[u8], Option<&[f32]>)> = entries
                 .iter()
                 .map(|(id, codes, _)| (*id, codes.as_slice(), None))
@@ -207,6 +211,7 @@ fuzz_target!(|op: FuzzOp| {
             if entries.is_empty() {
                 return;
             }
+            entries.sort_by_key(|(id, _, _)| *id);
             let entry_refs: Vec<(u64, &[u8], Option<&[f32]>)> = entries
                 .iter()
                 .map(|(id, codes, _)| (*id, codes.as_slice(), None))

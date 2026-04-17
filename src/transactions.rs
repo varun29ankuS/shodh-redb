@@ -985,9 +985,13 @@ pub struct WriteTransaction {
     pub(crate) cdc_log: Option<Mutex<Vec<CdcEvent>>>,
     cdc_config: CdcConfig,
     history_retention: u64,
+    observer: Arc<dyn crate::observer::DatabaseObserver>,
+    #[cfg(feature = "metrics")]
+    db_metrics: Arc<crate::observer::DbMetrics>,
 }
 
 impl WriteTransaction {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         guard: TransactionGuard,
         transaction_tracker: Arc<TransactionTracker>,
@@ -995,6 +999,8 @@ impl WriteTransaction {
         blob_dedup_config: BlobDedupConfig,
         cdc_config: CdcConfig,
         history_retention: u64,
+        observer: Arc<dyn crate::observer::DatabaseObserver>,
+        #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self> {
         let transaction_id = guard.id()?;
         let guard = Arc::new(guard);
@@ -1029,6 +1035,9 @@ impl WriteTransaction {
             },
             cdc_config,
             history_retention,
+            observer,
+            #[cfg(feature = "metrics")]
+            db_metrics,
         })
     }
 
@@ -1508,7 +1517,14 @@ impl WriteTransaction {
         &self,
         definition: &crate::ivfpq::config::IvfPqIndexDefinition,
     ) -> Result<crate::ivfpq::index::IvfPqIndex<'_, Self>, TableError> {
-        crate::ivfpq::index::IvfPqIndex::open(self, definition).map_err(TableError::Storage)
+        crate::ivfpq::index::IvfPqIndex::open(
+            self,
+            definition,
+            Arc::clone(&self.observer),
+            #[cfg(feature = "metrics")]
+            Arc::clone(&self.db_metrics),
+        )
+        .map_err(TableError::Storage)
     }
 
     /// Open the given table
@@ -1661,6 +1677,7 @@ impl WriteTransaction {
             None
         };
 
+        let mut dedup_saved = 0u64;
         let blob_ref = if let Some(existing) = dedup_hit
             && existing.checksum == checksum
             && existing.length == data.len() as u64
@@ -1669,6 +1686,7 @@ impl WriteTransaction {
             // checksum + length confirmed. Without the secondary check a
             // SHA-256 collision (or corrupted dedup index entry) would
             // silently bind the new blob_id to wrong physical data.
+            dedup_saved = existing.length;
             BlobRef {
                 offset: existing.offset,
                 length: existing.length,
@@ -1787,6 +1805,22 @@ impl WriteTransaction {
         // 9. Update pending blob state for commit
         self.mem.set_pending_blob_state(blob_state);
         self.dirty.store(true, Ordering::Release);
+
+        // 10. Observer / metrics
+        if dedup_saved > 0 {
+            self.observer.on_blob_dedup(blob_id.sequence, dedup_saved);
+            #[cfg(feature = "metrics")]
+            self.db_metrics
+                .blob_dedup_hits
+                .fetch_add(1, portable_atomic::Ordering::Relaxed);
+        } else {
+            self.observer
+                .on_blob_write(blob_id.sequence, blob_ref.length);
+            #[cfg(feature = "metrics")]
+            self.db_metrics
+                .blob_writes
+                .fetch_add(1, portable_atomic::Ordering::Relaxed);
+        }
 
         Ok(blob_id)
     }
@@ -2473,6 +2507,9 @@ impl WriteTransaction {
     }
 
     fn commit_inner(&mut self) -> Result<(), CommitError> {
+        #[cfg(feature = "std")]
+        let commit_start = std::time::Instant::now();
+
         // Quick-repair requires 2-phase commit
         if self.quick_repair {
             self.two_phase_commit = true;
@@ -2501,6 +2538,7 @@ impl WriteTransaction {
         let (user_root, allocated_pages, data_freed) =
             self.tables.lock().table_tree.flush_and_close()?;
 
+        let dirty_page_count = allocated_pages.len() as u64;
         self.store_data_freed_pages(data_freed)?;
         self.store_allocated_pages(allocated_pages.into_iter().collect())?;
         self.flush_cdc_log()?;
@@ -2534,6 +2572,19 @@ impl WriteTransaction {
             "Finished commit of transaction id={:?}",
             self.transaction_id
         );
+
+        let info = crate::observer::CommitInfo {
+            transaction_id: self.transaction_id.raw_id(),
+            dirty_page_count,
+            two_phase: self.two_phase_commit,
+            #[cfg(feature = "std")]
+            commit_duration: commit_start.elapsed(),
+        };
+        self.observer.on_write_commit(&info);
+        #[cfg(feature = "metrics")]
+        self.db_metrics
+            .write_txn_committed
+            .fetch_add(1, portable_atomic::Ordering::Relaxed);
 
         Ok(())
     }
@@ -2749,6 +2800,13 @@ impl WriteTransaction {
         self.mem.rollback_uncommitted_writes()?;
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
+
+        self.observer.on_write_abort(self.transaction_id.raw_id());
+        #[cfg(feature = "metrics")]
+        self.db_metrics
+            .write_txn_aborted
+            .fetch_add(1, portable_atomic::Ordering::Relaxed);
+
         Ok(())
     }
 
@@ -3273,19 +3331,30 @@ impl Drop for WriteTransaction {
 pub struct ReadTransaction {
     mem: Arc<TransactionalMemory>,
     tree: TableTree,
+    transaction_id: Option<u64>,
+    observer: Arc<dyn crate::observer::DatabaseObserver>,
+    #[cfg(feature = "metrics")]
+    db_metrics: Arc<crate::observer::DbMetrics>,
 }
 
 impl ReadTransaction {
     pub(crate) fn new(
         mem: Arc<TransactionalMemory>,
         guard: TransactionGuard,
+        observer: Arc<dyn crate::observer::DatabaseObserver>,
+        #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self, TransactionError> {
         let root_page = mem.get_data_root();
+        let txn_id = guard.id().ok().map(|id| id.raw_id());
         let guard = Arc::new(guard);
         Ok(Self {
             mem: mem.clone(),
             tree: TableTree::new(root_page, PageHint::Clean, guard, mem)
                 .map_err(TransactionError::Storage)?,
+            transaction_id: txn_id,
+            observer,
+            #[cfg(feature = "metrics")]
+            db_metrics,
         })
     }
 
@@ -3294,12 +3363,19 @@ impl ReadTransaction {
         mem: Arc<TransactionalMemory>,
         guard: TransactionGuard,
         user_root: Option<BtreeHeader>,
+        observer: Arc<dyn crate::observer::DatabaseObserver>,
+        #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self, TransactionError> {
+        let txn_id = guard.id().ok().map(|id| id.raw_id());
         let guard = Arc::new(guard);
         Ok(Self {
             mem: mem.clone(),
             tree: TableTree::new(user_root, PageHint::Clean, guard, mem)
                 .map_err(TransactionError::Storage)?,
+            transaction_id: txn_id,
+            observer,
+            #[cfg(feature = "metrics")]
+            db_metrics,
         })
     }
 
@@ -3353,7 +3429,13 @@ impl ReadTransaction {
         &self,
         definition: &crate::ivfpq::config::IvfPqIndexDefinition,
     ) -> Result<crate::ivfpq::index::ReadOnlyIvfPqIndex, TableError> {
-        crate::ivfpq::index::ReadOnlyIvfPqIndex::open(self, definition).map_err(TableError::Storage)
+        crate::ivfpq::index::ReadOnlyIvfPqIndex::open(
+            self,
+            definition,
+            #[cfg(feature = "metrics")]
+            Arc::clone(&self.db_metrics),
+        )
+        .map_err(TableError::Storage)
     }
 
     /// Open the given table without a type
@@ -4217,6 +4299,18 @@ impl ReadTransaction {
         }
         // No-op, just drop ourself
         Ok(())
+    }
+}
+
+impl Drop for ReadTransaction {
+    fn drop(&mut self) {
+        if let Some(id) = self.transaction_id {
+            self.observer.on_read_end(id);
+            #[cfg(feature = "metrics")]
+            self.db_metrics
+                .read_txn_closed
+                .fetch_add(1, portable_atomic::Ordering::Relaxed);
+        }
     }
 }
 

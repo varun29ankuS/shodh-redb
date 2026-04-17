@@ -127,6 +127,9 @@ pub use merge::{
     BitwiseOr, BytesAppend, FloatAdd, FnMergeOperator, MergeOperator, NumericAdd, NumericMax,
     NumericMin, SaturatingAdd, merge_fn,
 };
+#[cfg(feature = "metrics")]
+pub use observer::DbMetrics;
+pub use observer::{CommitInfo, DatabaseObserver};
 pub use probe_select::DiversityConfig;
 pub use temporal::HybridLogicalClock;
 #[cfg(feature = "std")]
@@ -159,6 +162,7 @@ pub mod ivfpq;
 mod legacy_tuple_types;
 pub mod merge;
 mod multimap_table;
+pub mod observer;
 pub mod probe_select;
 mod sealed;
 pub mod storage_traits;

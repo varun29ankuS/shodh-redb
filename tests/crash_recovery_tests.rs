@@ -13,16 +13,16 @@
 
 use std::fmt;
 use std::io::ErrorKind;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::NamedTempFile;
 
 use std::fs::OpenOptions;
 
 use shodh_redb::{
-    backends::FileBackend, BackendError, Builder, ContentType, Database, Durability,
-    ReadableDatabase, ReadableTableMetadata, StorageBackend, StoreOptions, TableDefinition,
-    VerifyLevel,
+    BackendError, Builder, ContentType, Database, Durability, ReadableDatabase,
+    ReadableTableMetadata, StorageBackend, StoreOptions, TableDefinition, VerifyLevel,
+    backends::FileBackend,
 };
 
 fn create_tempfile() -> NamedTempFile {
@@ -72,11 +72,7 @@ impl CountdownBackend {
         if self
             .countdown
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
-                if x > 0 {
-                    Some(x - 1)
-                } else {
-                    None
-                }
+                if x > 0 { Some(x - 1) } else { None }
             })
             .is_err()
         {
@@ -147,7 +143,10 @@ fn verify_baseline(db: &Database, n: u64) {
     );
 
     for i in 0..n {
-        let val = t.get(&i).unwrap().unwrap_or_else(|| panic!("key {i} missing after recovery"));
+        let val = t
+            .get(&i)
+            .unwrap()
+            .unwrap_or_else(|| panic!("key {i} missing after recovery"));
         let expected_byte = (i & 0xFF) as u8;
         assert_eq!(val.value().len(), 64);
         assert!(
@@ -219,7 +218,10 @@ fn crash_during_second_commit_recovers_first() {
             break;
         }
     }
-    assert!(triggered_failure, "no countdown value triggered I/O failure");
+    assert!(
+        triggered_failure,
+        "no countdown value triggered I/O failure"
+    );
 
     // Phase 3: Reopen normally and verify recovery
     let db = Database::open(tmpfile.path()).unwrap();
@@ -372,7 +374,11 @@ fn crash_during_insert_before_commit() {
     let db = Database::open(tmpfile.path()).unwrap();
     let txn = db.begin_read().unwrap();
     let t = txn.open_table(U64_TABLE).unwrap();
-    assert_eq!(t.len().unwrap(), 100, "uncommitted inserts should not persist");
+    assert_eq!(
+        t.len().unwrap(),
+        100,
+        "uncommitted inserts should not persist"
+    );
 
     for i in 0..100u64 {
         assert_eq!(
@@ -575,8 +581,13 @@ fn crash_during_blob_store_recovers() {
         let db = Database::create(tmpfile.path()).unwrap();
         let txn = db.begin_write().unwrap();
         let data = vec![0xABu8; 4096];
-        txn.store_blob(&data, ContentType::OctetStream, "baseline", StoreOptions::default())
-            .unwrap();
+        txn.store_blob(
+            &data,
+            ContentType::OctetStream,
+            "baseline",
+            StoreOptions::default(),
+        )
+        .unwrap();
         txn.commit().unwrap();
 
         let rtxn = db.begin_read().unwrap();
@@ -732,7 +743,10 @@ fn crash_during_compaction_recovers() {
     // The 500 surviving keys should still be present
     assert_eq!(t.len().unwrap(), 500);
     for i in 1500..2000u64 {
-        assert!(t.get(&i).unwrap().is_some(), "key {i} missing after crash-during-compact");
+        assert!(
+            t.get(&i).unwrap().is_some(),
+            "key {i} missing after crash-during-compact"
+        );
     }
 }
 

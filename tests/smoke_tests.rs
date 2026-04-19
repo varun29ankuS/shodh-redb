@@ -1,4 +1,4 @@
-//! Smoke tests — fast happy-path validation of every major subsystem.
+//! Smoke tests -- fast happy-path validation of every major subsystem.
 //! Each test opens a fresh DB, exercises one feature, and asserts correctness.
 //! Target: ~100 tests pass in < 10 seconds.
 
@@ -21,7 +21,7 @@ fn create_tempfile() -> NamedTempFile {
     }
 }
 
-// ─── Core Operations ────────────────────────────────────────────────
+// --- Core Operations ------------------------------------------------
 
 const KV_TABLE: TableDefinition<&str, u64> = TableDefinition::new("smoke_kv");
 
@@ -157,7 +157,7 @@ fn durability_modes() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    // Durability::None — not persisted until followed by Immediate
+    // Durability::None -- not persisted until followed by Immediate
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(Durability::None).unwrap();
     {
@@ -179,7 +179,7 @@ fn durability_modes() {
     assert!(t.get("imm_dur").unwrap().is_some());
 }
 
-// ─── Blob Store ─────────────────────────────────────────────────────
+// --- Blob Store -----------------------------------------------------
 
 #[test]
 fn blob_write_read() {
@@ -314,7 +314,7 @@ fn blob_delete_compact() {
     assert!(txn.get_blob(&blob_id).unwrap().is_none());
 }
 
-// ─── Vector Operations ──────────────────────────────────────────────
+// --- Vector Operations ----------------------------------------------
 
 #[test]
 fn vector_distance_metrics() {
@@ -367,7 +367,7 @@ fn vector_nearest_k() {
     assert_eq!(results[0].key, 50); // closest is exact match
 }
 
-// ─── TTL ────────────────────────────────────────────────────────────
+// --- TTL ------------------------------------------------------------
 
 const TTL_TABLE: TtlTableDefinition<&str, u64> = TtlTableDefinition::new("smoke_ttl");
 
@@ -391,7 +391,7 @@ fn ttl_insert_expire() {
     assert!(t.get("permanent").unwrap().is_some());
 }
 
-// ─── CDC ────────────────────────────────────────────────────────────
+// --- CDC ------------------------------------------------------------
 
 #[test]
 fn cdc_capture_changes() {
@@ -433,7 +433,7 @@ fn cdc_capture_changes() {
     assert!(changes.len() >= 3); // insert + update + delete
 }
 
-// ─── Merge Operators ────────────────────────────────────────────────
+// --- Merge Operators ------------------------------------------------
 
 const MERGE_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("smoke_merge");
 
@@ -500,7 +500,7 @@ fn merge_all_operators() {
     assert_eq!(log_val.value(), b"hello world");
 }
 
-// ─── Group Commit ───────────────────────────────────���───────────────
+// --- Group Commit -------------------------------------------------------
 
 #[test]
 fn group_commit_batch() {
@@ -519,14 +519,14 @@ fn group_commit_batch() {
     assert_eq!(t.get("batch_key").unwrap().unwrap().value(), 999);
 }
 
-// ─── Compaction ─────────────────────────────────────────────────────
+// --- Compaction -----------------------------------------------------
 
 #[test]
 fn blob_compaction_policy() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    // Fresh DB — no dead space
+    // Fresh DB -- no dead space
     assert!(db.should_compact_blobs().unwrap().is_none());
 
     // Write + delete to create dead space
@@ -595,7 +595,7 @@ fn blob_compaction_handle() {
     let _ = report.bytes_reclaimed;
 }
 
-// ─── Builder / Config ───────────────────────────────────────────────
+// --- Builder / Config -----------------------------------------------
 
 #[test]
 fn builder_all_options() {
@@ -639,7 +639,7 @@ fn open_existing_db() {
     }
 }
 
-// ─── Error Paths ────────────────────────────────────────────────────
+// --- Error Paths ----------------------------------------------------
 
 #[test]
 fn table_does_not_exist() {
@@ -666,13 +666,13 @@ fn type_mismatch() {
     }
     txn.commit().unwrap();
 
-    // Try to open with (u64, u64) — same name, wrong types
+    // Try to open with (u64, u64) -- same name, wrong types
     let txn = db.begin_write().unwrap();
     let result = txn.open_table(WRONG_TYPE_TABLE);
     assert!(result.is_err());
 }
 
-// ─── Extended KV Tests ──────────────────────────────────────────────
+// --- Extended KV Tests ----------------------------------------------
 
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("smoke_u64");
 const BYTES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("smoke_bytes");
@@ -871,7 +871,7 @@ fn kv_first_last() {
     assert_eq!(last_v.value(), 90);
 }
 
-// ─── Extended Multimap Tests ────────────────────────────────────────
+// --- Extended Multimap Tests ----------------------------------------
 
 const MM_U64: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("smoke_mm_u64");
 
@@ -939,7 +939,7 @@ fn multimap_empty_key() {
     assert_eq!(t.get("nonexistent").unwrap().count(), 0);
 }
 
-// ─── Extended Transaction Tests ─────────────────────────────────────
+// --- Extended Transaction Tests -------------------------------------
 
 #[test]
 fn multiple_tables_one_txn() {
@@ -1050,7 +1050,7 @@ fn drop_write_txn_without_commit() {
     assert!(result.is_err() || result.unwrap().get("dropped").unwrap().is_none());
 }
 
-// ─── Extended Blob Tests ────────────────────────────────────────────
+// --- Extended Blob Tests --------------------------------------------
 
 #[test]
 fn blob_metadata() {
@@ -1183,7 +1183,7 @@ fn blob_range_read_full() {
     assert_eq!(slice, data);
 }
 
-// ─── Extended Vector Tests ──────────────────────────────────────────
+// --- Extended Vector Tests ------------------------------------------
 
 #[test]
 fn vector_dot_product_parallel() {
@@ -1278,7 +1278,7 @@ fn vector_write_read_f32_le() {
     assert_eq!(read_back, values);
 }
 
-// ─── Extended TTL Tests ─────────────────────────────────────────────
+// --- Extended TTL Tests ---------------------------------------------
 
 #[test]
 fn ttl_without_expiry() {
@@ -1312,7 +1312,7 @@ fn ttl_purge_expired_empty() {
     txn.commit().unwrap();
 }
 
-// ─── Extended CDC Tests ─────────────────────────────────────────────
+// --- Extended CDC Tests ---------------------------------------------
 
 #[test]
 fn cdc_disabled_by_default() {
@@ -1371,7 +1371,7 @@ fn cdc_change_ops() {
     assert!(ops.contains(&ChangeOp::Delete));
 }
 
-// ─── Extended Merge Tests ───────────────────────────────────────────
+// --- Extended Merge Tests -------------------------------------------
 
 #[test]
 fn merge_saturating_add() {
@@ -1439,7 +1439,7 @@ fn merge_on_missing_key() {
     let txn = db.begin_write().unwrap();
     {
         let mut t = txn.open_table(MERGE_TABLE).unwrap();
-        // First merge on nonexistent key — should create it
+        // First merge on nonexistent key -- should create it
         t.merge("fresh", &42u64.to_le_bytes(), &NumericAdd).unwrap();
     }
     txn.commit().unwrap();
@@ -1450,7 +1450,7 @@ fn merge_on_missing_key() {
     assert_eq!(val, 42);
 }
 
-// ─── Extended Builder/Config Tests ──────────────────────────────────
+// --- Extended Builder/Config Tests ----------------------------------
 
 #[test]
 fn builder_small_cache() {
@@ -1523,7 +1523,7 @@ fn reopen_after_multiple_commits() {
     }
 }
 
-// ─── Extended Group Commit Tests ────────────────────────────────────
+// --- Extended Group Commit Tests ------------------------------------
 
 #[test]
 fn group_commit_multiple_batches() {
@@ -1544,7 +1544,7 @@ fn group_commit_multiple_batches() {
     assert_eq!(t.len().unwrap(), 5);
 }
 
-// ─── Extended Savepoint Tests ───────────────────────────────────────
+// --- Extended Savepoint Tests ---------------------------------------
 
 #[test]
 fn persistent_savepoint() {
@@ -1570,7 +1570,7 @@ fn persistent_savepoint() {
     assert!(sp_id > 0);
 }
 
-// ─── Extended Compaction Tests ──────────────────────────────────────
+// --- Extended Compaction Tests --------------------------------------
 
 #[test]
 fn compact_empty_db() {
@@ -1605,7 +1605,7 @@ fn blob_stats_after_writes() {
     assert_eq!(stats.dead_bytes, 0);
 }
 
-// ─── Extended Error Path Tests ──────────────────────────────────────
+// --- Extended Error Path Tests --------------------------------------
 
 #[test]
 fn read_blob_nonexistent() {
@@ -1663,7 +1663,7 @@ fn database_stats() {
     assert!(stats.allocated_pages() > 0);
 }
 
-// ─── List / Delete Tables ───────────────────────────────────────────
+// --- List / Delete Tables -------------------------------------------
 
 #[test]
 fn list_tables_write_txn() {
@@ -1733,7 +1733,7 @@ fn delete_table_nonexistent() {
     txn.commit().unwrap();
 }
 
-// ─── Check Integrity / Compact ──────────────────────────────────────
+// --- Check Integrity / Compact --------------------------------------
 
 #[test]
 fn check_integrity() {
@@ -1779,7 +1779,7 @@ fn compact_db() {
     let _ = compacted; // may or may not reclaim depending on page layout
 }
 
-// ─── Range / Iterator Tests ─────────────────────────────────────────
+// --- Range / Iterator Tests -----------------------------------------
 
 #[test]
 fn kv_reverse_range() {
@@ -1874,7 +1874,7 @@ fn kv_drain_range() {
     txn.commit().unwrap();
 }
 
-// ─── CDC Range Query ────────────────────────────────────────────────
+// --- CDC Range Query ------------------------------------------------
 
 #[test]
 fn cdc_range_query() {
@@ -1903,7 +1903,7 @@ fn cdc_range_query() {
     assert!(all.len() >= 3);
 }
 
-// ─── Blob Writer Patterns ───────────────────────────────────────────
+// --- Blob Writer Patterns -------------------------------------------
 
 #[test]
 fn blob_writer_single_byte_chunks() {
@@ -1951,7 +1951,7 @@ fn blob_large_streaming() {
     assert_eq!(meta.blob_ref.length, 4096 * 100);
 }
 
-// ─── Distance Metric Enum Tests ─────────────────────────────────────
+// --- Distance Metric Enum Tests -------------------------------------
 
 #[test]
 fn distance_metric_cosine() {
@@ -1991,7 +1991,7 @@ fn distance_metric_manhattan() {
     assert!((dist - 7.0).abs() < 1e-4); // |3| + |4| + |0| = 7
 }
 
-// ─── Scalar Quantization Tests ──────────────────────────────────────
+// --- Scalar Quantization Tests --------------------------------------
 
 #[test]
 fn scalar_quantize_and_distance() {
@@ -2008,7 +2008,7 @@ fn scalar_quantize_identity_distance() {
     assert!(dist < 1e-4); // identical => near-zero distance
 }
 
-// ─── Multimap Drain ─────────────────────────────────────────────────
+// --- Multimap Drain -------------------------------------------------
 
 #[test]
 fn multimap_iter_all() {
@@ -2030,7 +2030,7 @@ fn multimap_iter_all() {
     assert_eq!(count, 3);
 }
 
-// ─── TTL Expired Filter ─────────────────────────────────────────────
+// --- TTL Expired Filter ---------------------------------------------
 
 #[test]
 fn ttl_expired_not_visible() {
@@ -2064,7 +2064,7 @@ fn ttl_expired_not_visible() {
     assert_eq!(t.get("permanent").unwrap().unwrap().value(), 2);
 }
 
-// ─── Durability Eventual ────────────────────────────────────────────
+// --- Durability Eventual --------------------------------------------
 
 #[test]
 fn durability_eventual_multiple_writes() {
@@ -2086,7 +2086,7 @@ fn durability_eventual_multiple_writes() {
     assert_eq!(t.len().unwrap(), 10);
 }
 
-// ─── Blob SHA-256 Verification ──────────────────────────────────────
+// --- Blob SHA-256 Verification --------------------------------------
 
 #[test]
 fn blob_sha256_field_exists() {
@@ -2110,7 +2110,7 @@ fn blob_sha256_field_exists() {
     assert_eq!(meta.sha256.len(), 32);
 }
 
-// ─── Blob Dedup with Verification ───────────────────────────────────
+// --- Blob Dedup with Verification -----------------------------------
 
 #[test]
 fn blob_dedup_saves_space() {
@@ -2152,7 +2152,7 @@ fn blob_dedup_saves_space() {
     assert!(stats.live_bytes < data.len() as u64 * 2);
 }
 
-// ─── Multimap Range ─────────────────────────────────────────────────
+// --- Multimap Range -------------------------------------------------
 
 #[test]
 fn multimap_range() {
@@ -2180,11 +2180,11 @@ fn multimap_range() {
     assert_eq!(range_count, 9); // 3 keys x 3 values each
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// BATCH 2: Tests 101–200
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// BATCH 2: Tests 101-200
+// =======================================================================
 
-// ─── Table: pop_first / pop_last ────────────────────────────────────
+// --- Table: pop_first / pop_last ------------------------------------
 
 #[test]
 fn table_pop_first() {
@@ -2242,7 +2242,7 @@ fn table_pop_empty() {
     txn.commit().unwrap();
 }
 
-// ─── Table: retain / extract_if ─────────────────────────────────────
+// --- Table: retain / extract_if -------------------------------------
 
 #[test]
 fn table_retain() {
@@ -2325,7 +2325,7 @@ fn table_extract_from_if_range() {
     txn.commit().unwrap();
 }
 
-// ─── Table: drain_all ───────────────────────────────────────────────
+// --- Table: drain_all -----------------------------------------------
 
 #[test]
 fn table_drain_all() {
@@ -2345,7 +2345,7 @@ fn table_drain_all() {
     txn.commit().unwrap();
 }
 
-// ─── Table: insert_reserve ──────────────────────────────────────────
+// --- Table: insert_reserve ------------------------------------------
 
 #[test]
 fn table_insert_reserve() {
@@ -2368,7 +2368,7 @@ fn table_insert_reserve() {
     );
 }
 
-// ─── Table: is_empty ────────────────────────────────────────────────
+// --- Table: is_empty ------------------------------------------------
 
 #[test]
 fn table_is_empty() {
@@ -2385,7 +2385,7 @@ fn table_is_empty() {
     txn.commit().unwrap();
 }
 
-// ─── Table: get_mut ─────────────────────────────────────────────────
+// --- Table: get_mut -------------------------------------------------
 
 #[test]
 fn table_get_mut_exists() {
@@ -2404,7 +2404,7 @@ fn table_get_mut_exists() {
     txn.commit().unwrap();
 }
 
-// ─── Table: iter_raw ────────────────────────────────────────────────
+// --- Table: iter_raw ------------------------------------------------
 
 #[test]
 fn table_iter_reverse() {
@@ -2431,7 +2431,7 @@ fn table_iter_reverse() {
     assert_eq!(keys, vec![3, 2, 1]);
 }
 
-// ─── TableStats ─────────────────────────────────────────────────────
+// --- TableStats -----------------------------------------------------
 
 #[test]
 fn table_stats() {
@@ -2455,7 +2455,7 @@ fn table_stats() {
     assert!(stats.metadata_bytes() > 0);
 }
 
-// ─── DatabaseStats full ─────────────────────────────────────────────
+// --- DatabaseStats full ---------------------------------------------
 
 #[test]
 fn database_stats_full() {
@@ -2479,7 +2479,7 @@ fn database_stats_full() {
     let _ = stats.fragmented_bytes();
 }
 
-// ─── Multimap: remove_all ───────────────────────────────────────────
+// --- Multimap: remove_all -------------------------------------------
 
 #[test]
 fn multimap_remove_all() {
@@ -2502,7 +2502,7 @@ fn multimap_remove_all() {
     assert_eq!(t.get(&1u64).unwrap().count(), 0);
 }
 
-// ─── Multimap: drain_all ────────────────────────────────────────────
+// --- Multimap: drain_all --------------------------------------------
 
 #[test]
 fn multimap_drain_all() {
@@ -2521,7 +2521,7 @@ fn multimap_drain_all() {
     txn.commit().unwrap();
 }
 
-// ─── Multimap: is_empty / len ───────────────────────────────────────
+// --- Multimap: is_empty / len ---------------------------------------
 
 #[test]
 fn multimap_len_and_empty() {
@@ -2542,7 +2542,7 @@ fn multimap_len_and_empty() {
     txn.commit().unwrap();
 }
 
-// ─── Rename table ───────────────────────────────────────────────────
+// --- Rename table ---------------------------------------------------
 
 #[test]
 fn rename_table() {
@@ -2576,7 +2576,7 @@ fn rename_table() {
     );
 }
 
-// ─── List multimap tables ───────────────────────────────────────────
+// --- List multimap tables -------------------------------------------
 
 #[test]
 fn list_multimap_tables() {
@@ -2595,7 +2595,7 @@ fn list_multimap_tables() {
     assert!(!tables.is_empty());
 }
 
-// ─── Persistent savepoint: get / delete / list ──────────────────────
+// --- Persistent savepoint: get / delete / list ----------------------
 
 #[test]
 fn persistent_savepoint_get_delete_list() {
@@ -2632,7 +2632,7 @@ fn persistent_savepoint_get_delete_list() {
     assert!(!sps.contains(&sp_id));
 }
 
-// ─── Transaction abort ──────────────────────────────────────────────
+// --- Transaction abort ----------------------------------------------
 
 #[test]
 fn explicit_abort() {
@@ -2650,7 +2650,7 @@ fn explicit_abort() {
     assert!(txn.open_table(KV_TABLE).is_err());
 }
 
-// ─── Backup and verify ──────────────────────────────────────────────
+// --- Backup and verify ----------------------------------------------
 
 #[test]
 fn backup_and_verify() {
@@ -2682,7 +2682,7 @@ fn backup_and_verify() {
     assert_eq!(t.len().unwrap(), 100);
 }
 
-// ─── Verify integrity ───────────────────────────────────────────────
+// --- Verify integrity -----------------------------------------------
 
 #[test]
 fn verify_integrity_levels() {
@@ -2709,7 +2709,7 @@ fn verify_integrity_levels() {
     assert!(report.valid);
 }
 
-// ─── Compaction handle ──────────────────────────────────────────────
+// --- Compaction handle ----------------------------------------------
 
 #[test]
 fn compaction_handle_run() {
@@ -2739,7 +2739,7 @@ fn compaction_handle_run() {
     let _ = report;
 }
 
-// ─── Blob: tags ─────────────────────────────────────────────────────
+// --- Blob: tags -----------------------------------------------------
 
 #[test]
 fn blob_tags() {
@@ -2825,7 +2825,7 @@ fn blobs_by_tag() {
     assert!(sensor_blobs.contains(&id3));
 }
 
-// ─── Blob: namespace ────────────────────────────────────────────────
+// --- Blob: namespace ------------------------------------------------
 
 #[test]
 fn blob_namespace() {
@@ -2887,7 +2887,7 @@ fn blobs_in_namespace() {
     assert_eq!(ns_b.len(), 1);
 }
 
-// ─── Blob: causal ───────────────────────────────────────────────────
+// --- Blob: causal ---------------------------------------------------
 
 #[test]
 fn blob_causal_chain() {
@@ -2922,7 +2922,7 @@ fn blob_causal_chain() {
     let _ = chain; // just verify it doesn't error
 }
 
-// ─── Blob: BlobReader ───────────────────────────────────────────────
+// --- Blob: BlobReader -----------------------------------------------
 
 #[test]
 fn blob_reader_read_txn() {
@@ -2971,7 +2971,7 @@ fn blob_reader_write_txn() {
     txn.commit().unwrap();
 }
 
-// ─── Blob: blob_by_sequence ─────────────────────────────────────────
+// --- Blob: blob_by_sequence -----------------------------------------
 
 #[test]
 fn blob_by_sequence() {
@@ -2996,7 +2996,7 @@ fn blob_by_sequence() {
     assert_eq!(found_id, blob_id);
 }
 
-// ─── Blob: dedup_stats ──────────────────────────────────────────────
+// --- Blob: dedup_stats ----------------------------------------------
 
 #[test]
 fn dedup_stats_fresh() {
@@ -3041,7 +3041,7 @@ fn dedup_stats_with_dedup() {
     assert!(stats.bytes_saved > 0);
 }
 
-// ─── Blob: BlobWriter bytes_written ─────────────────────────────────
+// --- Blob: BlobWriter bytes_written ---------------------------------
 
 #[test]
 fn blob_writer_bytes_written() {
@@ -3064,7 +3064,7 @@ fn blob_writer_bytes_written() {
     txn.commit().unwrap();
 }
 
-// ─── ContentType methods ────────────────────────────────────────────
+// --- ContentType methods --------------------------------------------
 
 #[test]
 fn content_type_roundtrip() {
@@ -3084,7 +3084,7 @@ fn content_type_mime_str() {
     );
 }
 
-// ─── CDC: cursor / latest_txn_id ────────────────────────────────────
+// --- CDC: cursor / latest_txn_id ------------------------------------
 
 #[test]
 fn cdc_cursor_advance() {
@@ -3144,7 +3144,7 @@ fn cdc_latest_txn_empty() {
     assert!(latest.is_none());
 }
 
-// ─── CDC: read_cdc_range ────────────────────────────────────────────
+// --- CDC: read_cdc_range --------------------------------------------
 
 #[test]
 fn cdc_read_range() {
@@ -3175,7 +3175,7 @@ fn cdc_read_range() {
     assert!(empty.is_empty());
 }
 
-// ─── TTL: range / iter / len_with_expired ───────────────────────────
+// --- TTL: range / iter / len_with_expired ---------------------------
 
 #[test]
 fn ttl_range_query() {
@@ -3243,7 +3243,7 @@ fn ttl_len_with_expired() {
     assert!(t.get("permanent").unwrap().is_some());
 }
 
-// ─── TTL: remove ────────────────────────────────────────────────────
+// --- TTL: remove ----------------------------------------------------
 
 #[test]
 fn ttl_remove() {
@@ -3263,7 +3263,7 @@ fn ttl_remove() {
     assert!(t.get("removable").unwrap().is_none());
 }
 
-// ─── Vector: l2_normalized (allocating) ─────────────────────────────
+// --- Vector: l2_normalized (allocating) -----------------------------
 
 #[test]
 fn vector_l2_normalized_allocating() {
@@ -3275,7 +3275,7 @@ fn vector_l2_normalized_allocating() {
     assert_eq!(v[0], 3.0);
 }
 
-// ─── Vector: dequantize_scalar ──────────────────────────────────────
+// --- Vector: dequantize_scalar --------------------------------------
 
 #[test]
 fn vector_dequantize_scalar() {
@@ -3287,18 +3287,18 @@ fn vector_dequantize_scalar() {
     }
 }
 
-// ─── Vector: sq_dot_product ─────────────────────────────────────────
+// --- Vector: sq_dot_product -----------------------------------------
 
 #[test]
 fn vector_sq_dot_product() {
     let v: [f32; 8] = [1.0; 8];
     let sq = shodh_redb::quantize_scalar(&v);
     let dp = shodh_redb::sq_dot_product(&v, &sq);
-    // dot product of [1,1,...] with itself ≈ 8.0
+    // dot product of [1,1,...] with itself ~ 8.0
     assert!((dp - 8.0).abs() < 0.5);
 }
 
-// ─── Vector: nearest_k_fixed ────────────────────────────────────────
+// --- Vector: nearest_k_fixed ----------------------------------------
 
 #[test]
 fn vector_nearest_k_fixed() {
@@ -3319,7 +3319,7 @@ fn vector_nearest_k_fixed() {
     assert_eq!(results[0].key, 1); // closest to [0.9, 0.1, 0]
 }
 
-// ─── Vector: cosine_similarity value ────────────────────────────────
+// --- Vector: cosine_similarity value --------------------------------
 
 #[test]
 fn vector_cosine_similarity_value() {
@@ -3333,7 +3333,7 @@ fn vector_cosine_similarity_value() {
     assert!(sim.abs() < 1e-5); // orthogonal
 }
 
-// ─── Vector: euclidean_distance_sq value ────────────────────────────
+// --- Vector: euclidean_distance_sq value ----------------------------
 
 #[test]
 fn vector_euclidean_distance_sq_value() {
@@ -3343,7 +3343,7 @@ fn vector_euclidean_distance_sq_value() {
     assert!((dist - 9.0).abs() < 1e-4); // 1 + 4 + 4 = 9
 }
 
-// ─── Merge: merge_fn (closure-based) ────────────────────────────────
+// --- Merge: merge_fn (closure-based) --------------------------------
 
 #[test]
 fn merge_fn_closure() {
@@ -3367,7 +3367,7 @@ fn merge_fn_closure() {
     assert_eq!(t.get("replace").unwrap().unwrap().value(), b"second");
 }
 
-// ─── Builder: set_region_size / page_size ───────────────────────────
+// --- Builder: set_region_size / page_size ---------------------------
 
 #[test]
 fn builder_blob_dedup_enabled() {
@@ -3399,7 +3399,7 @@ fn builder_memory_budget_small() {
     txn.commit().unwrap();
 }
 
-// ─── Builder: blob_dedup_min_size ───────────────────────────────────
+// --- Builder: blob_dedup_min_size -----------------------------------
 
 #[test]
 fn builder_dedup_min_size() {
@@ -3410,7 +3410,7 @@ fn builder_dedup_min_size() {
     let db = builder.create(tmpfile.path()).unwrap();
 
     let txn = db.begin_write().unwrap();
-    // Small blob below min_size — should not dedup
+    // Small blob below min_size -- should not dedup
     let small = vec![0u8; 128];
     let id1 = txn
         .store_blob(
@@ -3428,7 +3428,7 @@ fn builder_dedup_min_size() {
             StoreOptions::default(),
         )
         .unwrap();
-    // Large blob above min_size — should dedup
+    // Large blob above min_size -- should dedup
     let large = vec![0u8; 512];
     let id3 = txn
         .store_blob(
@@ -3456,7 +3456,7 @@ fn builder_dedup_min_size() {
     assert!(txn.get_blob(&id4).unwrap().is_some());
 }
 
-// ─── Builder: blob_compaction_policy ────────────────────────────────
+// --- Builder: blob_compaction_policy --------------------------------
 
 #[test]
 fn builder_blob_compaction_policy() {
@@ -3494,7 +3494,7 @@ fn builder_blob_compaction_policy() {
     let _policy = db.should_compact_blobs().unwrap();
 }
 
-// ─── Builder: history_retention ─────────────────────────────────────
+// --- Builder: history_retention -------------------------------------
 
 #[test]
 fn builder_history_retention() {
@@ -3518,7 +3518,7 @@ fn builder_history_retention() {
     assert!(history.len() <= 10);
 }
 
-// ─── Transaction history ────────────────────────────────────────────
+// --- Transaction history --------------------------------------------
 
 #[test]
 fn transaction_history_info() {
@@ -3544,7 +3544,7 @@ fn transaction_history_info() {
     }
 }
 
-// ─── Incremental export / import ────────────────────────────────────
+// --- Incremental export / import ------------------------------------
 
 #[test]
 fn incremental_export_import() {
@@ -3579,7 +3579,7 @@ fn incremental_export_import() {
     assert!(snapshot.total_upserts() > 0);
 }
 
-// ─── Incremental backup to file ─────────────────────────────────────
+// --- Incremental backup to file -------------------------------------
 
 #[test]
 fn incremental_backup_to_file() {
@@ -3614,7 +3614,7 @@ fn incremental_backup_to_file() {
     assert!(backup_file.path().exists());
 }
 
-// ─── ReadOnlyDatabase ───────────────────────────────────────────────
+// --- ReadOnlyDatabase -----------------------------------------------
 
 #[test]
 fn read_only_database() {
@@ -3637,7 +3637,7 @@ fn read_only_database() {
     assert_eq!(t.get("ro_test").unwrap().unwrap().value(), 42);
 }
 
-// ─── BlobId serialization ───────────────────────────────────────────
+// --- BlobId serialization -------------------------------------------
 
 #[test]
 fn blob_id_serialization() {
@@ -3661,7 +3661,7 @@ fn blob_id_serialization() {
     assert_eq!(blob_id, restored);
 }
 
-// ─── Merge: merge_in ────────────────────────────────────────────────
+// --- Merge: merge_in ------------------------------------------------
 
 #[test]
 fn merge_in_existing_key() {
@@ -3694,7 +3694,7 @@ fn merge_in_existing_key() {
     assert_eq!(val, 8);
 }
 
-// ─── Multiple TTL tables ────────────────────────────────────────────
+// --- Multiple TTL tables --------------------------------------------
 
 #[test]
 fn ttl_multiple_tables() {
@@ -3722,7 +3722,7 @@ fn ttl_multiple_tables() {
     assert_eq!(tb.get("b").unwrap().unwrap().value(), b"data_b");
 }
 
-// ─── Blob: multiple operations same txn ─────────────────────────────
+// --- Blob: multiple operations same txn -----------------------------
 
 #[test]
 fn blob_many_ops_one_txn() {
@@ -3756,7 +3756,7 @@ fn blob_many_ops_one_txn() {
     }
 }
 
-// ─── Stress: many small transactions ────────────────────────────────
+// --- Stress: many small transactions --------------------------------
 
 #[test]
 fn many_small_transactions() {
@@ -3778,7 +3778,7 @@ fn many_small_transactions() {
     assert_eq!(t.get(&99u64).unwrap().unwrap().value(), 9801);
 }
 
-// ─── Stress: large transaction ──────────────────────────────────────
+// --- Stress: large transaction --------------------------------------
 
 #[test]
 fn large_single_transaction() {
@@ -3799,7 +3799,7 @@ fn large_single_transaction() {
     assert_eq!(t.len().unwrap(), 50_000);
 }
 
-// ─── String key edge cases ──────────────────────────────────────────
+// --- String key edge cases ------------------------------------------
 
 #[test]
 fn kv_empty_string_key() {
@@ -3841,7 +3841,7 @@ fn kv_unicode_keys() {
     assert_eq!(t.len().unwrap(), 3);
 }
 
-// ─── Vector: high-dimensional ───────────────────────────────────────
+// --- Vector: high-dimensional ---------------------------------------
 
 #[test]
 fn vector_high_dimensional() {
@@ -3862,7 +3862,7 @@ fn vector_high_dimensional() {
     assert!(man > 0.0);
 }
 
-// ─── Vector: zero vector ────────────────────────────────────────────
+// --- Vector: zero vector --------------------------------------------
 
 #[test]
 fn vector_zero_norm() {
@@ -3871,7 +3871,7 @@ fn vector_zero_norm() {
     assert_eq!(norm, 0.0);
 }
 
-// ─── Group commit: concurrent-style ─────────────────────────────────
+// --- Group commit: concurrent-style ---------------------------------
 
 #[test]
 fn group_commit_many() {
@@ -3893,7 +3893,7 @@ fn group_commit_many() {
     assert_eq!(t.get(&19u64).unwrap().unwrap().value(), 1900);
 }
 
-// ─── Blob compaction with progress ──────────────────────────────────
+// --- Blob compaction with progress ----------------------------------
 
 #[test]
 fn blob_compaction_step() {
@@ -3917,7 +3917,7 @@ fn blob_compaction_step() {
     let _ = report.was_noop;
 }
 
-// ─── Multimap: reverse iteration ────────────────────────────────────
+// --- Multimap: reverse iteration ------------------------------------
 
 #[test]
 fn multimap_reverse_range() {
@@ -3944,7 +3944,7 @@ fn multimap_reverse_range() {
     assert_eq!(keys, vec![3, 2, 1]);
 }
 
-// ─── Multimap: duplicate insert ─────────────────────────────────────
+// --- Multimap: duplicate insert -------------------------------------
 
 #[test]
 fn multimap_duplicate_insert() {
@@ -3966,11 +3966,11 @@ fn multimap_duplicate_insert() {
     assert_eq!(t.get(&1u64).unwrap().count(), 1);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Edge Case Tests (177–200+)
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// Edge Case Tests (177-200+)
+// =======================================================================
 
-// ─── Edge: empty string key ─────────────────────────────────────────
+// --- Edge: empty string key -----------------------------------------
 
 #[test]
 fn edge_empty_string_key() {
@@ -3989,7 +3989,7 @@ fn edge_empty_string_key() {
     assert_eq!(t.get("").unwrap().unwrap().value(), 42);
 }
 
-// ─── Edge: empty byte slice key ─────────────────────────────────────
+// --- Edge: empty byte slice key -------------------------------------
 
 #[test]
 fn edge_empty_byte_key() {
@@ -4008,7 +4008,7 @@ fn edge_empty_byte_key() {
     assert_eq!(t.get([].as_slice()).unwrap().unwrap().value(), &[]);
 }
 
-// ─── Edge: get missing key returns None ─────────────────────────────
+// --- Edge: get missing key returns None -----------------------------
 
 #[test]
 fn edge_get_missing_key() {
@@ -4026,7 +4026,7 @@ fn edge_get_missing_key() {
     assert!(t.get("nonexistent").unwrap().is_none());
 }
 
-// ─── Edge: remove missing key returns None ──────────────────────────
+// --- Edge: remove missing key returns None --------------------------
 
 #[test]
 fn edge_remove_missing_key() {
@@ -4041,7 +4041,7 @@ fn edge_remove_missing_key() {
     txn.commit().unwrap();
 }
 
-// ─── Edge: multimap remove nonexistent value ────────────────────────
+// --- Edge: multimap remove nonexistent value ------------------------
 
 #[test]
 fn edge_multimap_remove_nonexistent() {
@@ -4060,7 +4060,7 @@ fn edge_multimap_remove_nonexistent() {
     txn.commit().unwrap();
 }
 
-// ─── Edge: insert overwrite returns old value ───────────────────────
+// --- Edge: insert overwrite returns old value -----------------------
 
 #[test]
 fn edge_insert_returns_old_value() {
@@ -4079,7 +4079,7 @@ fn edge_insert_returns_old_value() {
     txn.commit().unwrap();
 }
 
-// ─── Edge: drain empty table returns zero ───────────────────────────
+// --- Edge: drain empty table returns zero ---------------------------
 
 #[test]
 fn edge_drain_empty_table() {
@@ -4095,7 +4095,7 @@ fn edge_drain_empty_table() {
     txn.commit().unwrap();
 }
 
-// ─── Edge: pop_first / pop_last on empty table ─────────────────────
+// --- Edge: pop_first / pop_last on empty table ---------------------
 
 #[test]
 fn edge_pop_empty_table() {
@@ -4111,7 +4111,7 @@ fn edge_pop_empty_table() {
     txn.commit().unwrap();
 }
 
-// ─── Edge: u64::MAX as key ──────────────────────────────────────────
+// --- Edge: u64::MAX as key ------------------------------------------
 
 #[test]
 fn edge_u64_max_key() {
@@ -4134,7 +4134,7 @@ fn edge_u64_max_key() {
     assert_eq!(count, 2);
 }
 
-// ─── Edge: retain removes nothing when predicate always true ────────
+// --- Edge: retain removes nothing when predicate always true --------
 
 #[test]
 fn edge_retain_all() {
@@ -4153,7 +4153,7 @@ fn edge_retain_all() {
     txn.commit().unwrap();
 }
 
-// ─── Edge: retain removes everything ────────────────────────────────
+// --- Edge: retain removes everything --------------------------------
 
 #[test]
 fn edge_retain_none() {
@@ -4172,7 +4172,7 @@ fn edge_retain_none() {
     txn.commit().unwrap();
 }
 
-// ─── Edge: extract_if consumes selectively ──────────────────────────
+// --- Edge: extract_if consumes selectively --------------------------
 
 #[test]
 fn edge_extract_if_partial() {
@@ -4197,7 +4197,7 @@ fn edge_extract_if_partial() {
     txn.commit().unwrap();
 }
 
-// ─── Edge: blob 0-byte write via BlobWriter ─────────────────────────
+// --- Edge: blob 0-byte write via BlobWriter -------------------------
 
 #[test]
 fn edge_blob_writer_zero_byte() {
@@ -4218,7 +4218,7 @@ fn edge_blob_writer_zero_byte() {
     assert_eq!(data, b"hello");
 }
 
-// ─── Edge: blob range read at offset 0, length 0 ───────────────────
+// --- Edge: blob range read at offset 0, length 0 -------------------
 
 #[test]
 fn edge_blob_range_zero_length() {
@@ -4242,7 +4242,7 @@ fn edge_blob_range_zero_length() {
     assert!(data.is_empty());
 }
 
-// ─── Edge: blob range out of bounds ─────────────────────────────────
+// --- Edge: blob range out of bounds ---------------------------------
 
 #[test]
 fn edge_blob_range_out_of_bounds() {
@@ -4266,7 +4266,7 @@ fn edge_blob_range_out_of_bounds() {
     assert!(reader.read_range(0, 1000).is_err());
 }
 
-// ─── Edge: blob delete nonexistent ──────────────────────────────────
+// --- Edge: blob delete nonexistent ----------------------------------
 
 #[test]
 fn edge_blob_delete_nonexistent() {
@@ -4281,7 +4281,7 @@ fn edge_blob_delete_nonexistent() {
     txn.commit().unwrap();
 }
 
-// ─── Edge: blob with max tags ───────────────────────────────────────
+// --- Edge: blob with max tags ---------------------------------------
 
 #[test]
 fn edge_blob_max_tags() {
@@ -4300,7 +4300,7 @@ fn edge_blob_max_tags() {
     assert_eq!(tags.len(), 8);
 }
 
-// ─── Edge: open same table twice errors ─────────────────────────────
+// --- Edge: open same table twice errors -----------------------------
 
 #[test]
 fn edge_open_table_twice() {
@@ -4314,7 +4314,7 @@ fn edge_open_table_twice() {
     assert!(result.is_err());
 }
 
-// ─── Edge: table type mismatch on multimap vs regular ───────────────
+// --- Edge: table type mismatch on multimap vs regular ---------------
 
 const SHARED_NAME_TABLE: TableDefinition<&str, u64> = TableDefinition::new("shared_name");
 const SHARED_NAME_MM: MultimapTableDefinition<&str, u64> =
@@ -4333,13 +4333,13 @@ fn edge_table_multimap_type_mismatch() {
     }
     txn.commit().unwrap();
 
-    // Try to open as multimap — should fail
+    // Try to open as multimap -- should fail
     let txn = db.begin_write().unwrap();
     let result = txn.open_multimap_table(SHARED_NAME_MM);
     assert!(result.is_err());
 }
 
-// ─── Edge: savepoint on dirty transaction ───────────────────────────
+// --- Edge: savepoint on dirty transaction ---------------------------
 
 #[test]
 fn edge_savepoint_dirty_transaction() {
@@ -4356,7 +4356,7 @@ fn edge_savepoint_dirty_transaction() {
     assert!(result.is_err());
 }
 
-// ─── Edge: commit then begin new transaction ────────────────────────
+// --- Edge: commit then begin new transaction ------------------------
 
 #[test]
 fn edge_sequential_transactions() {
@@ -4377,7 +4377,7 @@ fn edge_sequential_transactions() {
     assert_eq!(t.len().unwrap(), 10);
 }
 
-// ─── Edge: TTL with zero duration ───────────────────────────────────
+// --- Edge: TTL with zero duration -----------------------------------
 
 #[test]
 fn edge_ttl_zero_duration() {
@@ -4400,7 +4400,7 @@ fn edge_ttl_zero_duration() {
     assert!(t.get("ephemeral").unwrap().is_none());
 }
 
-// ─── Edge: large value in KV table ──────────────────────────────────
+// --- Edge: large value in KV table ----------------------------------
 
 #[test]
 fn edge_large_value() {
@@ -4424,7 +4424,7 @@ fn edge_large_value() {
     assert!(v.value().iter().all(|&b| b == 0xAB));
 }
 
-// ─── Edge: range scan on empty table ────────────────────────────────
+// --- Edge: range scan on empty table --------------------------------
 
 #[test]
 fn edge_range_empty_table() {
@@ -4442,7 +4442,7 @@ fn edge_range_empty_table() {
     assert_eq!(t.range(0u64..100u64).unwrap().count(), 0);
 }
 
-// ─── Edge: multimap get on missing key ──────────────────────────────
+// --- Edge: multimap get on missing key ------------------------------
 
 #[test]
 fn edge_multimap_get_missing() {
@@ -4461,7 +4461,7 @@ fn edge_multimap_get_missing() {
     assert_eq!(t.get(&999u64).unwrap().count(), 0);
 }
 
-// ─── Edge: delete table then recreate ───────────────────────────────
+// --- Edge: delete table then recreate -------------------------------
 
 #[test]
 fn edge_delete_and_recreate_table() {
@@ -4481,7 +4481,7 @@ fn edge_delete_and_recreate_table() {
     assert!(txn.delete_table(KV_TABLE).unwrap());
     txn.commit().unwrap();
 
-    // Recreate — should be empty
+    // Recreate -- should be empty
     let txn = db.begin_write().unwrap();
     {
         let mut t = txn.open_table(KV_TABLE).unwrap();
@@ -4496,7 +4496,7 @@ fn edge_delete_and_recreate_table() {
     assert_eq!(t.get("new").unwrap().unwrap().value(), 2);
 }
 
-// ─── Edge: delete nonexistent table returns false ───────────────────
+// --- Edge: delete nonexistent table returns false -------------------
 
 #[test]
 fn edge_delete_nonexistent_table() {
@@ -4509,7 +4509,7 @@ fn edge_delete_nonexistent_table() {
     txn.commit().unwrap();
 }
 
-// ─── Edge: CDC on table with no changes ─────────────────────────────
+// --- Edge: CDC on table with no changes -----------------------------
 
 #[test]
 fn edge_cdc_empty_stream() {
@@ -4532,7 +4532,7 @@ fn edge_cdc_empty_stream() {
     let _ = changes.len();
 }
 
-// ─── Edge: merge on nonexistent key creates it ──────────────────────
+// --- Edge: merge on nonexistent key creates it ----------------------
 
 #[test]
 fn edge_merge_creates_key() {
@@ -4542,7 +4542,7 @@ fn edge_merge_creates_key() {
     let txn = db.begin_write().unwrap();
     {
         let mut t = txn.open_table(MERGE_TABLE).unwrap();
-        // Key doesn't exist yet — merge should create it
+        // Key doesn't exist yet -- merge should create it
         t.merge(&"counter", 1u64.to_le_bytes().as_slice(), &NumericAdd)
             .unwrap();
     }
@@ -4554,7 +4554,7 @@ fn edge_merge_creates_key() {
     assert_eq!(u64::from_le_bytes(v.value().try_into().unwrap()), 1);
 }
 
-// ─── Edge: WriteBatch empty commit ──────────────────────────────────
+// --- Edge: WriteBatch empty commit ----------------------------------
 
 #[test]
 fn edge_write_batch_empty() {
@@ -4566,7 +4566,7 @@ fn edge_write_batch_empty() {
     db.submit_write_batch(batch).unwrap();
 }
 
-// ─── Edge: rapid open/close cycles ──────────────────────────────────
+// --- Edge: rapid open/close cycles ----------------------------------
 
 #[test]
 fn edge_rapid_open_close() {
@@ -4590,7 +4590,7 @@ fn edge_rapid_open_close() {
     assert_eq!(t.get(&1u64).unwrap().unwrap().value(), 1);
 }
 
-// ─── Edge: transaction abort is implicit on drop ────────────────────
+// --- Edge: transaction abort is implicit on drop --------------------
 
 #[test]
 fn edge_transaction_drop_aborts() {
@@ -4612,7 +4612,7 @@ fn edge_transaction_drop_aborts() {
             let mut t = txn.open_table(KV_TABLE).unwrap();
             t.insert("dropped", &2u64).unwrap();
         }
-        // implicit drop — no commit
+        // implicit drop -- no commit
     }
 
     let txn = db.begin_read().unwrap();

@@ -4,9 +4,7 @@ use std::time::{Duration, Instant};
 use std::{fs, process};
 
 use comfy_table::presets::ASCII_MARKDOWN;
-use shodh_redb::{
-    BlobId, ContentType, Database, ReadableDatabase, StoreOptions,
-};
+use shodh_redb::{BlobId, ContentType, Database, ReadableDatabase, StoreOptions};
 use tempfile::NamedTempFile;
 
 const SMALL_BLOB_COUNT: usize = 1_000;
@@ -52,7 +50,12 @@ fn bench_small_blob_writes(db: &Database) -> (BenchResult, Vec<BlobId>) {
         for i in 0..SMALL_BLOB_COUNT {
             let data = make_blob_data(SMALL_BLOB_SIZE, (i & 0xFF) as u8);
             let id = txn
-                .store_blob(&data, ContentType::OctetStream, "bench", StoreOptions::default())
+                .store_blob(
+                    &data,
+                    ContentType::OctetStream,
+                    "bench",
+                    StoreOptions::default(),
+                )
                 .unwrap();
             ids.push(id);
         }
@@ -81,7 +84,12 @@ fn bench_large_blob_writes(db: &Database) -> (BenchResult, Vec<BlobId>) {
         for i in 0..LARGE_BLOB_COUNT {
             let data = make_blob_data(LARGE_BLOB_SIZE, (i & 0xFF) as u8);
             let id = txn
-                .store_blob(&data, ContentType::OctetStream, "bench", StoreOptions::default())
+                .store_blob(
+                    &data,
+                    ContentType::OctetStream,
+                    "bench",
+                    StoreOptions::default(),
+                )
                 .unwrap();
             ids.push(id);
         }
@@ -108,7 +116,11 @@ fn bench_streaming_writes(db: &Database) -> (BenchResult, Vec<BlobId>) {
     for i in 0..STREAMING_BLOB_COUNT {
         let txn = db.begin_write().unwrap();
         let mut writer = txn
-            .blob_writer(ContentType::OctetStream, "bench-stream", StoreOptions::default())
+            .blob_writer(
+                ContentType::OctetStream,
+                "bench-stream",
+                StoreOptions::default(),
+            )
             .unwrap();
         let data = make_blob_data(STREAMING_BLOB_SIZE, (i & 0xFF) as u8);
         let mut offset = 0;
@@ -363,11 +375,7 @@ fn main() {
 
     // blob_stats()
     let result = bench_blob_stats(&db);
-    println!(
-        "{}: {:.0} ops/sec",
-        result.name,
-        result.ops_per_sec()
-    );
+    println!("{}: {:.0} ops/sec", result.name, result.ops_per_sec());
     results.push(result);
 
     // Print markdown table

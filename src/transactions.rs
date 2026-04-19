@@ -2920,6 +2920,9 @@ impl WriteTransaction {
                     None,
                     &mut pagination_counter,
                 )?;
+                // Pages have been deferred into SYSTEM_FREED_TABLE; drain the
+                // original list so the immediate-free loop below is a no-op.
+                system_freed_pages.lock().clear();
             }
         }
 

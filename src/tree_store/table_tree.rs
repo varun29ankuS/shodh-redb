@@ -258,7 +258,7 @@ impl TableTree {
                             effective_value_size,
                             self.mem.clone(),
                         );
-                        let mut corruptions = tree.verify_structure()?;
+                        let mut corruptions = tree.verify_structure(None)?;
                         for c in &mut corruptions {
                             c.table_name = Some(table_name.clone());
                         }

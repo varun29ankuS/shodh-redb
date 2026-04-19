@@ -1283,8 +1283,7 @@ impl RawBtree {
                         LeafAccessor::new(node_mem, self.fixed_key_size, self.fixed_value_size)?;
                     let num = accessor.num_pairs();
                     for i in 1..num {
-                        if let (Some(prev), Some(curr)) =
-                            (accessor.entry(i - 1), accessor.entry(i))
+                        if let (Some(prev), Some(curr)) = (accessor.entry(i - 1), accessor.entry(i))
                             && cmp(prev.key(), curr.key()) != core::cmp::Ordering::Less
                         {
                             corruptions.push(CorruptPageInfo {

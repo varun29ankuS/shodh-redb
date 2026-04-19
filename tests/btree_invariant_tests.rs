@@ -27,9 +27,7 @@ fn assert_checksums(db: &Database) {
     assert!(
         report.valid,
         "integrity check failed: {} pages corrupt, structural_valid={:?}, details={:?}",
-        report.pages_corrupt,
-        report.structural_valid,
-        report.corrupt_details,
+        report.pages_corrupt, report.structural_valid, report.corrupt_details,
     );
 }
 
@@ -204,11 +202,7 @@ fn insert_delete_reinsert_cycle() {
     let t = txn.open_table(TABLE).unwrap();
     assert_eq!(t.len().unwrap(), expected.len() as u64);
 
-    let db_keys: Vec<u64> = t
-        .iter()
-        .unwrap()
-        .map(|r| r.unwrap().0.value())
-        .collect();
+    let db_keys: Vec<u64> = t.iter().unwrap().map(|r| r.unwrap().0.value()).collect();
     let expected_keys: Vec<u64> = expected.into_iter().collect();
     assert_eq!(db_keys, expected_keys);
 }
@@ -314,11 +308,7 @@ fn random_insert_delete_10k_ops() {
     // Final sorted-order check
     let txn = db.begin_read().unwrap();
     let t = txn.open_table(TABLE).unwrap();
-    let db_keys: Vec<u64> = t
-        .iter()
-        .unwrap()
-        .map(|r| r.unwrap().0.value())
-        .collect();
+    let db_keys: Vec<u64> = t.iter().unwrap().map(|r| r.unwrap().0.value()).collect();
     let expected_keys: Vec<u64> = expected.into_iter().collect();
     assert_eq!(db_keys, expected_keys);
 }
@@ -386,7 +376,10 @@ fn compact_after_heavy_churn() {
     let txn = db.begin_read().unwrap();
     let t = txn.open_table(TABLE).unwrap();
     for i in 4000..5000u64 {
-        assert!(t.get(&i).unwrap().is_some(), "key {i} missing after compact");
+        assert!(
+            t.get(&i).unwrap().is_some(),
+            "key {i} missing after compact"
+        );
     }
 }
 
@@ -601,7 +594,12 @@ fn retain_preserves_integrity() {
     let t = txn.open_table(TABLE).unwrap();
     for result in t.iter().unwrap() {
         let (k, _) = result.unwrap();
-        assert_eq!(k.value() % 7, 0, "non-divisible-by-7 key {} survived retain", k.value());
+        assert_eq!(
+            k.value() % 7,
+            0,
+            "non-divisible-by-7 key {} survived retain",
+            k.value()
+        );
     }
 }
 
@@ -636,7 +634,12 @@ fn extract_if_preserves_integrity() {
     assert_eq!(t.len().unwrap(), 5000 - 1667);
     for result in t.iter().unwrap() {
         let (k, _) = result.unwrap();
-        assert_ne!(k.value() % 3, 0, "multiple-of-3 key {} survived extract_if", k.value());
+        assert_ne!(
+            k.value() % 3,
+            0,
+            "multiple-of-3 key {} survived extract_if",
+            k.value()
+        );
     }
 }
 

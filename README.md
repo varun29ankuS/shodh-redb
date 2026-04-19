@@ -8,11 +8,11 @@
 
 **Embedded vector database for edge AI.** IVF-PQ search, blob storage, TTL, causal tracking, CDC -- ACID transactions, single file, `no_std` core, zero dependencies.
 
-95% recall@1 at 1,000+ QPS on SIFT1M. Single-threaded. 8 GB RAM. No GPU.
+95% recall@1 at 1,000+ QPS on SIFT1M. 1.6--3x faster writes than LMDB, 2--3x faster reads than RocksDB. Single-threaded. 8 GB RAM. No GPU.
 
 ```toml
 [dependencies]
-shodh-redb = "0.3"
+shodh-redb = "0.4"
 ```
 
 ---
@@ -148,17 +148,48 @@ Batched fsync for write-heavy workloads. Multiple operations share a single tran
 
 ## Performance
 
-### SIMD acceleration
+### KV engine (vs LMDB, RocksDB)
+
+5 million key-value pairs, 24-byte keys, 150-byte values. Windows 11, x86_64.
+
+| Operation | shodh-redb | LMDB | RocksDB |
+|---|---|---|---|
+| Bulk load 5M | 57.9s | 95.3s | 39.4s |
+| Individual writes 1K | 73ms | 228ms | 2,123ms |
+| Batch writes 100K | 3.6s | 8.8s | 778ms |
+| Random reads 1M | 1.97s | 2.18s | 5.70s |
+| Range scans 500K | 2.12s | 1.76s | 14.1s |
+| Multi-threaded reads (32t) | 1.23s | 0.67s | 4.59s |
+
+### Blob store
+
+| Operation | Ops/sec | Throughput |
+|---|---|---|
+| Small writes (1K x 4KB) | 18,686 | 73 MB/s |
+| Large writes (100 x 1MB) | 127 | 127 MB/s |
+| Sequential reads (1K blobs) | 137,170 | 536 MB/s |
+| Range reads (1K x 1KB slice) | 185,957 | 182 MB/s |
+| Dedup writes (1K identical) | 47,612 | 1000x ratio |
+
+### SIMD vector ops
 
 Distance functions use hand-written AVX2 intrinsics on x86_64 with runtime feature detection and scalar fallback.
 
-| Function | Strategy | Throughput |
-|---|---|---|
-| `dot_product` | `_mm256_mul_ps` + `_mm256_add_ps`, 8 f32/iter | ~8x scalar |
-| `euclidean_distance_sq` | Fused sub+mul, 8 f32/iter | ~8x scalar |
-| `cosine_similarity` | 3 accumulators, 8 f32/iter | ~8x scalar |
-| `manhattan_distance` | `_mm256_andnot_ps` for abs | ~8x scalar |
-| `hamming_distance` | Mula's vectorized popcount (`pshufb` + SAD), 32 bytes/iter | ~16-32x scalar |
+| Function | dim=128 | dim=384 | dim=1536 | Peak throughput |
+|---|---|---|---|---|
+| `dot_product` | 6.2 ns | 17.8 ns | 75.8 ns | 173 GB/s |
+| `euclidean_distance_sq` | 9.6 ns | 23.8 ns | 92.5 ns | 133 GB/s |
+| `cosine_similarity` | 13.7 ns | 34.6 ns | 124.8 ns | 99 GB/s |
+| `manhattan_distance` | 7.3 ns | 21.2 ns | 102.1 ns | 145 GB/s |
+| `hamming_distance` | 18.5 ns | 12.5 ns | -- | 62 GB/s |
+
+| Function | Strategy |
+|---|---|
+| `dot_product` | `_mm256_mul_ps` + `_mm256_add_ps`, 8 f32/iter |
+| `euclidean_distance_sq` | Fused sub+mul, 8 f32/iter |
+| `cosine_similarity` | 3 accumulators, 8 f32/iter |
+| `manhattan_distance` | `_mm256_andnot_ps` for abs |
+| `hamming_distance` | Mula's vectorized popcount (`pshufb` + SAD), 32 bytes/iter |
 
 On `no_std` or non-x86 targets, scalar code is structured for LLVM auto-vectorization.
 

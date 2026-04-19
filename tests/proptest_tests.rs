@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "wasi"))]
 //! Property-based tests using proptest for shodh-redb.
 //!
 //! These tests generate random inputs and verify invariants that must hold

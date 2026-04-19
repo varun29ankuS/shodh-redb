@@ -61,7 +61,7 @@ pub fn hash64_with_seed(data: &[u8], seed: u64) -> u64 {
     if data.len() <= 240 {
         hash64_0to240(data, &DEFAULT_SECRET, seed)
     } else {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
         {
             if is_x86_feature_detected!("avx2") {
                 // SAFETY: AVX2 availability is verified by the runtime check above.
@@ -94,7 +94,7 @@ pub fn hash128_with_seed(data: &[u8], seed: u64) -> u128 {
     if data.len() <= 240 {
         hash128_0to240(data, &DEFAULT_SECRET, seed)
     } else {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
         if is_x86_feature_detected!("avx2") {
             // SAFETY: AVX2 availability is verified by the runtime check above.
             // `hash128_large_avx2` is `#[target_feature(enable = "avx2")]` and

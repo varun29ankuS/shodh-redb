@@ -2903,6 +2903,27 @@ impl WriteTransaction {
                     }
                 },
             )?;
+        } else {
+            // Check whether any live read transactions hold references to system-tree
+            // pages (e.g. ReadTransaction::get_blob() via open_system_btree()). If so,
+            // defer freeing through SYSTEM_FREED_TABLE until those readers complete.
+            // If no readers exist, immediate freeing after commit is safe.
+            let has_live_readers = self
+                .transaction_tracker
+                .oldest_live_read_transaction()?
+                .is_some();
+            if has_live_readers {
+                let mut pagination_counter = 0;
+                self.store_system_freed_pages(
+                    system_tree,
+                    system_freed_pages.clone(),
+                    None,
+                    &mut pagination_counter,
+                )?;
+                // Pages have been deferred into SYSTEM_FREED_TABLE; drain the
+                // original list so the immediate-free loop below is a no-op.
+                system_freed_pages.lock().clear();
+            }
         }
 
         let system_root = system_tree.finalize_dirty_checksums()?;
@@ -2919,8 +2940,9 @@ impl WriteTransaction {
         self.transaction_tracker
             .clear_pending_non_durable_commits()?;
 
-        // Immediately free the pages that were freed from the system-tree. These are only
-        // accessed by write transactions, so it's safe to free them as soon as the commit is done.
+        // Free any remaining system-tree pages that were not deferred. This only
+        // happens when no live read transactions existed at commit time, making
+        // immediate freeing safe since no reader can reference these pages.
         for page in system_freed_pages.lock().drain(..) {
             self.mem.free(page, &mut PageTrackerPolicy::Ignore);
         }

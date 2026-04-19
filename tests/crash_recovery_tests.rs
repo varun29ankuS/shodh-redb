@@ -8,7 +8,7 @@
 //! Strategy:
 //! 1. Write known data and commit (establishes a consistent baseline)
 //! 2. Start a second write, trigger I/O failure mid-transaction
-//! 3. Reopen from the file — must recover the last committed state
+//! 3. Reopen from the file -- must recover the last committed state
 //! 4. Verify data matches the baseline, not the partial write
 
 use std::fmt;
@@ -36,9 +36,9 @@ fn create_tempfile() -> NamedTempFile {
 const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("crash_test");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("crash_u64");
 
-// ═══════════════════════════════════════════════════════════════════════
-// CountdownBackend — deterministic I/O failure injection
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// CountdownBackend -- deterministic I/O failure injection
+// =======================================================================
 
 struct CountdownBackend {
     inner: FileBackend,
@@ -156,9 +156,9 @@ fn verify_baseline(db: &Database, n: u64) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 // Basic crash recovery: fail during second commit
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 
 #[test]
 fn crash_during_second_commit_recovers_first() {
@@ -238,9 +238,9 @@ fn crash_during_second_commit_recovers_first() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 // Crash at various countdown points
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 
 #[test]
 fn crash_at_various_write_points() {
@@ -267,7 +267,7 @@ fn crash_at_various_write_points() {
 
         let open_result = Builder::new().create_with_backend(crash_backend);
         if let Ok(db) = open_result {
-            // Try writing — may fail at different points
+            // Try writing -- may fail at different points
             let _ = (|| -> Result<(), shodh_redb::Error> {
                 let txn = db.begin_write()?;
                 {
@@ -283,7 +283,7 @@ fn crash_at_various_write_points() {
             drop(db);
         }
 
-        // Verify recovery — baseline should still be intact OR the overwrite
+        // Verify recovery -- baseline should still be intact OR the overwrite
         // fully committed. Never a partial state.
         let db = Database::open(tmpfile.path()).unwrap();
         let report = db.verify_integrity(VerifyLevel::Pages).unwrap();
@@ -314,9 +314,9 @@ fn crash_at_various_write_points() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Crash during insert (before commit) — data must be discarded
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// Crash during insert (before commit) -- data must be discarded
+// =======================================================================
 
 #[test]
 fn crash_during_insert_before_commit() {
@@ -363,7 +363,7 @@ fn crash_during_insert_before_commit() {
                         }
                     }
                 }
-                // Intentionally do NOT commit — simulating crash before commit
+                // Intentionally do NOT commit -- simulating crash before commit
                 drop(txn);
             }
             drop(db);
@@ -389,9 +389,9 @@ fn crash_during_insert_before_commit() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 // Crash during delete
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 
 #[test]
 fn crash_during_delete_preserves_data() {
@@ -440,7 +440,7 @@ fn crash_during_delete_preserves_data() {
     let t = txn.open_table(TABLE).unwrap();
     let len = t.len().unwrap();
 
-    // Either all deletes committed or none — never partial
+    // Either all deletes committed or none -- never partial
     assert!(
         len == baseline_count || len == baseline_count - 150,
         "partial delete detected: got {len} rows, expected {baseline_count} or {}",
@@ -448,9 +448,9 @@ fn crash_during_delete_preserves_data() {
     );
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 // Multiple committed transactions, crash during N+1
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 
 #[test]
 fn multiple_commits_then_crash() {
@@ -525,9 +525,9 @@ fn multiple_commits_then_crash() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Durability::None crash — may lose last commit
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// Durability::None crash -- may lose last commit
+// =======================================================================
 
 #[test]
 fn eventual_durability_crash_recovery() {
@@ -567,9 +567,9 @@ fn eventual_durability_crash_recovery() {
     assert_eq!(t.len().unwrap(), 100);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 // Crash during blob store
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 
 #[test]
 fn crash_during_blob_store_recovers() {
@@ -642,9 +642,9 @@ fn crash_during_blob_store_recovers() {
     );
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Double-open after crash — no lock file issues
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// Double-open after crash -- no lock file issues
+// =======================================================================
 
 #[test]
 fn reopen_twice_after_crash() {
@@ -677,16 +677,16 @@ fn reopen_twice_after_crash() {
         drop(db);
     }
 
-    // Second reopen — should still work
+    // Second reopen -- should still work
     {
         let db = Database::open(tmpfile.path()).unwrap();
         verify_baseline(&db, 100);
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 // Crash during compaction
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 
 #[test]
 fn crash_during_compaction_recovers() {
@@ -750,9 +750,9 @@ fn crash_during_compaction_recovers() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Empty database crash — must still open cleanly
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// Empty database crash -- must still open cleanly
+// =======================================================================
 
 #[test]
 fn crash_on_empty_db_recovers() {

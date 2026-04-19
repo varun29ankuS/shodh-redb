@@ -1170,6 +1170,12 @@ fn regression22() {
 
     drop(read_txn);
 
+    // Extra commit to process deferred system freed pages. The MVCC-safe
+    // durable_commit defers system-tree page freeing while readers are active
+    // (they may traverse system btree pages via open_system_btree). Once the
+    // reader is gone, this commit reclaims those pages.
+    db.begin_write().unwrap().commit().unwrap();
+
     let txn = db.begin_write().unwrap();
     assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());
 }

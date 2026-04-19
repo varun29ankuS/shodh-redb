@@ -15,9 +15,9 @@ use shodh_redb::{
     ReadableDatabase, ReadableTableMetadata, StoreOptions, TableDefinition,
 };
 
-// ═══════════════════════════════════════════════════════════════════════
-// Distance functions — portable scalar paths
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// Distance functions -- portable scalar paths
+// =======================================================================
 
 #[test]
 fn dot_product_basic() {
@@ -153,9 +153,9 @@ fn hamming_distance_large() {
     assert_eq!(shodh_redb::hamming_distance(&a, &b), 384 * 8);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// DistanceMetric enum — dispatch layer
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// DistanceMetric enum -- dispatch layer
+// =======================================================================
 
 #[test]
 fn distance_metric_cosine() {
@@ -190,9 +190,9 @@ fn distance_metric_manhattan() {
     assert!((d - 7.0).abs() < 1e-5);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// l2_norm and l2_normalize — portable sqrt_f32 path
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// l2_norm and l2_normalize -- portable sqrt_f32 path
+// =======================================================================
 
 #[test]
 fn l2_norm_unit_vector() {
@@ -236,9 +236,9 @@ fn l2_normalized_preserves_direction() {
     assert!(n[2].abs() < 1e-5);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Quantization — binary and scalar
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// Quantization -- binary and scalar
+// =======================================================================
 
 #[test]
 fn quantize_binary_positive_bits() {
@@ -279,7 +279,7 @@ fn quantize_scalar_roundtrip() {
     let original: [f32; 4] = [0.0, 0.5, 1.0, -1.0];
     let sq = shodh_redb::quantize_scalar(&original);
     let recovered = shodh_redb::dequantize_scalar(&sq);
-    // Scalar quantization is lossy — check within tolerance
+    // Scalar quantization is lossy -- check within tolerance
     for (o, r) in original.iter().zip(recovered.iter()) {
         assert!((o - r).abs() < 0.02, "expected ~{o}, got {r}");
     }
@@ -323,9 +323,9 @@ fn sq_dot_product_basic() {
     assert!((dot - 5.0).abs() < 0.5, "dot was {dot}");
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// f32 LE serialization — write_f32_le / read_f32_le
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// f32 LE serialization -- write_f32_le / read_f32_le
+// =======================================================================
 
 #[test]
 fn f32_le_roundtrip() {
@@ -364,9 +364,9 @@ fn f32_le_special_values() {
     assert_eq!(recovered[1], f32::NEG_INFINITY);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// nearest_k — brute-force top-k search
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// nearest_k -- brute-force top-k search
+// =======================================================================
 
 #[test]
 fn nearest_k_basic() {
@@ -444,9 +444,9 @@ fn nearest_k_fixed_basic() {
     assert_eq!(results[0].key, 0);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Vector types — FixedVec, DynVec, BinaryQuantized
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// Vector types -- FixedVec, DynVec, BinaryQuantized
+// =======================================================================
 
 const VEC_TABLE: TableDefinition<u64, FixedVec<4>> = TableDefinition::new("nostd_fixedvec");
 const DYN_TABLE: TableDefinition<u64, DynVec> = TableDefinition::new("nostd_dynvec");
@@ -495,9 +495,9 @@ fn dynvec_store_retrieve() {
     assert!((data[0] - 0.5).abs() < 1e-5);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// InMemoryBackend — core DB operations without filesystem
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
+// InMemoryBackend -- core DB operations without filesystem
+// =======================================================================
 
 const MEM_KV: TableDefinition<&str, u64> = TableDefinition::new("mem_kv");
 const MEM_MM: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("mem_mm");
@@ -801,9 +801,9 @@ fn inmemory_drain_all() {
     txn.commit().unwrap();
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 // Numerical edge cases for distance functions
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 
 #[test]
 fn dot_product_subnormal() {
@@ -827,7 +827,7 @@ fn cosine_similarity_near_zero_norm() {
     let a = [1e-20f32; 4];
     let b = [1.0f32; 4];
     let result = shodh_redb::cosine_similarity(&a, &b);
-    // Should handle gracefully — either near 0, near 1, or NaN
+    // Should handle gracefully -- either near 0, near 1, or NaN
     let _ = result;
 }
 
@@ -848,9 +848,9 @@ fn hamming_distance_unequal_lengths() {
     assert_eq!(result, 40); // 5 bytes * 8 bits
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 // Quantization edge cases
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 
 #[test]
 fn quantize_scalar_single_element() {
@@ -884,9 +884,9 @@ fn quantize_binary_single_dim() {
     assert_ne!(bits[0], 0);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 // InMemoryBackend edge cases
-// ═══════════════════════════════════════════════════════════════════════
+// =======================================================================
 
 #[test]
 fn inmemory_empty_db_list_tables() {

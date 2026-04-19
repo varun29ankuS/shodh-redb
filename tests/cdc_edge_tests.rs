@@ -685,7 +685,7 @@ fn cdc_read_from_read_txn() {
     let read_txn = db.begin_read().unwrap();
     let snapshot_changes = read_txn.read_cdc_since(0).unwrap();
     assert_eq!(snapshot_changes.len(), 2);
-    let snapshot_latest = read_txn.latest_cdc_transaction_id().unwrap().unwrap();
+    let _snapshot_latest = read_txn.latest_cdc_transaction_id().unwrap().unwrap();
 
     // Write a 3rd transaction AFTER the read snapshot was taken
     let txn = db.begin_write().unwrap();

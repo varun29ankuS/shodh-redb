@@ -1017,6 +1017,10 @@ impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
     }
 }
 
+/// Function pointer type for comparing serialized keys.
+#[cfg(feature = "std")]
+type KeyComparator = fn(&[u8], &[u8]) -> core::cmp::Ordering;
+
 pub(crate) struct RawBtree {
     mem: Arc<TransactionalMemory>,
     root: Option<BtreeHeader>,
@@ -1209,17 +1213,30 @@ impl RawBtree {
     }
 
     /// Verifies B-tree structural invariants:
-    /// - Keys in each leaf are sorted (byte-order comparison)
     /// - Branch child pointers reference valid page types (LEAF or BRANCH)
     /// - All paths from root to leaf have the same depth
+    /// - When a key comparator is provided, verifies leaf keys are in sorted order
+    ///
+    /// The `key_cmp` parameter is needed because keys may use a custom sort order
+    /// (e.g. little-endian integers where byte-order != numeric order). Without a
+    /// comparator, key ordering checks are skipped.
     ///
     /// Returns corruption details for any violations found.
     #[cfg(feature = "std")]
-    pub(crate) fn verify_structure(&self) -> Result<Vec<CorruptPageInfo>> {
+    pub(crate) fn verify_structure(
+        &self,
+        key_cmp: Option<KeyComparator>,
+    ) -> Result<Vec<CorruptPageInfo>> {
         let mut corruptions = Vec::new();
         if let Some(header) = self.root {
             let expected_depth = self.measure_depth(header.root)?;
-            self.verify_structure_helper(header.root, 0, expected_depth, &mut corruptions)?;
+            self.verify_structure_helper(
+                header.root,
+                0,
+                expected_depth,
+                key_cmp,
+                &mut corruptions,
+            )?;
         }
         Ok(corruptions)
     }
@@ -1244,6 +1261,7 @@ impl RawBtree {
         page_number: PageNumber,
         current_depth: u32,
         expected_depth: u32,
+        key_cmp: Option<KeyComparator>,
         corruptions: &mut Vec<CorruptPageInfo>,
     ) -> Result {
         let page = self.mem.get_page(page_number)?;
@@ -1260,22 +1278,25 @@ impl RawBtree {
                         ),
                     });
                 }
-                let accessor =
-                    LeafAccessor::new(node_mem, self.fixed_key_size, self.fixed_value_size)?;
-                let num = accessor.num_pairs();
-                for i in 1..num {
-                    if let (Some(prev), Some(curr)) = (accessor.entry(i - 1), accessor.entry(i))
-                        && prev.key() >= curr.key()
-                    {
-                        corruptions.push(CorruptPageInfo {
-                            page_number: u64::from_le_bytes(page_number.to_le_bytes()),
-                            table_name: None,
-                            description: format!(
-                                "leaf keys not sorted at index {i} (key[{}] >= key[{i}])",
-                                i - 1
-                            ),
-                        });
-                        break;
+                if let Some(cmp) = key_cmp {
+                    let accessor =
+                        LeafAccessor::new(node_mem, self.fixed_key_size, self.fixed_value_size)?;
+                    let num = accessor.num_pairs();
+                    for i in 1..num {
+                        if let (Some(prev), Some(curr)) =
+                            (accessor.entry(i - 1), accessor.entry(i))
+                            && cmp(prev.key(), curr.key()) != core::cmp::Ordering::Less
+                        {
+                            corruptions.push(CorruptPageInfo {
+                                page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                                table_name: None,
+                                description: format!(
+                                    "leaf keys not sorted at index {i} (key[{}] >= key[{i}])",
+                                    i - 1
+                                ),
+                            });
+                            break;
+                        }
                     }
                 }
             }
@@ -1297,6 +1318,7 @@ impl RawBtree {
                             child,
                             current_depth + 1,
                             expected_depth,
+                            key_cmp,
                             corruptions,
                         )?;
                     } else {
@@ -1323,9 +1345,13 @@ impl RawBtree {
 
 pub(crate) struct Btree<K: Key + 'static, V: Value + 'static> {
     mem: Arc<TransactionalMemory>,
-    transaction_guard: Arc<TransactionGuard>,
-    // Cache of the root page to avoid repeated lookups
+    // Cache of the root page to avoid repeated lookups.
+    // IMPORTANT: This field MUST be declared before transaction_guard so that
+    // Rust's drop order (declaration order) releases page references before
+    // the transaction is deallocated. Otherwise, a concurrent writer can free
+    // pages that this reader still holds via PageImpl references.
     cached_root: Option<PageImpl>,
+    transaction_guard: Arc<TransactionGuard>,
     root: Option<BtreeHeader>,
     hint: PageHint,
     compression_override: Option<CompressionConfig>,
@@ -1452,7 +1478,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             self.value_width(),
             self.mem.clone(),
         )
-        .verify_structure()
+        .verify_structure(Some(K::compare))
     }
 
     pub(crate) fn visit_all_pages<F>(&self, visitor: F) -> Result

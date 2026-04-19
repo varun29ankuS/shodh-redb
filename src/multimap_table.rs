@@ -267,7 +267,7 @@ pub(crate) fn verify_tree_and_subtree_structure(
             DynamicCollection::<()>::fixed_width_with(value_size),
             mem.clone(),
         );
-        all_corruptions.extend(tree.verify_structure()?);
+        all_corruptions.extend(tree.verify_structure(None)?);
 
         let table_pages_iter = AllPageNumbersBtreeIter::new(
             header.root,
@@ -285,7 +285,7 @@ pub(crate) fn verify_tree_and_subtree_structure(
                     <()>::fixed_width(),
                     mem.clone(),
                 );
-                all_corruptions.extend(sub_tree.verify_structure()?);
+                all_corruptions.extend(sub_tree.verify_structure(None)?);
             }
         }
     }

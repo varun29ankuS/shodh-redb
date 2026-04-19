@@ -2,6 +2,8 @@
 //!
 //! Uses Durability::None to isolate B-tree performance from fsync noise.
 
+use std::time::Duration;
+
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use shodh_redb::{Database, Durability, ReadableDatabase, TableDefinition};
 use tempfile::NamedTempFile;
@@ -46,6 +48,9 @@ fn create_populated_db(n: u64) -> (NamedTempFile, Database) {
 
 fn bench_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("kv/insert");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
+    group.warm_up_time(Duration::from_secs(3));
     for &n in &[100u64, 1_000, 10_000] {
         group.throughput(Throughput::Elements(n));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
@@ -85,6 +90,9 @@ fn bench_get(c: &mut Criterion) {
     let (_f, db) = create_populated_db(10_000);
 
     let mut group = c.benchmark_group("kv/get");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(100);
+    group.warm_up_time(Duration::from_secs(3));
     group.throughput(Throughput::Elements(1));
     group.bench_function("random_get_10k", |b| {
         let mut key = 0u64;
@@ -106,6 +114,9 @@ fn bench_range_scan(c: &mut Criterion) {
     let (_f, db) = create_populated_db(10_000);
 
     let mut group = c.benchmark_group("kv/range_scan");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(100);
+    group.warm_up_time(Duration::from_secs(3));
     group.throughput(Throughput::Elements(100));
     group.bench_function("scan_100_from_10k", |b| {
         let mut start = 0u64;

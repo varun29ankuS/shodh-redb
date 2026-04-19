@@ -11,13 +11,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  bench:
-    name: Criterion Benchmarks
+  # ──────────────────────────────────────────────────────────────────
+  # GATE: Pure-compute benchmarks (vector_ops)
+  #
+  # These are deterministic, CPU-bound workloads with low variance on
+  # shared runners. Criterion runs a Welch t-test on 100 samples with
+  # 5s measurement time per benchmark. A regression that Criterion's
+  # statistics flag as significant will fail the build.
+  # ──────────────────────────────────────────────────────────────────
+  bench-gate:
+    name: Performance Gate (vector ops)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache
+      - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
@@ -26,35 +34,110 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: bench-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          restore-keys: bench-${{ runner.os }}-
+          key: bench-gate-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: bench-gate-${{ runner.os }}-
 
       - name: Install Rust
         run: rustup component add rustfmt
 
-      - name: Run Criterion benchmarks
+      # Restore saved Criterion baseline (full statistical data, not a single number).
+      # Only on PRs — master pushes create fresh baselines.
+      - name: Restore Criterion baseline
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ runner.os }}
+
+      # On PRs: compare against saved baseline.
+      # On master: save a new baseline (no comparison).
+      - name: Run vector_ops benchmarks
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Compare against baseline. Criterion prints "regressed" for
+            # benchmarks that fail its t-test at 95% confidence + 5% noise threshold.
+            cargo bench --bench criterion_vector_ops -p shodh-redb \
+              -- --baseline master 2>&1 | tee bench_gate_output.txt
+
+            # Fail if Criterion detected a statistically significant regression.
+            if grep -q "regressed" bench_gate_output.txt; then
+              echo ""
+              echo "============================================================"
+              echo "REGRESSION DETECTED in vector_ops benchmarks."
+              echo "Criterion's Welch t-test (95% confidence, 5% noise threshold)"
+              echo "found a statistically significant performance regression."
+              echo "============================================================"
+              echo ""
+              grep -B2 "regressed" bench_gate_output.txt
+              exit 1
+            fi
+          else
+            # Master push: save baseline for future PR comparisons.
+            cargo bench --bench criterion_vector_ops -p shodh-redb \
+              -- --save-baseline master
+          fi
+        env:
+          RUSTFLAGS: ""
+
+      # Save Criterion baseline data on master pushes.
+      - name: Save Criterion baseline
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v4
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ runner.os }}
+
+  # ──────────────────────────────────────────────────────────────────
+  # ADVISORY: I/O-bound benchmarks (kv, blob, ivfpq)
+  #
+  # These involve disk writes, file creation, and memory allocation.
+  # Shared GitHub Actions runners introduce 30-50% wall-time variance
+  # on I/O workloads, making hard gates unreliable. Instead, we post
+  # an advisory comment on PRs with benchmark-action (15% comment
+  # threshold) and NEVER fail CI.
+  # ──────────────────────────────────────────────────────────────────
+  bench-report:
+    name: Benchmark Report (I/O)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: bench-report-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: bench-report-${{ runner.os }}-
+
+      - name: Install Rust
+        run: rustup component add rustfmt
+
+      - name: Run I/O benchmarks
         run: |
           cargo bench --bench criterion_kv \
                       --bench criterion_blob \
-                      --bench criterion_vector_ops \
                       --bench criterion_ivfpq \
                       -p shodh-redb \
                       -- --output-format bencher 2>/dev/null | grep "^test " | tee bench_output.txt
         env:
           RUSTFLAGS: ""
 
-      - name: Restore baseline
+      - name: Restore advisory baseline
         if: github.event_name == 'pull_request'
         uses: actions/cache/restore@v4
         with:
           path: .bench_baseline.json
-          key: bench-baseline-${{ runner.os }}
-          restore-keys: bench-baseline-${{ runner.os }}
+          key: bench-advisory-baseline-${{ runner.os }}
 
-      - name: Benchmark comparison
+      - name: Post benchmark comparison
         uses: benchmark-action/github-action-benchmark@v1
         with:
-          name: shodh-redb benchmarks
+          name: shodh-redb I/O benchmarks (advisory)
           tool: cargo
           output-file-path: bench_output.txt
           external-data-json-path: .bench_baseline.json
@@ -62,14 +145,14 @@ jobs:
           auto-push: false
           comment-on-alert: true
           alert-threshold: "115%"
-          fail-on-alert: true
-          fail-threshold: "150%"
+          # Advisory only — never fail CI on I/O benchmarks.
+          fail-on-alert: false
           comment-always: ${{ github.event_name == 'pull_request' }}
           alert-comment-cc-users: "@varun29ankuS"
 
-      - name: Save baseline
+      - name: Save advisory baseline
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         uses: actions/cache/save@v4
         with:
           path: .bench_baseline.json
-          key: bench-baseline-${{ runner.os }}
+          key: bench-advisory-baseline-${{ runner.os }}

@@ -3,6 +3,8 @@
 //! Training is done in setup (outside the timed region) since it is a one-time
 //! cost, not the hot path we want to gate on.
 
+use std::time::Duration;
+
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use shodh_redb::{Database, DistanceMetric, IvfPqIndexDefinition, ReadableDatabase, SearchParams};
 use tempfile::NamedTempFile;
@@ -55,6 +57,9 @@ fn create_trained_db() -> (NamedTempFile, Database) {
 fn bench_insert_batch(c: &mut Criterion) {
     let dim = DIM as usize;
     let mut group = c.benchmark_group("ivfpq/insert_batch");
+    group.measurement_time(Duration::from_secs(15));
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(3));
 
     for &n in &[10u64, 100, 1000] {
         let vectors: Vec<(u64, Vec<f32>)> = (0..n)
@@ -103,6 +108,9 @@ fn bench_search(c: &mut Criterion) {
     let params = SearchParams::top_k(10);
 
     let mut group = c.benchmark_group("ivfpq/search");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
+    group.warm_up_time(Duration::from_secs(3));
     group.bench_function("search_500vecs_k10", |b| {
         b.iter(|| {
             let rtxn = db.begin_read().unwrap();

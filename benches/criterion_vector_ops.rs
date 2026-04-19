@@ -3,6 +3,8 @@
 //! Ported from crates/redb-bench/benches/vector_ops_benchmark.rs into Criterion
 //! for statistical regression detection in CI.
 
+use std::time::Duration;
+
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use shodh_redb::{
     DistanceMetric, cosine_distance, cosine_similarity, dot_product, euclidean_distance_sq,
@@ -254,20 +256,34 @@ fn bench_nearest_k(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_dot_product,
-    bench_euclidean,
-    bench_cosine_similarity,
-    bench_cosine_distance,
-    bench_manhattan,
-    bench_hamming,
-    bench_metric_dispatch,
-    bench_l2_norm,
-    bench_l2_normalize,
-    bench_quantize_binary,
-    bench_quantize_scalar,
-    bench_sq_euclidean,
-    bench_nearest_k,
-);
+fn criterion_config() -> Criterion {
+    Criterion::default()
+        // 95% confidence interval for Welch's t-test
+        .confidence_level(0.95)
+        // Ignore differences below 5% (shared runner noise floor)
+        .noise_threshold(0.05)
+        // 5s per benchmark for reliable sample distribution
+        .measurement_time(Duration::from_secs(5))
+        .sample_size(100)
+        .warm_up_time(Duration::from_secs(2))
+}
+
+criterion_group! {
+    name = benches;
+    config = criterion_config();
+    targets =
+        bench_dot_product,
+        bench_euclidean,
+        bench_cosine_similarity,
+        bench_cosine_distance,
+        bench_manhattan,
+        bench_hamming,
+        bench_metric_dispatch,
+        bench_l2_norm,
+        bench_l2_normalize,
+        bench_quantize_binary,
+        bench_quantize_scalar,
+        bench_sq_euclidean,
+        bench_nearest_k,
+}
 criterion_main!(benches);

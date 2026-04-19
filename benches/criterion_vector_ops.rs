@@ -3,9 +3,7 @@
 //! Ported from crates/redb-bench/benches/vector_ops_benchmark.rs into Criterion
 //! for statistical regression detection in CI.
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use shodh_redb::{
     DistanceMetric, cosine_distance, cosine_similarity, dot_product, euclidean_distance_sq,
     hamming_distance, l2_norm, l2_normalize, manhattan_distance, nearest_k, quantize_binary,
@@ -245,17 +243,13 @@ fn bench_nearest_k(c: &mut Criterion) {
             .collect();
         let q = query.clone();
         group.throughput(Throughput::Elements(n));
-        group.bench_with_input(
-            BenchmarkId::new("cosine_k10", n),
-            &n,
-            |bench, _| {
-                bench.iter_batched(
-                    || (db.clone(), q.clone()),
-                    |(db, q)| nearest_k(db.into_iter(), &q, 10, cosine_distance),
-                    BatchSize::LargeInput,
-                );
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("cosine_k10", n), &n, |bench, _| {
+            bench.iter_batched(
+                || (db.clone(), q.clone()),
+                |(db, q)| nearest_k(db.into_iter(), &q, 10, cosine_distance),
+                BatchSize::LargeInput,
+            );
+        });
     }
     group.finish();
 }

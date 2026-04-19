@@ -1,8 +1,6 @@
 //! Criterion benchmarks for blob store operations: store and read.
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use shodh_redb::{ContentType, Database, ReadableDatabase, StoreOptions};
 use tempfile::NamedTempFile;
 
@@ -15,11 +13,7 @@ fn make_blob_data(size: usize) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 fn bench_store_blob(c: &mut Criterion) {
-    let sizes: &[(usize, &str)] = &[
-        (1024, "1KiB"),
-        (64 * 1024, "64KiB"),
-        (1024 * 1024, "1MiB"),
-    ];
+    let sizes: &[(usize, &str)] = &[(1024, "1KiB"), (64 * 1024, "64KiB"), (1024 * 1024, "1MiB")];
     let mut group = c.benchmark_group("blob/store");
     for &(size, label) in sizes {
         let data = make_blob_data(size);
@@ -58,11 +52,7 @@ fn bench_store_blob(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_get_blob(c: &mut Criterion) {
-    let sizes: &[(usize, &str)] = &[
-        (1024, "1KiB"),
-        (64 * 1024, "64KiB"),
-        (1024 * 1024, "1MiB"),
-    ];
+    let sizes: &[(usize, &str)] = &[(1024, "1KiB"), (64 * 1024, "64KiB"), (1024 * 1024, "1MiB")];
     let mut group = c.benchmark_group("blob/get");
     for &(size, label) in sizes {
         let data = make_blob_data(size);

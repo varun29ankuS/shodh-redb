@@ -2,9 +2,7 @@
 //!
 //! Uses Durability::None to isolate B-tree performance from fsync noise.
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use shodh_redb::{Database, Durability, ReadableDatabase, TableDefinition};
 use tempfile::NamedTempFile;
 
@@ -15,7 +13,9 @@ fn make_value(seed: u64) -> [u8; VALUE_SIZE] {
     let mut buf = [0u8; VALUE_SIZE];
     let mut state = seed;
     for b in buf.iter_mut() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (state >> 33) as u8;
     }
     buf

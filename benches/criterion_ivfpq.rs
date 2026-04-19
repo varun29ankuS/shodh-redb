@@ -3,9 +3,7 @@
 //! Training is done in setup (outside the timed region) since it is a one-time
 //! cost, not the hot path we want to gate on.
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use shodh_redb::{Database, DistanceMetric, IvfPqIndexDefinition, ReadableDatabase, SearchParams};
 use tempfile::NamedTempFile;
 
@@ -23,7 +21,14 @@ const INDEX_DEF: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
 
 fn make_vector(id: u64, dim: usize) -> Vec<f32> {
     (0..dim)
-        .map(|j| ((id.wrapping_mul(7).wrapping_add(j as u64 * 11).wrapping_add(13)) % 1000) as f32 * 0.001 - 0.5)
+        .map(|j| {
+            ((id.wrapping_mul(7)
+                .wrapping_add(j as u64 * 11)
+                .wrapping_add(13))
+                % 1000) as f32
+                * 0.001
+                - 0.5
+        })
         .collect()
 }
 
@@ -34,9 +39,8 @@ fn create_trained_db() -> (NamedTempFile, Database) {
     {
         let txn = db.begin_write().unwrap();
         let mut idx = txn.open_ivfpq_index(&INDEX_DEF).unwrap();
-        let training: Vec<(u64, Vec<f32>)> = (0..200u64)
-            .map(|id| (id, make_vector(id, dim)))
-            .collect();
+        let training: Vec<(u64, Vec<f32>)> =
+            (0..200u64).map(|id| (id, make_vector(id, dim))).collect();
         idx.train(training.into_iter(), 10).unwrap();
         drop(idx);
         txn.commit().unwrap();
@@ -89,9 +93,7 @@ fn bench_search(c: &mut Criterion) {
     {
         let txn = db.begin_write().unwrap();
         let mut idx = txn.open_ivfpq_index(&INDEX_DEF).unwrap();
-        let vecs: Vec<(u64, Vec<f32>)> = (0..500u64)
-            .map(|id| (id, make_vector(id, dim)))
-            .collect();
+        let vecs: Vec<(u64, Vec<f32>)> = (0..500u64).map(|id| (id, make_vector(id, dim))).collect();
         idx.insert_batch(vecs.into_iter()).unwrap();
         drop(idx);
         txn.commit().unwrap();

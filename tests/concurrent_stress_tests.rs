@@ -33,9 +33,7 @@ fn assert_checksums(db: &Database) {
     assert!(
         report.valid,
         "integrity check failed: {} pages corrupt, structural_valid={:?}, details={:?}",
-        report.pages_corrupt,
-        report.structural_valid,
-        report.corrupt_details,
+        report.pages_corrupt, report.structural_valid, report.corrupt_details,
     );
 }
 
@@ -406,7 +404,12 @@ fn concurrent_blob_read_write() {
     for i in 0..20u64 {
         let data = vec![i as u8; 1024];
         let id = txn
-            .store_blob(&data, ContentType::OctetStream, "test", StoreOptions::default())
+            .store_blob(
+                &data,
+                ContentType::OctetStream,
+                "test",
+                StoreOptions::default(),
+            )
             .unwrap();
         blob_ids.push(id);
     }
@@ -449,8 +452,13 @@ fn concurrent_blob_read_write() {
         for i in 20..40u64 {
             let txn = writer_db.begin_write().unwrap();
             let data = vec![i as u8; 1024];
-            txn.store_blob(&data, ContentType::OctetStream, "new", StoreOptions::default())
-                .unwrap();
+            txn.store_blob(
+                &data,
+                ContentType::OctetStream,
+                "new",
+                StoreOptions::default(),
+            )
+            .unwrap();
             txn.commit().unwrap();
         }
     });

@@ -4,8 +4,8 @@
 //! blob writer lifecycle errors, and tight-budget degradation scenarios.
 
 use shodh_redb::{
-    BlobId, ContentType, Database, ReadableDatabase, ReadableTableMetadata, StoreOptions,
-    StorageError, TableDefinition,
+    BlobId, ContentType, Database, ReadableDatabase, ReadableTableMetadata, StorageError,
+    StoreOptions, TableDefinition,
 };
 use tempfile::NamedTempFile;
 
@@ -261,9 +261,7 @@ fn small_budget_heavy_writes_trigger_eviction() {
         {
             let mut table = txn.open_table(TABLE).unwrap();
             for i in 0..100u64 {
-                table
-                    .insert(&(batch * 100 + i), value.as_slice())
-                    .unwrap();
+                table.insert(&(batch * 100 + i), value.as_slice()).unwrap();
             }
         }
         txn.commit().unwrap();

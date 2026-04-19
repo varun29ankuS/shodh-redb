@@ -60,6 +60,23 @@ redb2_6 = { version = "=2.6.0", package = "redb" }
 bincode = "2.0.1"
 uuid = { version= "1.17.0", features = ["v4"] }
 shodh-redb-derive = { version = "0.1.0", path = "./crates/redb-derive" }
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "criterion_kv"
+harness = false
+
+[[bench]]
+name = "criterion_blob"
+harness = false
+
+[[bench]]
+name = "criterion_vector_ops"
+harness = false
+
+[[bench]]
+name = "criterion_ivfpq"
+harness = false
 
 [features]
 default = ["std"]

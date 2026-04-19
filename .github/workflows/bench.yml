@@ -1,0 +1,75 @@
+name: Benchmarks
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: Criterion Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: bench-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: bench-${{ runner.os }}-
+
+      - name: Install Rust
+        run: rustup component add rustfmt
+
+      - name: Run Criterion benchmarks
+        run: |
+          cargo bench --bench criterion_kv \
+                      --bench criterion_blob \
+                      --bench criterion_vector_ops \
+                      --bench criterion_ivfpq \
+                      -p shodh-redb \
+                      -- --output-format bencher 2>/dev/null | grep "^test " | tee bench_output.txt
+        env:
+          RUSTFLAGS: ""
+
+      - name: Restore baseline
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: .bench_baseline.json
+          key: bench-baseline-${{ runner.os }}
+          restore-keys: bench-baseline-${{ runner.os }}
+
+      - name: Benchmark comparison
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: shodh-redb benchmarks
+          tool: cargo
+          output-file-path: bench_output.txt
+          external-data-json-path: .bench_baseline.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: false
+          comment-on-alert: true
+          alert-threshold: "115%"
+          fail-on-alert: true
+          fail-threshold: "150%"
+          comment-always: ${{ github.event_name == 'pull_request' }}
+          alert-comment-cc-users: "@varun29ankuS"
+
+      - name: Save baseline
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v4
+        with:
+          path: .bench_baseline.json
+          key: bench-baseline-${{ runner.os }}

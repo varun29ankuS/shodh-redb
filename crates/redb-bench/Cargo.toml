@@ -73,3 +73,7 @@ harness = false
 [[bench]]
 name = "recall_benchmark"
 harness = false
+
+[[bench]]
+name = "blob_benchmark"
+harness = false

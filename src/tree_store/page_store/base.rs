@@ -1,6 +1,4 @@
-use crate::compat::HashSet;
-#[cfg(debug_assertions)]
-use crate::compat::{HashMap, Mutex};
+use crate::compat::{HashMap, HashSet, Mutex};
 use crate::tree_store::page_store::cached_file::WritablePage;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use alloc::sync::Arc;
@@ -106,7 +104,11 @@ impl PageNumber {
         } else {
             order
         };
-        let index = u32::try_from(temp & (0x000F_FFFF >> order)).unwrap();
+        // The mask is at most 20 bits (0x000F_FFFF) shifted right by order,
+        // so the result always fits in u32.
+        #[allow(clippy::cast_possible_truncation)]
+        let index = (temp & (0x000F_FFFF >> order)) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let region = ((temp >> 20) & 0x000F_FFFF) as u32;
 
         Self {
@@ -189,7 +191,6 @@ pub(crate) trait Page {
 pub struct PageImpl {
     pub(super) mem: Arc<[u8]>,
     pub(super) page_number: PageNumber,
-    #[cfg(debug_assertions)]
     pub(super) open_pages: Arc<Mutex<HashMap<PageNumber, u64>>>,
 }
 
@@ -205,15 +206,15 @@ impl Debug for PageImpl {
     }
 }
 
-#[cfg(debug_assertions)]
 impl Drop for PageImpl {
     fn drop(&mut self) {
         let mut open_pages = self.open_pages.lock();
-        let value = open_pages.get_mut(&self.page_number).unwrap();
-        assert!(*value > 0);
-        *value -= 1;
-        if *value == 0 {
-            open_pages.remove(&self.page_number);
+        if let Some(value) = open_pages.get_mut(&self.page_number) {
+            debug_assert!(*value > 0);
+            *value -= 1;
+            if *value == 0 {
+                open_pages.remove(&self.page_number);
+            }
         }
     }
 }
@@ -230,14 +231,14 @@ impl Page for PageImpl {
 
 impl Clone for PageImpl {
     fn clone(&self) -> Self {
-        #[cfg(debug_assertions)]
-        {
-            *self.open_pages.lock().get_mut(&self.page_number).unwrap() += 1;
-        }
+        *self
+            .open_pages
+            .lock()
+            .entry(self.page_number)
+            .or_insert(0) += 1;
         Self {
             mem: self.mem.clone(),
             page_number: self.page_number,
-            #[cfg(debug_assertions)]
             open_pages: self.open_pages.clone(),
         }
     }

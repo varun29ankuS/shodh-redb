@@ -48,27 +48,38 @@ impl BlockMap {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    fn from_bytes(data: &[u8], physical_blocks: u32) -> Self {
+    fn from_bytes(
+        data: &[u8],
+        physical_blocks: u32,
+    ) -> core::result::Result<Self, &'static str> {
+        if data.len() % 4 != 0 {
+            return Err("block map length not a multiple of 4");
+        }
         let logical_count = data.len() / 4;
         let mut forward = Vec::with_capacity(logical_count);
         for i in 0..logical_count {
             let off = i * 4;
-            if off + 4 <= data.len() {
-                forward.push(u32::from_le_bytes([
-                    data[off],
-                    data[off + 1],
-                    data[off + 2],
-                    data[off + 3],
-                ]));
-            }
+            forward.push(u32::from_le_bytes([
+                data[off],
+                data[off + 1],
+                data[off + 2],
+                data[off + 3],
+            ]));
         }
 
-        // Rebuild reverse map and free list
+        // Rebuild reverse map and free list, detecting duplicates
         let mut reverse = vec![UNMAPPED; physical_blocks as usize];
         for (logical, &physical) in forward.iter().enumerate() {
-            if physical != UNMAPPED && (physical as usize) < reverse.len() {
-                reverse[physical as usize] = logical as u32;
+            if physical == UNMAPPED {
+                continue;
             }
+            if (physical as usize) >= reverse.len() {
+                return Err("physical block index out of range");
+            }
+            if reverse[physical as usize] != UNMAPPED {
+                return Err("duplicate physical block mapping");
+            }
+            reverse[physical as usize] = logical as u32;
         }
 
         let mut free_list = Vec::new();
@@ -78,11 +89,17 @@ impl BlockMap {
             }
         }
 
-        Self {
+        // Integrity check: mapped + free == total physical blocks
+        let mapped = reverse.iter().filter(|&&r| r != UNMAPPED).count() as u32;
+        if mapped + free_list.len() as u32 != physical_blocks {
+            return Err("block map integrity check failed: mapped + free != total");
+        }
+
+        Ok(Self {
             forward,
             reverse,
             free_list,
-        }
+        })
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -170,16 +187,33 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
     /// Validate that flash geometry has no zero-valued fields that would cause
     /// division-by-zero or infinite loops.
     fn validate_geometry(geo: &FlashGeometry) -> core::result::Result<(), BackendError> {
-        if geo.write_page_size == 0 || geo.erase_block_size == 0 || geo.total_blocks == 0 {
+        let err = |msg: &str| -> BackendError {
             #[cfg(feature = "std")]
-            return Err(BackendError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "invalid flash geometry: zero-valued field",
-            )));
+            {
+                BackendError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    alloc::format!("invalid flash geometry: {msg}"),
+                ))
+            }
             #[cfg(not(feature = "std"))]
-            return Err(BackendError::Message(String::from(
-                "invalid flash geometry: zero-valued field",
-            )));
+            {
+                BackendError::Message(alloc::format!("invalid flash geometry: {msg}"))
+            }
+        };
+
+        if geo.write_page_size == 0 || geo.erase_block_size == 0 || geo.total_blocks == 0 {
+            return Err(err("zero-valued field"));
+        }
+        if !geo.erase_block_size.is_power_of_two() {
+            return Err(err("erase_block_size must be a power of two"));
+        }
+        if geo.erase_block_size % geo.write_page_size != 0 {
+            return Err(err("erase_block_size must be a multiple of write_page_size"));
+        }
+        if geo.logical_block_count() == 0 {
+            return Err(err(
+                "total_blocks too small for reserved + COW headroom + data",
+            ));
         }
         Ok(())
     }
@@ -657,6 +691,20 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             .erase_counts
             .pick_lowest(&global_free)
             .unwrap_or(global_free[0]);
+
+        // Reject blocks that have exceeded the device's rated erase cycle limit.
+        let max_cycles = state.geometry.max_erase_cycles;
+        if max_cycles > 0 && state.erase_counts.get(best_global) >= max_cycles {
+            #[cfg(feature = "std")]
+            return Err(BackendError::Io(std::io::Error::other(
+                "flash device worn out: all free blocks exceed max erase cycles",
+            )));
+            #[cfg(not(feature = "std"))]
+            return Err(BackendError::Message(String::from(
+                "flash device worn out: all free blocks exceed max erase cycles",
+            )));
+        }
+
         let best = best_global - drs;
 
         // Remove from free list via swap_remove for O(1) instead of O(n) retain
@@ -884,7 +932,12 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         if cursor + map_len > data.len() {
             return Err(err());
         }
-        let block_map = BlockMap::from_bytes(&data[cursor..cursor + map_len], data_physical_blocks);
+        if map_len % 4 != 0 {
+            return Err(err());
+        }
+        let block_map =
+            BlockMap::from_bytes(&data[cursor..cursor + map_len], data_physical_blocks)
+                .map_err(|_| err())?;
         cursor += map_len;
 
         // erase counts
@@ -899,6 +952,9 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         }
         let erase_counts = EraseCountTable::from_bytes(&data[cursor..cursor + erase_len]);
         cursor += erase_len;
+        if erase_counts.len() != total_blocks {
+            return Err(err());
+        }
 
         // bad block table
         if cursor + 4 > data.len() {

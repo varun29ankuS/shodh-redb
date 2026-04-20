@@ -29,22 +29,26 @@ impl RegionTracker {
     // num_orders: u32 number of order allocators
     // allocator_lens: u32 length of each allocator
     // data: BtreeBitmap data for each order
-    pub(super) fn to_vec(&self) -> Vec<u8> {
+    pub(super) fn to_vec(&self) -> crate::Result<Vec<u8>> {
         let mut result = vec![];
         let orders: u32 = self.order_trackers.len().try_into().unwrap();
-        let allocator_lens: Vec<u32> = self
+        let vecs: Vec<Vec<u8>> = self
             .order_trackers
             .iter()
-            .map(|x| x.to_vec().len().try_into().unwrap())
+            .map(|x| x.to_vec())
+            .collect::<crate::Result<Vec<_>>>()?;
+        let allocator_lens: Vec<u32> = vecs
+            .iter()
+            .map(|v| v.len().try_into().unwrap())
             .collect();
         result.extend(orders.to_le_bytes());
         for allocator_len in allocator_lens {
             result.extend(allocator_len.to_le_bytes());
         }
-        for order in &self.order_trackers {
-            result.extend(&order.to_vec());
+        for serialized in &vecs {
+            result.extend(serialized);
         }
-        result
+        Ok(result)
     }
 
     pub(super) fn from_bytes(page: &[u8]) -> Result<Self, crate::StorageError> {

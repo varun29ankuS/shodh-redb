@@ -87,25 +87,35 @@ impl BuddyAllocator {
     // num_pages: u32
     // free_ends: array of u32, with ending offset for BtreeBitmap structure for the given order
     // ... BtreeBitmap structures
-    pub(crate) fn to_vec(&self) -> Vec<u8> {
+    pub(crate) fn to_vec(&self) -> crate::Result<Vec<u8>> {
         let mut result = vec![];
         result.push(self.max_order);
         result.extend([0u8; 3]);
         result.extend(self.len.to_le_bytes());
 
+        let vecs: Vec<Vec<u8>> = self
+            .free
+            .iter()
+            .map(|order| order.to_vec())
+            .collect::<crate::Result<Vec<_>>>()?;
+
         let mut data_offset = result.len() + (self.max_order as usize + 1) * size_of::<u32>();
         let end_metadata = data_offset;
-        for order in &self.free {
-            data_offset += order.to_vec().len();
-            let offset_u32: u32 = data_offset.try_into().unwrap();
+        for serialized in &vecs {
+            data_offset += serialized.len();
+            let offset_u32: u32 = u32::try_from(data_offset).map_err(|_| {
+                crate::StorageError::Internal(
+                    "BuddyAllocator serialized data exceeds u32 range".into(),
+                )
+            })?;
             result.extend(offset_u32.to_le_bytes());
         }
         assert_eq!(end_metadata, result.len());
-        for order in &self.free {
-            result.extend(&order.to_vec());
+        for serialized in &vecs {
+            result.extend(serialized);
         }
 
-        result
+        Ok(result)
     }
 
     pub(crate) fn from_bytes(data: &[u8]) -> Result<Self, crate::StorageError> {
@@ -555,6 +565,6 @@ mod test {
         // BuddyAllocator overhead
         let buddy_state_bytes = free_state_bytes + allocated_state_bytes + 21 * 2 * 4 + 8;
 
-        assert!((allocator.to_vec().len() as u64) <= buddy_state_bytes);
+        assert!((allocator.to_vec().unwrap().len() as u64) <= buddy_state_bytes);
     }
 }

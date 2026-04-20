@@ -58,8 +58,10 @@ impl BtreeBitmap {
         &self.heights[i as usize]
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn get_height(&self) -> u32 {
-        self.heights.len().try_into().unwrap()
+        // Height is bounded by page order (max ~20), so this always fits in u32.
+        self.heights.len() as u32
     }
 
     pub(crate) fn xxh3_hash(&self) -> u128 {
@@ -70,9 +72,10 @@ impl BtreeBitmap {
         result
     }
 
-    pub(crate) fn to_vec(&self) -> Vec<u8> {
+    pub(crate) fn to_vec(&self) -> crate::Result<Vec<u8>> {
         let mut result = vec![];
-        let height: u32 = self.heights.len().try_into().unwrap();
+        #[allow(clippy::cast_possible_truncation)]
+        let height: u32 = self.heights.len() as u32;
         result.extend(height.to_le_bytes());
 
         let vecs: Vec<Vec<u8>> = self.heights.iter().map(|x| x.to_vec()).collect();
@@ -80,7 +83,11 @@ impl BtreeBitmap {
         let end_metadata = data_offset;
         for serialized in &vecs {
             data_offset += serialized.len();
-            let offset_u32: u32 = data_offset.try_into().unwrap();
+            let offset_u32: u32 = u32::try_from(data_offset).map_err(|_| {
+                crate::StorageError::Internal(
+                    "BtreeBitmap serialized data exceeds u32 range".into(),
+                )
+            })?;
             result.extend(offset_u32.to_le_bytes());
         }
 
@@ -89,7 +96,7 @@ impl BtreeBitmap {
             result.extend(serialized);
         }
 
-        result
+        Ok(result)
     }
 
     pub(crate) fn from_bytes(data: &[u8]) -> Result<Self, crate::StorageError> {

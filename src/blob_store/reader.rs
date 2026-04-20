@@ -1,6 +1,4 @@
 use crate::Result;
-use crate::tree_store::TransactionalMemory;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 /// A seekable reader for blob data stored in the database.
@@ -9,38 +7,36 @@ use alloc::vec::Vec;
 /// `std` feature is enabled), allowing partial and streaming reads of blob data
 /// without loading the entire blob into memory.
 ///
+/// The blob data is assembled from B-tree chunks at construction time and held
+/// in memory for the lifetime of the reader. For very large blobs, prefer using
+/// [`read_blob_range`](crate::WriteTransaction::read_blob_range) to read
+/// specific byte ranges without materializing the entire blob.
+///
 /// Range reads bypass checksum verification since the stored checksum covers
 /// the entire blob. Use [`crate::WriteTransaction::get_blob`] or
 /// [`crate::ReadTransaction::get_blob`] for full-blob reads with integrity
 /// verification.
 pub struct BlobReader {
-    mem: Arc<TransactionalMemory>,
-    /// Absolute file offset of the first byte of this blob
-    file_offset: u64,
-    /// Total length of the blob in bytes
-    blob_length: u64,
-    /// Current read cursor position within the blob
+    /// Pre-assembled blob data from B-tree chunks.
+    data: Vec<u8>,
+    /// Current read cursor position within the blob.
     position: u64,
 }
 
 impl BlobReader {
-    pub(crate) fn new(mem: Arc<TransactionalMemory>, file_offset: u64, blob_length: u64) -> Self {
-        Self {
-            mem,
-            file_offset,
-            blob_length,
-            position: 0,
-        }
+    /// Create a new `BlobReader` from pre-assembled chunk data.
+    pub(crate) fn new(data: Vec<u8>) -> Self {
+        Self { data, position: 0 }
     }
 
     /// Returns the total length of the blob in bytes.
     pub fn len(&self) -> u64 {
-        self.blob_length
+        self.data.len() as u64
     }
 
     /// Returns `true` if the blob has zero length.
     pub fn is_empty(&self) -> bool {
-        self.blob_length == 0
+        self.data.is_empty()
     }
 
     /// Returns the current read cursor position within the blob.
@@ -50,7 +46,7 @@ impl BlobReader {
 
     /// Returns the number of bytes remaining from the current position.
     pub fn remaining(&self) -> u64 {
-        self.blob_length.saturating_sub(self.position)
+        (self.data.len() as u64).saturating_sub(self.position)
     }
 
     /// Read a specific range of bytes from the blob.
@@ -62,47 +58,50 @@ impl BlobReader {
         if length == 0 {
             return Ok(Vec::new());
         }
+        let blob_length = self.data.len() as u64;
         let end =
             offset
                 .checked_add(length as u64)
                 .ok_or(crate::StorageError::BlobRangeOutOfBounds {
-                    blob_length: self.blob_length,
+                    blob_length,
                     requested_offset: offset,
                     requested_length: length as u64,
                 })?;
-        if end > self.blob_length {
+        if end > blob_length {
             return Err(crate::StorageError::BlobRangeOutOfBounds {
-                blob_length: self.blob_length,
+                blob_length,
                 requested_offset: offset,
                 requested_length: length as u64,
             });
         }
 
-        let data = self.mem.blob_read(self.file_offset + offset, length)?;
-        self.position = end;
-        Ok(data)
+        #[allow(clippy::cast_possible_truncation)]
+        let start = offset as usize;
+        #[allow(clippy::cast_possible_truncation)]
+        let end = end as usize;
+        self.position = end as u64;
+        Ok(self.data[start..end].to_vec())
     }
 }
 
 #[cfg(feature = "std")]
 impl std::io::Read for BlobReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.position >= self.blob_length {
+        let blob_length = self.data.len() as u64;
+        if self.position >= blob_length {
             return Ok(0);
         }
 
-        let remaining = usize::try_from(self.blob_length - self.position).unwrap_or(usize::MAX);
+        #[allow(clippy::cast_possible_truncation)]
+        let remaining = (blob_length - self.position) as usize;
         let to_read = buf.len().min(remaining);
         if to_read == 0 {
             return Ok(0);
         }
 
-        let data = self
-            .mem
-            .blob_read(self.file_offset + self.position, to_read)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        buf[..to_read].copy_from_slice(&data);
+        #[allow(clippy::cast_possible_truncation)]
+        let start = self.position as usize;
+        buf[..to_read].copy_from_slice(&self.data[start..start + to_read]);
         self.position += to_read as u64;
         Ok(to_read)
     }
@@ -111,9 +110,10 @@ impl std::io::Read for BlobReader {
 #[cfg(feature = "std")]
 impl std::io::Seek for BlobReader {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        let blob_length = self.data.len() as u64;
         let new_pos = match pos {
             std::io::SeekFrom::Start(offset) => i64::try_from(offset).ok(),
-            std::io::SeekFrom::End(offset) => i64::try_from(self.blob_length)
+            std::io::SeekFrom::End(offset) => i64::try_from(blob_length)
                 .ok()
                 .and_then(|len| len.checked_add(offset)),
             std::io::SeekFrom::Current(offset) => i64::try_from(self.position)
@@ -140,7 +140,7 @@ impl std::io::Seek for BlobReader {
 impl core::fmt::Debug for BlobReader {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("BlobReader")
-            .field("blob_length", &self.blob_length)
+            .field("blob_length", &self.data.len())
             .field("position", &self.position)
             .finish()
     }

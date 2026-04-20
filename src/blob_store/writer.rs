@@ -1,5 +1,5 @@
 use crate::WriteTransaction;
-use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, Sha256Key, StoreOptions};
+use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, Sha256Key, StoreOptions, BLOB_CHUNK_SIZE};
 use crate::tree_store::{Xxh3StreamHasher, hash64_with_seed};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -9,36 +9,38 @@ use sha2::{Digest, Sha256};
 /// Streaming blob writer that writes data in arbitrary-sized chunks with
 /// constant memory overhead, regardless of total blob size.
 ///
-/// Created via [`WriteTransaction::blob_writer`]. Data is written directly to
-/// the append-only blob region as each chunk arrives. At [`finish`](Self::finish),
-/// the xxh3 checksums are finalized and the blob is indexed in the system tables.
+/// Created via [`WriteTransaction::blob_writer`]. Data is buffered up to
+/// `BLOB_CHUNK_SIZE` bytes and then flushed as a single B-tree entry in
+/// the `BLOB_CHUNKS` system table. At [`finish`](Self::finish), the
+/// checksums are finalized and the blob is indexed.
 ///
 /// Implements [`std::io::Write`] (when the `std` feature is enabled) for
 /// interoperability with the standard library.
 ///
 /// # Drop behavior
 ///
-/// If the writer is dropped without calling `finish()`, the blob data already
-/// written to the blob region becomes dead space (it is not indexed). The
-/// active-writer guard is released so subsequent blob operations can proceed.
+/// If the writer is dropped without calling `finish()`, any chunks already
+/// written become orphaned (they will be cleaned up on the next compaction
+/// or remain as dead entries). The active-writer guard is released so
+/// subsequent blob operations can proceed.
 pub struct BlobWriter<'txn> {
     txn: &'txn WriteTransaction,
     sequence: u64,
     content_type: ContentType,
     label: String,
     opts: Option<StoreOptions>,
-    /// Absolute file offset where this blob's data starts.
-    blob_file_offset: u64,
-    /// Offset within the blob region where this blob starts.
-    blob_region_start: u64,
     bytes_written: u64,
+    /// Buffer for accumulating data up to `BLOB_CHUNK_SIZE` before flushing.
+    chunk_buf: Vec<u8>,
+    /// Next chunk index to write.
+    next_chunk_index: u32,
     /// First 4096 bytes of blob data, for computing the content prefix hash.
     prefix_buf: Vec<u8>,
     /// Incremental xxh3-128 hasher for the full blob checksum.
     /// Wrapped in Option so `finish()` can take ownership despite Drop impl.
     hasher: Option<Xxh3StreamHasher>,
     /// Incremental SHA-256 hasher for content-addressable dedup.
-    /// Present only when dedup is enabled and blob meets `min_size` threshold.
+    /// Present only when dedup is enabled.
     sha256_hasher: Option<Sha256>,
     finished: bool,
 }
@@ -53,8 +55,6 @@ impl<'txn> BlobWriter<'txn> {
         content_type: ContentType,
         label: &str,
         opts: StoreOptions,
-        blob_file_offset: u64,
-        blob_region_start: u64,
         dedup_enabled: bool,
     ) -> Self {
         Self {
@@ -63,9 +63,9 @@ impl<'txn> BlobWriter<'txn> {
             content_type,
             label: label.to_string(),
             opts: Some(opts),
-            blob_file_offset,
-            blob_region_start,
             bytes_written: 0,
+            chunk_buf: Vec::with_capacity(BLOB_CHUNK_SIZE),
+            next_chunk_index: 0,
             prefix_buf: Vec::with_capacity(PREFIX_HASH_LEN),
             hasher: Some(Xxh3StreamHasher::new(0)),
             sha256_hasher: if dedup_enabled {
@@ -90,10 +90,6 @@ impl<'txn> BlobWriter<'txn> {
             self.prefix_buf.extend_from_slice(&data[..copy_len]);
         }
 
-        // Write data to the blob region
-        let file_offset = self.blob_file_offset + self.bytes_written;
-        self.txn.blob_write_raw(file_offset, data)?;
-
         // Feed the streaming hashers
         self.hasher
             .as_mut()
@@ -102,15 +98,43 @@ impl<'txn> BlobWriter<'txn> {
         if let Some(ref mut sha) = self.sha256_hasher {
             sha.update(data);
         }
-        self.bytes_written += data.len() as u64;
 
+        // Buffer and flush chunks
+        let mut offset = 0;
+        while offset < data.len() {
+            let space = BLOB_CHUNK_SIZE - self.chunk_buf.len();
+            let copy_len = (data.len() - offset).min(space);
+            self.chunk_buf.extend_from_slice(&data[offset..offset + copy_len]);
+            offset += copy_len;
+
+            if self.chunk_buf.len() == BLOB_CHUNK_SIZE {
+                self.flush_chunk()?;
+            }
+        }
+
+        self.bytes_written += data.len() as u64;
         Ok(())
     }
 
-    /// Finalize the blob: compute checksums, index in system tables, and
-    /// return the assigned `BlobId`.
+    /// Flush the current chunk buffer to the B-tree.
+    fn flush_chunk(&mut self) -> crate::Result<()> {
+        if self.chunk_buf.is_empty() {
+            return Ok(());
+        }
+        self.txn
+            .blob_write_chunk(self.sequence, self.next_chunk_index, &self.chunk_buf)?;
+        self.next_chunk_index += 1;
+        self.chunk_buf.clear();
+        Ok(())
+    }
+
+    /// Finalize the blob: flush remaining data, compute checksums, index in
+    /// system tables, and return the assigned `BlobId`.
     pub fn finish(mut self) -> crate::Result<BlobId> {
         self.finished = true;
+
+        // Flush any remaining partial chunk
+        self.flush_chunk()?;
 
         // Compute content prefix hash (xxh3-64 of first min(4096, blob_len) bytes)
         let content_prefix_hash = hash64_with_seed(&self.prefix_buf, 0);
@@ -123,9 +147,9 @@ impl<'txn> BlobWriter<'txn> {
             .ok_or(crate::StorageError::BlobWriterFinished)?;
         let checksum = hasher.finish_128();
 
-        // Build BlobRef and BlobMeta
+        // Build BlobRef — offset=u64::MAX means own chunks (non-deduped)
         let blob_ref = BlobRef {
-            offset: self.blob_region_start,
+            offset: u64::MAX,
             length: self.bytes_written,
             checksum,
             ref_count: 1,

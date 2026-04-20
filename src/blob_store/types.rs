@@ -1703,6 +1703,116 @@ pub struct DedupStats {
     pub bytes_saved: u64,
 }
 
+// ---------------------------------------------------------------------------
+// BlobChunkKey -- composite key for the BLOB_CHUNKS system table
+// ---------------------------------------------------------------------------
+
+/// Chunk size for blob data stored in the B-tree (64 KiB).
+pub const BLOB_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Composite key for the `BLOB_CHUNKS` system table.
+///
+/// Layout (12 bytes, big-endian for correct lexicographic B-tree ordering):
+/// - `sequence` (`u64`): the blob sequence number that owns these chunks
+/// - `chunk_index` (`u32`): zero-based chunk index within the blob
+///
+/// This ensures all chunks for a blob are contiguous in the B-tree, enabling
+/// efficient range scans for full-blob reads and partial range reads.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlobChunkKey {
+    pub sequence: u64,
+    pub chunk_index: u32,
+}
+
+impl BlobChunkKey {
+    pub const SERIALIZED_SIZE: usize = 12;
+
+    pub const fn new(sequence: u64, chunk_index: u32) -> Self {
+        Self {
+            sequence,
+            chunk_index,
+        }
+    }
+
+    #[allow(clippy::big_endian_bytes)]
+    pub fn to_be_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
+        let mut buf = [0u8; Self::SERIALIZED_SIZE];
+        buf[..8].copy_from_slice(&self.sequence.to_be_bytes());
+        buf[8..12].copy_from_slice(&self.chunk_index.to_be_bytes());
+        buf
+    }
+
+    #[allow(clippy::big_endian_bytes)]
+    pub fn from_be_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+        Self {
+            sequence: u64::from_be_bytes(data[..8].try_into().unwrap()),
+            chunk_index: u32::from_be_bytes(data[8..12].try_into().unwrap()),
+        }
+    }
+}
+
+impl PartialOrd for BlobChunkKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BlobChunkKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.sequence
+            .cmp(&other.sequence)
+            .then(self.chunk_index.cmp(&other.chunk_index))
+    }
+}
+
+impl fmt::Debug for BlobChunkKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BlobChunkKey(seq={}, idx={})", self.sequence, self.chunk_index)
+    }
+}
+
+impl Value for BlobChunkKey {
+    type SelfType<'a>
+        = BlobChunkKey
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = [u8; BlobChunkKey::SERIALIZED_SIZE]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(Self::SERIALIZED_SIZE)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        Self::from_be_bytes(try_into_padded::<{ Self::SERIALIZED_SIZE }>(data))
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        value.to_be_bytes()
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::blob::BlobChunkKey")
+    }
+}
+
+impl Key for BlobChunkKey {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        let len = Self::SERIALIZED_SIZE.min(data1.len()).min(data2.len());
+        data1[..len]
+            .cmp(&data2[..len])
+            .then_with(|| data1.len().cmp(&data2.len()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

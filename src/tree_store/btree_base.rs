@@ -88,20 +88,19 @@ impl BtreeHeader {
     }
 
     pub(crate) fn from_le_bytes(bytes: [u8; Self::serialized_size()]) -> Self {
-        let root =
-            PageNumber::from_le_bytes(bytes[..PageNumber::serialized_size()].try_into().unwrap());
+        // All slice lengths are compile-time constants derived from the input
+        // array size, so these conversions are infallible.
+        let mut page_bytes = [0u8; PageNumber::serialized_size()];
+        page_bytes.copy_from_slice(&bytes[..PageNumber::serialized_size()]);
+        let root = PageNumber::from_le_bytes(page_bytes);
         let mut offset = PageNumber::serialized_size();
-        let checksum = Checksum::from_le_bytes(
-            bytes[offset..(offset + size_of::<Checksum>())]
-                .try_into()
-                .unwrap(),
-        );
+        let mut cksum_bytes = [0u8; size_of::<Checksum>()];
+        cksum_bytes.copy_from_slice(&bytes[offset..(offset + size_of::<Checksum>())]);
+        let checksum = Checksum::from_le_bytes(cksum_bytes);
         offset += size_of::<Checksum>();
-        let length = u64::from_le_bytes(
-            bytes[offset..(offset + size_of::<u64>())]
-                .try_into()
-                .unwrap(),
-        );
+        let mut len_bytes = [0u8; size_of::<u64>()];
+        len_bytes.copy_from_slice(&bytes[offset..(offset + size_of::<u64>())]);
+        let length = u64::from_le_bytes(len_bytes);
 
         Self {
             root,

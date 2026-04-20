@@ -8,7 +8,7 @@
 //! the page state each cycle using the same verification infrastructure
 //! as [`Database::verify_integrity()`](crate::Database::verify_integrity).
 
-use crate::db::{CorruptPageInfo, Database};
+use crate::db::{CorruptPageInfo, Database, TransactionGuard};
 use crate::tree_store::TransactionalMemory;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -138,7 +138,12 @@ fn run_scanner(
 
     while !shutdown.load(Ordering::Relaxed) {
         let start = Instant::now();
-        let scan = Database::verify_primary_checksums_detailed(mem.clone());
+        let scan = Database::verify_primary_checksums_detailed(
+            mem.clone(),
+            mem.get_persisted_data_root(),
+            mem.get_persisted_system_root(),
+            Arc::new(TransactionGuard::Verification),
+        );
 
         if let Ok((pages_checked, corrupt_details)) = scan {
             cycle += 1;

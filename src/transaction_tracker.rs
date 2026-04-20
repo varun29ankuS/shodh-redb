@@ -267,6 +267,10 @@ impl TransactionTracker {
             .copied())
     }
 
+    /// Maximum number of non-durable commits that can be pending before a
+    /// durable commit is required. Prevents unbounded memory growth.
+    const MAX_PENDING_NON_DURABLE: usize = 10_000;
+
     pub(crate) fn register_non_durable_commit(
         &self,
         id: TransactionId,
@@ -276,6 +280,12 @@ impl TransactionTracker {
         let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]
         let mut state = self.state.lock();
+        if state.pending_non_durable_commits.len() >= Self::MAX_PENDING_NON_DURABLE {
+            return Err(StorageError::Internal(alloc::format!(
+                "too many pending non-durable commits (limit: {}); a durable commit is required",
+                Self::MAX_PENDING_NON_DURABLE
+            )));
+        }
         state
             .live_read_transactions
             .entry(durable_ancestor)

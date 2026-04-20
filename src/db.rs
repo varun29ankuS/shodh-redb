@@ -755,17 +755,23 @@ impl Database {
     }
 
     /// Like `verify_primary_checksums` but collects per-page corruption details.
+    ///
+    /// Accepts a `guard` to ensure page ref-counting is active during traversal,
+    /// preventing `try_free_if_unpersisted` from freeing pages under verification.
     #[cfg(feature = "std")]
     pub(crate) fn verify_primary_checksums_detailed(
         mem: Arc<TransactionalMemory>,
+        data_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+        guard: Arc<TransactionGuard>,
     ) -> Result<(u64, Vec<CorruptPageInfo>)> {
         let mut total_pages = 0u64;
         let mut all_corruptions = Vec::new();
 
         let table_tree = TableTree::new(
-            mem.get_data_root(),
+            data_root,
             PageHint::None,
-            Arc::new(TransactionGuard::Verification),
+            guard.clone(),
             mem.clone(),
         )?;
         let (pages, corruptions) = table_tree.verify_checksums_detailed()?;
@@ -773,9 +779,9 @@ impl Database {
         all_corruptions.extend(corruptions);
 
         let system_table_tree = TableTree::new(
-            mem.get_system_root(),
+            system_root,
             PageHint::None,
-            Arc::new(TransactionGuard::Verification),
+            guard,
             mem.clone(),
         )?;
         let (pages, corruptions) = system_table_tree.verify_checksums_detailed()?;
@@ -786,24 +792,48 @@ impl Database {
     }
 
     /// Like `verify_primary_checksums` but verifies B-tree structural invariants.
+    /// Uses `TransactionGuard::Verification` — only safe when called from
+    /// `check_integrity` which has exclusive `&mut self` access.
     #[cfg(feature = "std")]
     pub(crate) fn verify_primary_structure(
         mem: Arc<TransactionalMemory>,
     ) -> Result<Vec<CorruptPageInfo>> {
+        Self::verify_structure_with_roots(
+            mem.clone(),
+            mem.get_data_root(),
+            mem.get_system_root(),
+            Arc::new(TransactionGuard::Verification),
+        )
+    }
+
+    /// Verify B-tree structural integrity using pre-captured root pointers.
+    ///
+    /// This avoids a race where `get_data_root()` / `get_system_root()` could
+    /// return a different root than the one protected by the caller's read guard,
+    /// leading to false-positive corruption reports when a concurrent writer
+    /// commits between root capture and tree traversal.
+    ///
+    /// Accepts a `guard` so page ref-counting prevents concurrent page reclamation.
+    fn verify_structure_with_roots(
+        mem: Arc<TransactionalMemory>,
+        data_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+        guard: Arc<TransactionGuard>,
+    ) -> Result<Vec<CorruptPageInfo>> {
         let mut all_corruptions = Vec::new();
 
         let table_tree = TableTree::new(
-            mem.get_data_root(),
+            data_root,
             PageHint::None,
-            Arc::new(TransactionGuard::Verification),
+            guard.clone(),
             mem.clone(),
         )?;
         all_corruptions.extend(table_tree.verify_structure_detailed()?);
 
         let system_table_tree = TableTree::new(
-            mem.get_system_root(),
+            system_root,
             PageHint::None,
-            Arc::new(TransactionGuard::Verification),
+            guard,
             mem.clone(),
         )?;
         all_corruptions.extend(system_table_tree.verify_structure_detailed()?);
@@ -893,7 +923,12 @@ impl Database {
 
         let mem = Arc::new(mem);
         let (pages_checked, mut corrupt_details) =
-            Self::verify_primary_checksums_detailed(mem.clone())?;
+            Self::verify_primary_checksums_detailed(
+                mem.clone(),
+                mem.get_data_root(),
+                mem.get_system_root(),
+                Arc::new(TransactionGuard::Verification),
+            )?;
         let pages_corrupt = corrupt_details.len() as u64;
 
         let structural_valid = if level == VerifyLevel::Full {
@@ -1125,12 +1160,38 @@ impl Database {
             });
         }
 
+        // Register a read transaction to ensure MVCC protection during
+        // verification. Without this, process_freed_pages in a concurrent
+        // writer can free pages that the verification traversal is reading,
+        // causing checksum mismatches and debug_assert failures.
+        //
+        // Capture the root pointers atomically with guard registration so
+        // that concurrent commits cannot change the root between guard
+        // creation and the actual tree walk. This prevents false-positive
+        // structural corruption reports (e.g. "leaf at depth 1, expected 2")
+        // when a root split races with verification.
+        let guard = Arc::new(self.allocate_read_transaction()?);
+        // Use persisted roots (primary slot) to avoid racing with non-durable
+        // writers that may free pages from unreachable tables in the secondary slot.
+        let snapshot_data_root = self.mem.get_persisted_data_root();
+        let snapshot_system_root = self.mem.get_persisted_system_root();
+
         let (pages_checked, mut corrupt_details) =
-            Self::verify_primary_checksums_detailed(self.mem.clone())?;
+            Self::verify_primary_checksums_detailed(
+                self.mem.clone(),
+                snapshot_data_root,
+                snapshot_system_root,
+                guard.clone(),
+            )?;
         let pages_corrupt = corrupt_details.len() as u64;
 
         let structural_valid = if level == VerifyLevel::Full {
-            let structural_corruptions = Self::verify_primary_structure(self.mem.clone())?;
+            let structural_corruptions = Self::verify_structure_with_roots(
+                self.mem.clone(),
+                snapshot_data_root,
+                snapshot_system_root,
+                guard.clone(),
+            )?;
             if !structural_corruptions.is_empty() {
                 corrupt_details.extend(structural_corruptions);
                 Some(false)
@@ -1372,18 +1433,8 @@ impl Database {
             }
         }
 
-        // -- Truncate the file ------------------------------------------------
-        // IMPORTANT: Use committed state only. get_blob_state() may return
-        // non-durable pending state (if a prior Durability::None blob write
-        // set pending_blob_state.next_sequence != 0), which would cause
-        // truncation to a wrong length and permanent database corruption.
-        let blob_state = self.mem.get_committed_blob_state();
-        let target_len = blob_state.region_offset + blob_state.region_length;
-        if target_len > 0 {
-            self.mem
-                .truncate_to(target_len)
-                .map_err(CompactionError::Storage)?;
-        }
+        // With chunked B-tree blob storage, blob data lives in the normal
+        // page-managed B-tree — there is no separate file region to truncate.
 
         Ok(BlobCompactionReport {
             blobs_relocated,
@@ -1516,14 +1567,7 @@ impl Database {
             }
         }
 
-        // -- Truncate the file ------------------------------------------------
-        let blob_state = self.mem.get_committed_blob_state();
-        let target_len = blob_state.region_offset + blob_state.region_length;
-        if target_len > 0 {
-            self.mem
-                .truncate_to(target_len)
-                .map_err(CompactionError::Storage)?;
-        }
+        // With chunked B-tree blob storage, no separate file region to truncate.
 
         // Final progress: 100%
         let _ = callback(blobs_relocated, total_blobs, total_live_size, total_bytes);
@@ -2474,7 +2518,12 @@ impl CompactionHandle<'_> {
     }
 
     /// Runs compaction to completion, returning the total number of steps performed.
+    ///
+    /// Compaction is bounded to at most 10,000 steps to prevent non-convergence
+    /// from causing an infinite loop. If the limit is reached, the compaction
+    /// stops and returns the number of steps completed so far.
     pub fn run(&self) -> core::result::Result<u64, CompactionError> {
+        const MAX_STEPS: u64 = 10_000;
         let mut steps = 0u64;
         loop {
             let progress = self.step()?;
@@ -2482,6 +2531,9 @@ impl CompactionHandle<'_> {
                 break;
             }
             steps += 1;
+            if steps >= MAX_STEPS {
+                break;
+            }
         }
         self.db.observer.on_compaction_complete(steps);
         Ok(steps)
@@ -2563,15 +2615,7 @@ impl BlobCompactionHandle<'_> {
                 }
             }
 
-            // Truncate the file
-            let blob_state = self.db.mem.get_committed_blob_state();
-            let target_len = blob_state.region_offset + blob_state.region_length;
-            if target_len > 0 {
-                self.db
-                    .mem
-                    .truncate_to(target_len)
-                    .map_err(CompactionError::Storage)?;
-            }
+            // With chunked B-tree blob storage, no separate file region to truncate.
 
             self.phase = 2;
             Ok(BlobCompactionProgress {

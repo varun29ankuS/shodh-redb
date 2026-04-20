@@ -93,6 +93,7 @@ fn kmeans_pp_init(
     rng: &mut Xorshift64,
     metric: DistanceMetric,
 ) -> Vec<f32> {
+    assert!(dim > 0, "kmeans: dimension must be positive");
     let n = flat_vectors.len() / dim;
     debug_assert!(k > 0 && k <= n);
 

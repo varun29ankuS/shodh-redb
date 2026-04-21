@@ -39,6 +39,9 @@ test: pre
 test_all: build_all
     RUST_BACKTRACE=1 cargo test --all --all-features
 
+soak duration='60':
+    SOAK_DURATION_SECS={{duration}} cargo test --all-features -p $(cargo pkgid) soak -- --nocapture --test-threads=1
+
 test_wasi:
     rustup install nightly-2025-07-26 --target wasm32-wasip1-threads
     # Uses cargo pkgid because "redb" is ambiguous with the test dependency on an old version of redb

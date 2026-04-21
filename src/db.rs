@@ -814,6 +814,7 @@ impl Database {
     /// commits between root capture and tree traversal.
     ///
     /// Accepts a `guard` so page ref-counting prevents concurrent page reclamation.
+    #[cfg(feature = "std")]
     fn verify_structure_with_roots(
         mem: Arc<TransactionalMemory>,
         data_root: Option<BtreeHeader>,

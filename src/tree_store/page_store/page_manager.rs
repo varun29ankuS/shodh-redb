@@ -1377,12 +1377,14 @@ impl TransactionalMemory {
     /// Returns the data root from the last **durable** commit (primary slot).
     /// Unlike `get_data_root()`, this ignores non-durable commits. Use this
     /// when verifying integrity to avoid racing with non-durable page freeing.
+    #[cfg(feature = "std")]
     pub(crate) fn get_persisted_data_root(&self) -> Option<BtreeHeader> {
         let state = self.state.lock();
         state.header.primary_slot().user_root
     }
 
     /// Returns the system root from the last **durable** commit (primary slot).
+    #[cfg(feature = "std")]
     pub(crate) fn get_persisted_system_root(&self) -> Option<BtreeHeader> {
         let state = self.state.lock();
         state.header.primary_slot().system_root

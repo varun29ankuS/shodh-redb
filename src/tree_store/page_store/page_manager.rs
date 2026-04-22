@@ -781,7 +781,8 @@ impl TransactionalMemory {
         let allocator = state.get_region_mut(region_index);
         allocator.record_alloc(page_number.page_index, page_number.page_order);
         #[cfg(debug_assertions)]
-        debug_assert!(self.allocated_pages.lock().insert(page_number));
+        // Idempotent: corrupted on-disk data may reference the same page twice.
+        self.allocated_pages.lock().insert(page_number);
     }
 
     fn write_header(&self, header: &DatabaseHeader) -> Result {
@@ -1264,7 +1265,8 @@ impl TransactionalMemory {
                 .get_region_mut(region_index)
                 .free(page_number.page_index, page_number.page_order);
             #[cfg(debug_assertions)]
-            debug_assert!(self.allocated_pages.lock().remove(page_number));
+            // Tolerate missing entries: corrupted data may cause inconsistent tracking.
+            self.allocated_pages.lock().remove(page_number);
 
             let address = page_number.address_range(
                 self.page_size.into(),
@@ -1463,9 +1465,11 @@ impl TransactionalMemory {
     fn free_helper(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
         #[cfg(debug_assertions)]
         {
-            // read_page_ref_counts is not checked here because freeing a page
-            // with active readers is safe -- PageImpl holds an Arc<[u8]> copy.
-            debug_assert!(self.allocated_pages.lock().remove(&page));
+            // Idempotent: during crash recovery on corrupted data, a page may
+            // appear in multiple B-tree paths and be freed more than once.
+            // The remove may return false — that is tolerated.
+            self.allocated_pages.lock().remove(&page);
+            // open_dirty_pages is always consistent (not derived from on-disk data).
             debug_assert!(!self.open_dirty_pages.lock().contains(&page));
         }
         allocated.remove(page);

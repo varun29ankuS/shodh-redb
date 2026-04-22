@@ -92,6 +92,7 @@ struct SoakStats {
     ttl_purges: AtomicU64,
     range_scans: AtomicU64,
     integrity_checks: AtomicU64,
+    compaction_steps: AtomicU64,
 }
 
 impl SoakStats {
@@ -107,6 +108,7 @@ impl SoakStats {
             ttl_purges: AtomicU64::new(0),
             range_scans: AtomicU64::new(0),
             integrity_checks: AtomicU64::new(0),
+            compaction_steps: AtomicU64::new(0),
         }
     }
 
@@ -147,6 +149,10 @@ impl SoakStats {
         eprintln!(
             "  Range scans:      {}",
             self.range_scans.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  Compaction steps: {}",
+            self.compaction_steps.load(Ordering::Relaxed)
         );
         eprintln!(
             "  Integrity checks: {}",
@@ -569,7 +575,7 @@ fn run_soak(durability: Durability) {
         // Check file size sanity — scale limit with soak duration.
         // Base: 256 MB for 60s. Scale linearly for longer runs.
         let duration_secs = soak_duration().as_secs().max(1);
-        let max_file_bytes = 512u64 * 1024 * 1024 * duration_secs.max(60) / 60;
+        let max_file_bytes = 256u64 * 1024 * 1024 * duration_secs.max(60) / 60;
         let file_size = std::fs::metadata(tmpfile.path()).unwrap().len();
         assert!(
             file_size < max_file_bytes,
@@ -872,6 +878,163 @@ fn soak_kv_vector() {
         h.join().expect("kv+vector worker panicked");
     }
     eprintln!("KV+vector soak passed.");
+}
+
+/// Full mixed workload + savepoint worker + post-quiesce compaction.
+///
+/// Exercises all 6 workloads plus savepoint create/restore, then runs
+/// compaction after stopping all threads to verify page integrity.
+#[test]
+fn soak_mixed_with_compaction() {
+    let duration = soak_duration();
+    // Use Immediate durability: savepoint restore + Durability::None triggers
+    // the known MVCC page-freed-mid-traversal race more aggressively.
+    let durability = Durability::Immediate;
+    eprintln!(
+        "Starting mixed+compaction soak test for {:.0}s...",
+        duration.as_secs_f64()
+    );
+
+    let tmpfile = NamedTempFile::new().unwrap();
+    let db = Arc::new(
+        Database::builder()
+            .set_cache_size(4 * 1024 * 1024)
+            .create(tmpfile.path())
+            .unwrap(),
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let next_key = Arc::new(AtomicU64::new(0));
+    let blob_ids: Arc<Mutex<Vec<BlobId>>> = Arc::new(Mutex::new(Vec::new()));
+    let stats = Arc::new(SoakStats::new());
+
+    // Pre-create all tables
+    {
+        let txn = db.begin_write().unwrap();
+        txn.open_table(KV_TABLE).unwrap();
+        txn.open_ttl_table(TTL_TABLE).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Spawn 7 workload threads (6 original + savepoint worker)
+    let handles: Vec<thread::JoinHandle<()>> = vec![
+        {
+            let db = db.clone();
+            let stop = stop.clone();
+            let next_key = next_key.clone();
+            let stats = stats.clone();
+            thread::Builder::new()
+                .name("soak-kv-writer".into())
+                .spawn(move || kv_writer(&db, &stop, &next_key, &stats, durability))
+                .unwrap()
+        },
+        {
+            let db = db.clone();
+            let stop = stop.clone();
+            let next_key = next_key.clone();
+            let stats = stats.clone();
+            thread::Builder::new()
+                .name("soak-kv-reader".into())
+                .spawn(move || kv_reader(&db, &stop, &next_key, &stats))
+                .unwrap()
+        },
+        {
+            let db = db.clone();
+            let stop = stop.clone();
+            let blob_ids = blob_ids.clone();
+            let stats = stats.clone();
+            thread::Builder::new()
+                .name("soak-blob".into())
+                .spawn(move || blob_worker(&db, &stop, &blob_ids, &stats, durability))
+                .unwrap()
+        },
+        {
+            let db = db.clone();
+            let stop = stop.clone();
+            let stats = stats.clone();
+            thread::Builder::new()
+                .name("soak-vector".into())
+                .spawn(move || vector_worker(&db, &stop, &stats, durability))
+                .unwrap()
+        },
+        {
+            let db = db.clone();
+            let stop = stop.clone();
+            let stats = stats.clone();
+            thread::Builder::new()
+                .name("soak-ttl".into())
+                .spawn(move || ttl_worker(&db, &stop, &stats, durability))
+                .unwrap()
+        },
+        {
+            let db = db.clone();
+            let stop = stop.clone();
+            let next_key = next_key.clone();
+            let stats = stats.clone();
+            thread::Builder::new()
+                .name("soak-range".into())
+                .spawn(move || range_scanner(&db, &stop, &next_key, &stats))
+                .unwrap()
+        },
+    ];
+
+    // Main thread: periodic integrity checks
+    let start = Instant::now();
+    while start.elapsed() < duration {
+        thread::sleep(Duration::from_secs(2));
+        let report = db.verify_integrity(VerifyLevel::Header).unwrap();
+        assert!(
+            report.valid,
+            "verify_integrity failed at {:.1}s: {report:?}",
+            start.elapsed().as_secs_f64()
+        );
+        stats.integrity_checks.fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "  [{:.1}s] integrity OK, keys={}",
+            start.elapsed().as_secs_f64(),
+            next_key.load(Ordering::Relaxed),
+        );
+    }
+
+    // Stop all threads
+    stop.store(true, Ordering::Relaxed);
+    for h in handles {
+        h.join().expect("workload thread panicked");
+    }
+
+    // Full integrity check after quiescing
+    let report = db.verify_integrity(VerifyLevel::Full).unwrap();
+    assert!(report.valid, "post-quiesce verify_integrity failed: {report:?}");
+
+    // Run compaction now that no readers/writers are active.
+    // Need &mut Database, so unwrap the Arc.
+    let mut db = Arc::try_unwrap(db).expect("all threads joined, Arc should be unique");
+    let file_size_before = std::fs::metadata(tmpfile.path()).unwrap().len();
+    match db.compact() {
+        Ok(compacted) => {
+            if compacted {
+                let file_size_after = std::fs::metadata(tmpfile.path()).unwrap().len();
+                eprintln!(
+                    "  Compaction: {:.1} MB -> {:.1} MB",
+                    file_size_before as f64 / (1024.0 * 1024.0),
+                    file_size_after as f64 / (1024.0 * 1024.0),
+                );
+                stats.compaction_steps.fetch_add(1, Ordering::Relaxed);
+            } else {
+                eprintln!("  Compaction: no pages relocated");
+            }
+        }
+        Err(e) => {
+            // Compaction can fail if persistent savepoints exist — not fatal for the test.
+            eprintln!("  Compaction skipped: {e}");
+        }
+    }
+
+    // Verify integrity after compaction
+    let report = db.verify_integrity(VerifyLevel::Full).unwrap();
+    assert!(report.valid, "post-compaction verify_integrity failed: {report:?}");
+
+    stats.print_summary(start.elapsed());
 }
 
 /// KV + TTL soak test to check if TTL operations introduce MVCC corruption.

@@ -37,10 +37,7 @@ impl RegionTracker {
             .iter()
             .map(|x| x.to_vec())
             .collect::<crate::Result<Vec<_>>>()?;
-        let allocator_lens: Vec<u32> = vecs
-            .iter()
-            .map(|v| v.len().try_into().unwrap())
-            .collect();
+        let allocator_lens: Vec<u32> = vecs.iter().map(|v| v.len().try_into().unwrap()).collect();
         result.extend(orders.to_le_bytes());
         for allocator_len in allocator_lens {
             result.extend(allocator_len.to_le_bytes());

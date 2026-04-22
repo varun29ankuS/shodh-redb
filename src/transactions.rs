@@ -1,8 +1,8 @@
 use crate::blob_store::reader::BlobReader;
 use crate::blob_store::types::{
-    BlobChunkKey, BlobDedupConfig, BlobId, BlobMeta, BlobRef, BlobStats, CausalEdge,
-    CausalEdgeKey, CausalPath, ContentType, DedupStats, DedupVal, MAX_TAGS_PER_BLOB, NamespaceKey,
-    NamespaceVal, Sha256Key, StoreOptions, TagKey, TemporalKey, BLOB_CHUNK_SIZE,
+    BLOB_CHUNK_SIZE, BlobChunkKey, BlobDedupConfig, BlobId, BlobMeta, BlobRef, BlobStats,
+    CausalEdge, CausalEdgeKey, CausalPath, ContentType, DedupStats, DedupVal, MAX_TAGS_PER_BLOB,
+    NamespaceKey, NamespaceVal, Sha256Key, StoreOptions, TagKey, TemporalKey,
 };
 use crate::blob_store::writer::BlobWriter;
 use crate::cdc::CdcConfig;
@@ -99,8 +99,7 @@ const BLOB_CHUNKS: SystemTableDefinition<BlobChunkKey, &[u8]> =
     SystemTableDefinition::new("blob_chunks");
 /// Monotonic counters for blob store. Key 0 = next blob sequence number,
 /// Key 1 = HLC state. Replaces the header-embedded `BlobCommitState`.
-const BLOB_COUNTERS: SystemTableDefinition<u64, u64> =
-    SystemTableDefinition::new("blob_counters");
+const BLOB_COUNTERS: SystemTableDefinition<u64, u64> = SystemTableDefinition::new("blob_counters");
 const BLOB_COUNTER_NEXT_SEQ: u64 = 0;
 const BLOB_COUNTER_HLC: u64 = 1;
 const CDC_LOG_TABLE: SystemTableDefinition<CdcKey, CdcRecord> =
@@ -1848,12 +1847,7 @@ impl WriteTransaction {
 
     /// Write a single chunk of blob data to the `BLOB_CHUNKS` table.
     /// Called by `BlobWriter` when a chunk buffer is full or at finalization.
-    pub(crate) fn blob_write_chunk(
-        &self,
-        sequence: u64,
-        chunk_index: u32,
-        data: &[u8],
-    ) -> Result {
+    pub(crate) fn blob_write_chunk(&self, sequence: u64, chunk_index: u32, data: &[u8]) -> Result {
         let mut system_tables = self.system_tables.lock();
         let mut chunks_table = system_tables.open_system_table(self, BLOB_CHUNKS)?;
         let key = BlobChunkKey::new(sequence, chunk_index);
@@ -1883,8 +1877,11 @@ impl WriteTransaction {
             blob_table.insert(&blob_id, &meta)?;
             drop(blob_table);
 
-            let temporal_key =
-                TemporalKey::new(meta.wall_clock_ns, HybridLogicalClock::from_raw(hlc_raw), blob_id);
+            let temporal_key = TemporalKey::new(
+                meta.wall_clock_ns,
+                HybridLogicalClock::from_raw(hlc_raw),
+                blob_id,
+            );
             let mut temporal_table = system_tables.open_system_table(self, BLOB_TEMPORAL_INDEX)?;
             temporal_table.insert(&temporal_key, &())?;
             drop(temporal_table);
@@ -1966,9 +1963,7 @@ impl WriteTransaction {
     fn advance_blob_hlc(&self) -> Result<u64> {
         let mut system_tables = self.system_tables.lock();
         let mut counters = system_tables.open_system_table(self, BLOB_COUNTERS)?;
-        let current = counters
-            .get(&BLOB_COUNTER_HLC)?
-            .map_or(0, |g| g.value());
+        let current = counters.get(&BLOB_COUNTER_HLC)?.map_or(0, |g| g.value());
         let hlc = HybridLogicalClock::from_raw(current).advance();
         let raw = hlc.to_raw();
         counters.insert(&BLOB_COUNTER_HLC, &raw)?;
@@ -2014,7 +2009,9 @@ impl WriteTransaction {
         if buf.len() as u64 != expected_length {
             return Err(StorageError::Corrupted(alloc::format!(
                 "blob seq {}: expected {} bytes, assembled {}",
-                source_sequence, expected_length, buf.len()
+                source_sequence,
+                expected_length,
+                buf.len()
             )));
         }
         Ok(buf)
@@ -3622,7 +3619,9 @@ impl ReadTransaction {
         if buf.len() as u64 != expected_length {
             return Err(StorageError::Corrupted(alloc::format!(
                 "blob seq {}: expected {} bytes, assembled {}",
-                source_sequence, expected_length, buf.len()
+                source_sequence,
+                expected_length,
+                buf.len()
             )));
         }
         Ok(buf)
@@ -3650,10 +3649,9 @@ impl ReadTransaction {
 
         let start_key = BlobChunkKey::new(source_sequence, start_chunk);
         let end_key = BlobChunkKey::new(source_sequence, end_chunk);
-        let range = chunks_btree
-            .range::<core::ops::RangeInclusive<BlobChunkKey>, BlobChunkKey>(
-                &(start_key..=end_key),
-            )?;
+        let range = chunks_btree.range::<core::ops::RangeInclusive<BlobChunkKey>, BlobChunkKey>(
+            &(start_key..=end_key),
+        )?;
 
         let mut buf = Vec::with_capacity(length as usize);
         let mut global_pos = u64::from(start_chunk) * chunk_size;

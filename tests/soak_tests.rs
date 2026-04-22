@@ -27,9 +27,9 @@ const TTL_TABLE: TtlTableDefinition<u64, &[u8]> = TtlTableDefinition::new("soak_
 
 const IVFPQ_DEF: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
     "soak_idx",
-    64,  // dim
-    8,   // clusters
-    8,   // subvectors
+    64, // dim
+    8,  // clusters
+    8,  // subvectors
     DistanceMetric::EuclideanSq,
 )
 .with_raw_vectors();
@@ -58,7 +58,10 @@ fn make_value(seed: u64) -> Vec<u8> {
 fn make_vector(id: u64, dim: usize) -> Vec<f32> {
     (0..dim)
         .map(|j| {
-            ((id.wrapping_mul(7).wrapping_add(j as u64 * 11).wrapping_add(13)) % 1000) as f32
+            ((id.wrapping_mul(7)
+                .wrapping_add(j as u64 * 11)
+                .wrapping_add(13))
+                % 1000) as f32
                 * 0.001
                 - 0.5
         })
@@ -70,7 +73,9 @@ fn make_blob_data(seed: u64) -> Vec<u8> {
     let mut data = vec![0u8; size];
     let mut state = seed;
     for b in data.iter_mut() {
-        state = state.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+        state = state
+            .wrapping_mul(2862933555777941757)
+            .wrapping_add(3037000493);
         *b = (state >> 33) as u8;
     }
     data
@@ -107,16 +112,46 @@ impl SoakStats {
 
     fn print_summary(&self, elapsed: Duration) {
         eprintln!("=== Soak Test Summary ({:.1}s) ===", elapsed.as_secs_f64());
-        eprintln!("  KV writes:        {}", self.kv_writes.load(Ordering::Relaxed));
-        eprintln!("  KV reads:         {}", self.kv_reads.load(Ordering::Relaxed));
-        eprintln!("  Blob writes:      {}", self.blob_writes.load(Ordering::Relaxed));
-        eprintln!("  Blob reads:       {}", self.blob_reads.load(Ordering::Relaxed));
-        eprintln!("  Vec inserts:      {}", self.vec_inserts.load(Ordering::Relaxed));
-        eprintln!("  Vec searches:     {}", self.vec_searches.load(Ordering::Relaxed));
-        eprintln!("  TTL inserts:      {}", self.ttl_inserts.load(Ordering::Relaxed));
-        eprintln!("  TTL purges:       {}", self.ttl_purges.load(Ordering::Relaxed));
-        eprintln!("  Range scans:      {}", self.range_scans.load(Ordering::Relaxed));
-        eprintln!("  Integrity checks: {}", self.integrity_checks.load(Ordering::Relaxed));
+        eprintln!(
+            "  KV writes:        {}",
+            self.kv_writes.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  KV reads:         {}",
+            self.kv_reads.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  Blob writes:      {}",
+            self.blob_writes.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  Blob reads:       {}",
+            self.blob_reads.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  Vec inserts:      {}",
+            self.vec_inserts.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  Vec searches:     {}",
+            self.vec_searches.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  TTL inserts:      {}",
+            self.ttl_inserts.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  TTL purges:       {}",
+            self.ttl_purges.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  Range scans:      {}",
+            self.range_scans.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  Integrity checks: {}",
+            self.integrity_checks.load(Ordering::Relaxed)
+        );
     }
 }
 
@@ -166,12 +201,7 @@ fn kv_writer(
 // ---------------------------------------------------------------------------
 // Workload: KV Reader
 // ---------------------------------------------------------------------------
-fn kv_reader(
-    db: &Database,
-    stop: &AtomicBool,
-    next_key: &AtomicU64,
-    stats: &SoakStats,
-) {
+fn kv_reader(db: &Database, stop: &AtomicBool, next_key: &AtomicU64, stats: &SoakStats) {
     let mut rng = rand::rng();
     while !stop.load(Ordering::Relaxed) {
         let max_key = next_key.load(Ordering::Relaxed);
@@ -223,7 +253,12 @@ fn blob_worker(
         };
         txn.set_durability(use_durability).unwrap();
         let id = txn
-            .store_blob(&data, ContentType::OctetStream, "soak", StoreOptions::default())
+            .store_blob(
+                &data,
+                ContentType::OctetStream,
+                "soak",
+                StoreOptions::default(),
+            )
             .unwrap();
         txn.commit().unwrap();
         blob_ids.lock().unwrap().push(id);
@@ -247,12 +282,7 @@ fn blob_worker(
 // ---------------------------------------------------------------------------
 // Workload: Vector Index
 // ---------------------------------------------------------------------------
-fn vector_worker(
-    db: &Database,
-    stop: &AtomicBool,
-    stats: &SoakStats,
-    durability: Durability,
-) {
+fn vector_worker(db: &Database, stop: &AtomicBool, stats: &SoakStats, durability: Durability) {
     let dim = 64usize;
     let mut batch_id = 0u64;
 
@@ -261,9 +291,8 @@ fn vector_worker(
         let mut txn = db.begin_write().unwrap();
         txn.set_durability(durability).unwrap();
         let mut idx = txn.open_ivfpq_index(&IVFPQ_DEF).unwrap();
-        let training: Vec<(u64, Vec<f32>)> = (0..100u64)
-            .map(|id| (id, make_vector(id, dim)))
-            .collect();
+        let training: Vec<(u64, Vec<f32>)> =
+            (0..100u64).map(|id| (id, make_vector(id, dim))).collect();
         idx.train(training.into_iter(), 5).unwrap();
         drop(idx);
         txn.commit().unwrap();
@@ -315,12 +344,7 @@ fn vector_worker(
 // ---------------------------------------------------------------------------
 // Workload: TTL Churn
 // ---------------------------------------------------------------------------
-fn ttl_worker(
-    db: &Database,
-    stop: &AtomicBool,
-    stats: &SoakStats,
-    durability: Durability,
-) {
+fn ttl_worker(db: &Database, stop: &AtomicBool, stats: &SoakStats, durability: Durability) {
     let mut key_counter = 0u64;
     let mut ttl_commit_count = 0u64;
     while !stop.load(Ordering::Relaxed) {
@@ -379,12 +403,7 @@ fn ttl_worker(
 // ---------------------------------------------------------------------------
 // Workload: Range Scanner
 // ---------------------------------------------------------------------------
-fn range_scanner(
-    db: &Database,
-    stop: &AtomicBool,
-    next_key: &AtomicU64,
-    stats: &SoakStats,
-) {
+fn range_scanner(db: &Database, stop: &AtomicBool, next_key: &AtomicU64, stats: &SoakStats) {
     let mut rng = rand::rng();
     while !stop.load(Ordering::Relaxed) {
         let max_key = next_key.load(Ordering::Relaxed);
@@ -403,12 +422,18 @@ fn range_scanner(
             let entry = entry.unwrap();
             let k = entry.0.value();
             if let Some(prev) = prev_key {
-                assert!(k > prev, "range scan keys must be strictly ascending: {prev} -> {k}");
+                assert!(
+                    k > prev,
+                    "range scan keys must be strictly ascending: {prev} -> {k}"
+                );
             }
             prev_key = Some(k);
             count += 1;
         }
-        assert!(count <= 100, "range scan returned {count} entries, expected <= 100");
+        assert!(
+            count <= 100,
+            "range scan returned {count} entries, expected <= 100"
+        );
         stats.range_scans.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -577,10 +602,7 @@ fn run_soak(durability: Durability) {
         let table = rtxn.open_table(KV_TABLE).unwrap();
         let len = table.len().unwrap();
         let expected = next_key.load(Ordering::Relaxed);
-        assert_eq!(
-            len, expected,
-            "KV table len {len} != expected {expected}"
-        );
+        assert_eq!(len, expected, "KV table len {len} != expected {expected}");
     }
 
     stats.print_summary(start.elapsed());
@@ -600,7 +622,10 @@ fn soak_mixed_workload_durable() {
 #[test]
 fn soak_kv_only() {
     let duration = soak_duration();
-    eprintln!("Starting KV-only soak test for {:.0}s...", duration.as_secs_f64());
+    eprintln!(
+        "Starting KV-only soak test for {:.0}s...",
+        duration.as_secs_f64()
+    );
 
     let tmpfile = NamedTempFile::new().unwrap();
     let db = Arc::new(
@@ -655,7 +680,10 @@ fn soak_kv_only() {
                     let mut rng = rand::rng();
                     while !stop.load(Ordering::Relaxed) {
                         let max = next_key.load(Ordering::Relaxed);
-                        if max == 0 { thread::yield_now(); continue; }
+                        if max == 0 {
+                            thread::yield_now();
+                            continue;
+                        }
                         let rtxn = db.begin_read().unwrap();
                         let table = rtxn.open_table(KV_TABLE).unwrap();
                         for _ in 0..20 {
@@ -663,7 +691,8 @@ fn soak_kv_only() {
                             if let Some(g) = table.get(&key).unwrap() {
                                 let expected = make_value(key);
                                 assert_eq!(
-                                    g.value(), expected.as_slice(),
+                                    g.value(),
+                                    expected.as_slice(),
                                     "KV-only: value mismatch at key {key}"
                                 );
                             }
@@ -699,7 +728,10 @@ fn soak_kv_only() {
 #[test]
 fn soak_kv_blob() {
     let duration = soak_duration();
-    eprintln!("Starting KV+blob soak test for {:.0}s...", duration.as_secs_f64());
+    eprintln!(
+        "Starting KV+blob soak test for {:.0}s...",
+        duration.as_secs_f64()
+    );
 
     let tmpfile = NamedTempFile::new().unwrap();
     let db = Arc::new(
@@ -772,7 +804,10 @@ fn soak_kv_blob() {
 #[test]
 fn soak_kv_vector() {
     let duration = soak_duration();
-    eprintln!("Starting KV+vector soak test for {:.0}s...", duration.as_secs_f64());
+    eprintln!(
+        "Starting KV+vector soak test for {:.0}s...",
+        duration.as_secs_f64()
+    );
 
     let tmpfile = NamedTempFile::new().unwrap();
     let db = Arc::new(
@@ -843,7 +878,10 @@ fn soak_kv_vector() {
 #[test]
 fn soak_kv_ttl() {
     let duration = soak_duration();
-    eprintln!("Starting KV+TTL soak test for {:.0}s...", duration.as_secs_f64());
+    eprintln!(
+        "Starting KV+TTL soak test for {:.0}s...",
+        duration.as_secs_f64()
+    );
 
     let tmpfile = NamedTempFile::new().unwrap();
     let db = Arc::new(

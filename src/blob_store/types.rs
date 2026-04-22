@@ -1767,7 +1767,11 @@ impl Ord for BlobChunkKey {
 
 impl fmt::Debug for BlobChunkKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "BlobChunkKey(seq={}, idx={})", self.sequence, self.chunk_index)
+        write!(
+            f,
+            "BlobChunkKey(seq={}, idx={})",
+            self.sequence, self.chunk_index
+        )
     }
 }
 

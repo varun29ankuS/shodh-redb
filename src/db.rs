@@ -768,22 +768,12 @@ impl Database {
         let mut total_pages = 0u64;
         let mut all_corruptions = Vec::new();
 
-        let table_tree = TableTree::new(
-            data_root,
-            PageHint::None,
-            guard.clone(),
-            mem.clone(),
-        )?;
+        let table_tree = TableTree::new(data_root, PageHint::None, guard.clone(), mem.clone())?;
         let (pages, corruptions) = table_tree.verify_checksums_detailed()?;
         total_pages += pages;
         all_corruptions.extend(corruptions);
 
-        let system_table_tree = TableTree::new(
-            system_root,
-            PageHint::None,
-            guard,
-            mem.clone(),
-        )?;
+        let system_table_tree = TableTree::new(system_root, PageHint::None, guard, mem.clone())?;
         let (pages, corruptions) = system_table_tree.verify_checksums_detailed()?;
         total_pages += pages;
         all_corruptions.extend(corruptions);
@@ -823,20 +813,10 @@ impl Database {
     ) -> Result<Vec<CorruptPageInfo>> {
         let mut all_corruptions = Vec::new();
 
-        let table_tree = TableTree::new(
-            data_root,
-            PageHint::None,
-            guard.clone(),
-            mem.clone(),
-        )?;
+        let table_tree = TableTree::new(data_root, PageHint::None, guard.clone(), mem.clone())?;
         all_corruptions.extend(table_tree.verify_structure_detailed()?);
 
-        let system_table_tree = TableTree::new(
-            system_root,
-            PageHint::None,
-            guard,
-            mem.clone(),
-        )?;
+        let system_table_tree = TableTree::new(system_root, PageHint::None, guard, mem.clone())?;
         all_corruptions.extend(system_table_tree.verify_structure_detailed()?);
 
         Ok(all_corruptions)
@@ -923,13 +903,12 @@ impl Database {
         }
 
         let mem = Arc::new(mem);
-        let (pages_checked, mut corrupt_details) =
-            Self::verify_primary_checksums_detailed(
-                mem.clone(),
-                mem.get_data_root(),
-                mem.get_system_root(),
-                Arc::new(TransactionGuard::Verification),
-            )?;
+        let (pages_checked, mut corrupt_details) = Self::verify_primary_checksums_detailed(
+            mem.clone(),
+            mem.get_data_root(),
+            mem.get_system_root(),
+            Arc::new(TransactionGuard::Verification),
+        )?;
         let pages_corrupt = corrupt_details.len() as u64;
 
         let structural_valid = if level == VerifyLevel::Full {
@@ -1177,13 +1156,12 @@ impl Database {
         let snapshot_data_root = self.mem.get_persisted_data_root();
         let snapshot_system_root = self.mem.get_persisted_system_root();
 
-        let (pages_checked, mut corrupt_details) =
-            Self::verify_primary_checksums_detailed(
-                self.mem.clone(),
-                snapshot_data_root,
-                snapshot_system_root,
-                guard.clone(),
-            )?;
+        let (pages_checked, mut corrupt_details) = Self::verify_primary_checksums_detailed(
+            self.mem.clone(),
+            snapshot_data_root,
+            snapshot_system_root,
+            guard.clone(),
+        )?;
         let pages_corrupt = corrupt_details.len() as u64;
 
         let structural_valid = if level == VerifyLevel::Full {

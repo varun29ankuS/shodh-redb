@@ -231,11 +231,7 @@ impl Page for PageImpl {
 
 impl Clone for PageImpl {
     fn clone(&self) -> Self {
-        *self
-            .open_pages
-            .lock()
-            .entry(self.page_number)
-            .or_insert(0) += 1;
+        *self.open_pages.lock().entry(self.page_number).or_insert(0) += 1;
         Self {
             mem: self.mem.clone(),
             page_number: self.page_number,

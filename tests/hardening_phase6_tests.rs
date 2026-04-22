@@ -7,8 +7,8 @@
 //! - Memory safety: transaction tracker non-durable commit cap
 
 use shodh_redb::{
-    error::BackendError, Builder, ContentType, Database, FlashBackend, FlashGeometry,
-    FlashHardware, ReadableDatabase, StoreOptions, TableDefinition,
+    Builder, ContentType, Database, FlashBackend, FlashGeometry, FlashHardware, ReadableDatabase,
+    StoreOptions, TableDefinition, error::BackendError,
 };
 use std::fmt::{Debug, Formatter};
 use std::io::{Read, Seek, SeekFrom};
@@ -40,7 +40,12 @@ fn blob_multi_chunk_roundtrip() {
 
     let write_txn = db.begin_write().unwrap();
     let blob_id = write_txn
-        .store_blob(&data, ContentType::OctetStream, "multi-chunk", StoreOptions::default())
+        .store_blob(
+            &data,
+            ContentType::OctetStream,
+            "multi-chunk",
+            StoreOptions::default(),
+        )
         .unwrap();
     write_txn.commit().unwrap();
 
@@ -64,7 +69,12 @@ fn blob_range_read_across_chunks() {
 
     let write_txn = db.begin_write().unwrap();
     let blob_id = write_txn
-        .store_blob(&data, ContentType::OctetStream, "range-test", StoreOptions::default())
+        .store_blob(
+            &data,
+            ContentType::OctetStream,
+            "range-test",
+            StoreOptions::default(),
+        )
         .unwrap();
     write_txn.commit().unwrap();
 
@@ -94,7 +104,11 @@ fn blob_writer_exact_chunk_boundary() {
     let write_txn = db.begin_write().unwrap();
     let blob_id = {
         let mut writer = write_txn
-            .blob_writer(ContentType::OctetStream, "exact-boundary", StoreOptions::default())
+            .blob_writer(
+                ContentType::OctetStream,
+                "exact-boundary",
+                StoreOptions::default(),
+            )
             .unwrap();
         // Write in small pieces that cross chunk boundaries
         for piece in data.chunks(7919) {
@@ -120,7 +134,12 @@ fn blob_reader_cross_chunk_seek() {
 
     let write_txn = db.begin_write().unwrap();
     let blob_id = write_txn
-        .store_blob(&data, ContentType::OctetStream, "seek-test", StoreOptions::default())
+        .store_blob(
+            &data,
+            ContentType::OctetStream,
+            "seek-test",
+            StoreOptions::default(),
+        )
         .unwrap();
     write_txn.commit().unwrap();
 
@@ -147,7 +166,12 @@ fn blob_mvcc_isolation() {
     {
         let txn = db.begin_write().unwrap();
         id1 = txn
-            .store_blob(b"visible", ContentType::OctetStream, "v", StoreOptions::default())
+            .store_blob(
+                b"visible",
+                ContentType::OctetStream,
+                "v",
+                StoreOptions::default(),
+            )
             .unwrap();
         txn.commit().unwrap();
     }
@@ -194,7 +218,12 @@ fn blob_delete_reclaims_chunks() {
     {
         let txn = db.begin_write().unwrap();
         blob_id = txn
-            .store_blob(&data, ContentType::OctetStream, "del", StoreOptions::default())
+            .store_blob(
+                &data,
+                ContentType::OctetStream,
+                "del",
+                StoreOptions::default(),
+            )
             .unwrap();
         txn.commit().unwrap();
     }
@@ -217,7 +246,12 @@ fn blob_delete_reclaims_chunks() {
     {
         let txn = db.begin_write().unwrap();
         blob_id2 = txn
-            .store_blob(&data2, ContentType::OctetStream, "new", StoreOptions::default())
+            .store_blob(
+                &data2,
+                ContentType::OctetStream,
+                "new",
+                StoreOptions::default(),
+            )
             .unwrap();
         txn.commit().unwrap();
     }
@@ -238,7 +272,12 @@ fn blob_chunked_survives_reopen() {
         let db = Database::create(tmpfile.path()).unwrap();
         let txn = db.begin_write().unwrap();
         blob_id = txn
-            .store_blob(&data, ContentType::Embedding, "persist", StoreOptions::default())
+            .store_blob(
+                &data,
+                ContentType::Embedding,
+                "persist",
+                StoreOptions::default(),
+            )
             .unwrap();
         txn.commit().unwrap();
     }
@@ -399,9 +438,7 @@ fn flash_accepts_valid_nand_geometry() {
 #[test]
 fn rapid_non_durable_commits() {
     let tmpfile = create_tempfile();
-    let db = Builder::new()
-        .create(tmpfile.path())
-        .unwrap();
+    let db = Builder::new().create(tmpfile.path()).unwrap();
 
     // Do many non-durable commits in sequence
     for i in 0..100u64 {
@@ -411,7 +448,9 @@ fn rapid_non_durable_commits() {
             let mut table = write_txn.open_table(table_def).unwrap();
             table.insert(&i, &(i * 2)).unwrap();
         }
-        write_txn.set_durability(shodh_redb::Durability::None).unwrap();
+        write_txn
+            .set_durability(shodh_redb::Durability::None)
+            .unwrap();
         write_txn.commit().unwrap();
     }
 
@@ -582,7 +621,8 @@ fn flash_crash_at_write_recovers() {
 
     // Phase 2: Attempt more writes with a countdown that will fail during commit.
     // Give enough writes (50) for mount+open overhead, then fail during the bulk insert commit.
-    let hw2 = CountdownFlashHardware::from_snapshot(geometry, pre_crash_snapshot.clone(), 50, u64::MAX);
+    let hw2 =
+        CountdownFlashHardware::from_snapshot(geometry, pre_crash_snapshot.clone(), 50, u64::MAX);
     let backend2 = FlashBackend::mount(hw2).unwrap();
     let db2 = Builder::new().create_with_backend(backend2).unwrap();
 
@@ -599,7 +639,8 @@ fn flash_crash_at_write_recovers() {
     drop(db2);
 
     // Phase 3: Recover from the pre-crash snapshot
-    let hw3 = CountdownFlashHardware::from_snapshot(geometry, pre_crash_snapshot, u64::MAX, u64::MAX);
+    let hw3 =
+        CountdownFlashHardware::from_snapshot(geometry, pre_crash_snapshot, u64::MAX, u64::MAX);
     let backend3 = FlashBackend::mount(hw3).unwrap();
     let db3 = Builder::new().create_with_backend(backend3).unwrap();
 

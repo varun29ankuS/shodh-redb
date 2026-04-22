@@ -48,10 +48,7 @@ impl BlockMap {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    fn from_bytes(
-        data: &[u8],
-        physical_blocks: u32,
-    ) -> core::result::Result<Self, &'static str> {
+    fn from_bytes(data: &[u8], physical_blocks: u32) -> core::result::Result<Self, &'static str> {
         if data.len() % 4 != 0 {
             return Err("block map length not a multiple of 4");
         }
@@ -208,7 +205,9 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
             return Err(err("erase_block_size must be a power of two"));
         }
         if geo.erase_block_size % geo.write_page_size != 0 {
-            return Err(err("erase_block_size must be a multiple of write_page_size"));
+            return Err(err(
+                "erase_block_size must be a multiple of write_page_size",
+            ));
         }
         if geo.logical_block_count() == 0 {
             return Err(err(
@@ -935,9 +934,8 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         if map_len % 4 != 0 {
             return Err(err());
         }
-        let block_map =
-            BlockMap::from_bytes(&data[cursor..cursor + map_len], data_physical_blocks)
-                .map_err(|_| err())?;
+        let block_map = BlockMap::from_bytes(&data[cursor..cursor + map_len], data_physical_blocks)
+            .map_err(|_| err())?;
         cursor += map_len;
 
         // erase counts

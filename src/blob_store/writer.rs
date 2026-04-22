@@ -1,5 +1,7 @@
 use crate::WriteTransaction;
-use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, Sha256Key, StoreOptions, BLOB_CHUNK_SIZE};
+use crate::blob_store::types::{
+    BLOB_CHUNK_SIZE, BlobId, BlobMeta, BlobRef, ContentType, Sha256Key, StoreOptions,
+};
 use crate::tree_store::{Xxh3StreamHasher, hash64_with_seed};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -104,7 +106,8 @@ impl<'txn> BlobWriter<'txn> {
         while offset < data.len() {
             let space = BLOB_CHUNK_SIZE - self.chunk_buf.len();
             let copy_len = (data.len() - offset).min(space);
-            self.chunk_buf.extend_from_slice(&data[offset..offset + copy_len]);
+            self.chunk_buf
+                .extend_from_slice(&data[offset..offset + copy_len]);
             offset += copy_len;
 
             if self.chunk_buf.len() == BLOB_CHUNK_SIZE {

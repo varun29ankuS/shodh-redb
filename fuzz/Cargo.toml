@@ -20,6 +20,13 @@ package = "shodh-redb"
 path = ".."
 features = ["std"]
 
+# Fuzzer feeds corrupted data; debug assertions in the allocator and
+# page manager fire on inconsistent state that is expected during crash
+# recovery. Disable debug assertions so the fuzzer tests the production
+# code path (which handles corruption via Result/StorageError).
+[profile.release]
+debug-assertions = false
+
 # Prevent this from interfering with workspaces
 [workspace]
 members = ["."]

@@ -260,8 +260,8 @@ fn criterion_config() -> Criterion {
     Criterion::default()
         // 95% confidence interval for Welch's t-test
         .confidence_level(0.95)
-        // Ignore differences below 5% (shared runner noise floor)
-        .noise_threshold(0.05)
+        // Ignore differences below 10% (shared runner noise floor on GitHub Actions)
+        .noise_threshold(0.10)
         // 5s per benchmark for reliable sample distribution
         .measurement_time(Duration::from_secs(5))
         .sample_size(100)

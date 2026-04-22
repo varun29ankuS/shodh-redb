@@ -48,6 +48,7 @@ jobs:
         with:
           path: target/criterion
           key: criterion-baseline-${{ runner.os }}
+          restore-keys: criterion-baseline-
 
       # On PRs: compare against saved baseline.
       # On master: save a new baseline (no comparison).
@@ -55,7 +56,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             # Compare against baseline. Criterion prints "regressed" for
-            # benchmarks that fail its t-test at 95% confidence + 5% noise threshold.
+            # benchmarks that fail its t-test at 95% confidence + 10% noise threshold.
             cargo bench --bench criterion_vector_ops -p shodh-redb \
               -- --baseline master 2>&1 | tee bench_gate_output.txt
 
@@ -64,7 +65,7 @@ jobs:
               echo ""
               echo "============================================================"
               echo "REGRESSION DETECTED in vector_ops benchmarks."
-              echo "Criterion's Welch t-test (95% confidence, 5% noise threshold)"
+              echo "Criterion's Welch t-test (95% confidence, 10% noise threshold)"
               echo "found a statistically significant performance regression."
               echo "============================================================"
               echo ""

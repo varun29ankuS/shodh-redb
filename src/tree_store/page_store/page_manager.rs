@@ -1467,7 +1467,7 @@ impl TransactionalMemory {
         {
             // Idempotent: during crash recovery on corrupted data, a page may
             // appear in multiple B-tree paths and be freed more than once.
-            // The remove may return false — that is tolerated.
+            // The remove may return false -- that is tolerated.
             self.allocated_pages.lock().remove(&page);
             // open_dirty_pages is always consistent (not derived from on-disk data).
             debug_assert!(!self.open_dirty_pages.lock().contains(&page));

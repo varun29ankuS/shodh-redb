@@ -2796,6 +2796,8 @@ impl Builder {
             let pages = unsafe { sysconf(_SC_PHYS_PAGES) };
             let page_size = unsafe { sysconf(_SC_PAGESIZE) };
             if pages > 0 && page_size > 0 {
+                // Values are positive (checked above) and physical page counts fit in usize.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 Some((pages as usize).saturating_mul(page_size as usize))
             } else {
                 None
@@ -2826,7 +2828,13 @@ impl Builder {
                     0,
                 )
             };
-            if ret == 0 { Some(size as usize) } else { None }
+            if ret == 0 {
+                // On 32-bit targets, clamp to usize::MAX; the cache clamp handles the rest.
+                #[allow(clippy::cast_possible_truncation)]
+                Some(size.min(usize::MAX as u64) as usize)
+            } else {
+                None
+            }
         }
         #[cfg(target_os = "windows")]
         {

@@ -2965,12 +2965,14 @@ impl WriteTransaction {
 
     // Commit without a durability guarantee
     pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
-        // Use oldest_live_read_transaction (not nondurable variant) to respect
-        // ALL readers -- including those pinned to durable ancestors. This
-        // prevents freeing pages that any concurrent reader might still traverse.
+        // Use oldest_live_read_transaction_excluding_nondurable to find real
+        // external readers (from begin_read / savepoints), ignoring the synthetic
+        // durable-ancestor holds added by register_non_durable_commit. This
+        // prevents freeing pages that real concurrent readers might traverse,
+        // while still allowing eager reclamation when no external readers exist.
         let mut free_until_transaction = self
             .transaction_tracker
-            .oldest_live_read_transaction()?
+            .oldest_live_read_transaction_excluding_nondurable()?
             .map(|x| x.next())
             .transpose()?
             .unwrap_or(self.transaction_id);
@@ -3015,24 +3017,12 @@ impl WriteTransaction {
             self.mem.get_last_durable_transaction_id()?,
         )?;
 
-        // Only free system-tree pages immediately if no readers exist.
-        // Otherwise a concurrent reader traversing the system tree (e.g.
-        // blob_stats, list_tables) could encounter a freed/reallocated page.
-        if !post_commit_frees.is_empty() {
-            let has_live_readers = self
-                .transaction_tracker
-                .oldest_live_read_transaction()?
-                .is_some();
-            if has_live_readers {
-                // Defer: push back into SYSTEM_FREED_TABLE for a future commit.
-                let system_tables = self.system_tables.lock();
-                let system_freed_pages = system_tables.system_freed_pages();
-                system_freed_pages.lock().extend(post_commit_frees);
-            } else {
-                for page in post_commit_frees {
-                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
-                }
-            }
+        // These pages are safe to free unconditionally: they were allocated by a
+        // prior non-durable commit (unpersisted) and freed by system-tree mutations
+        // during THIS commit. No reader can reference them because they haven't been
+        // visible in any committed snapshot that a reader could pin to.
+        for page in post_commit_frees {
+            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
         }
 
         Ok(())

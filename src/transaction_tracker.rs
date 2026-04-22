@@ -457,4 +457,31 @@ impl TransactionTracker {
         }
         Ok(())
     }
+
+    // Returns the oldest external read transaction -- one not solely held by
+    // durable-ancestor registrations from pending non-durable commits. Used to
+    // guard non-durable page freeing: if real readers exist, their snapshots
+    // must not be invalidated by freeing pages they might traverse.
+    pub(crate) fn oldest_live_read_transaction_excluding_nondurable(
+        &self,
+    ) -> Result<Option<TransactionId>> {
+        #[cfg(feature = "std")]
+        let state = self.state.lock()?;
+        #[cfg(not(feature = "std"))]
+        let state = self.state.lock();
+
+        // Count durable-ancestor holds from non-durable commits.
+        let mut ancestor_holds: BTreeMap<TransactionId, u64> = BTreeMap::new();
+        for ancestor in state.pending_non_durable_commits.values() {
+            *ancestor_holds.entry(*ancestor).or_insert(0) += 1;
+        }
+
+        for (id, refcount) in &state.live_read_transactions {
+            let nondurable_holds = ancestor_holds.get(id).copied().unwrap_or(0);
+            if *refcount > nondurable_holds {
+                return Ok(Some(*id));
+            }
+        }
+        Ok(None)
+    }
 }

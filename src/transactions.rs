@@ -2881,7 +2881,12 @@ impl WriteTransaction {
         // system_freed_pages so the pre-commit reader check (below) and
         // SYSTEM_FREED_TABLE lifecycle handle them correctly.
         {
-            let deferred: Vec<_> = self.mem.deferred_system_tree_frees.lock().drain(..).collect();
+            let deferred: Vec<_> = self
+                .mem
+                .deferred_system_tree_frees
+                .lock()
+                .drain(..)
+                .collect();
             if !deferred.is_empty() {
                 system_freed_pages.lock().extend(deferred);
             }
@@ -2977,10 +2982,7 @@ impl WriteTransaction {
                 .oldest_live_read_transaction()?
                 .is_some_and(|oldest| oldest < self.transaction_id);
             if has_old_readers {
-                self.mem
-                    .deferred_system_tree_frees
-                    .lock()
-                    .extend(remaining);
+                self.mem.deferred_system_tree_frees.lock().extend(remaining);
             } else {
                 for page in remaining {
                     self.mem.free(page, &mut PageTrackerPolicy::Ignore);
@@ -3047,7 +3049,12 @@ impl WriteTransaction {
         // These are persisted pages. If no readers reference the old snapshot,
         // free immediately; otherwise re-defer for the next durable commit.
         {
-            let pages: Vec<_> = self.mem.deferred_system_tree_frees.lock().drain(..).collect();
+            let pages: Vec<_> = self
+                .mem
+                .deferred_system_tree_frees
+                .lock()
+                .drain(..)
+                .collect();
             if !pages.is_empty() {
                 let has_old_readers = self
                     .transaction_tracker

@@ -1393,7 +1393,7 @@ impl WriteTransaction {
         }
 
         // 2) queue all pages that became unreachable.
-        // First, clear freed_pages — it may contain pages freed by the
+        // First, clear freed_pages -- it may contain pages freed by the
         // rolled-back B-tree operations (e.g., page splits during inserts).
         // Those frees are invalid after restoring the old root because the
         // old root still references the "freed" pages.
@@ -2419,7 +2419,7 @@ impl WriteTransaction {
                     dedup_idx.insert(&sha_key, &updated)?;
                 } else {
                     dedup_idx.remove(&sha_key)?;
-                    // Last reference to shared chunks — delete them
+                    // Last reference to shared chunks -- delete them
                     delete_source_chunks = true;
                 }
                 drop(dedup_idx);
@@ -2429,7 +2429,7 @@ impl WriteTransaction {
             dedup_map.remove(blob_id)?;
             drop(dedup_map);
         } else {
-            // Non-deduped blob — always delete its chunks
+            // Non-deduped blob -- always delete its chunks
             delete_source_chunks = true;
         }
 
@@ -2452,7 +2452,7 @@ impl WriteTransaction {
     /// Returns statistics about blob store usage.
     ///
     /// With chunked B-tree storage, there is no separate blob region and no
-    /// fragmentation — dead chunks are freed by normal B-tree GC. The
+    /// fragmentation -- dead chunks are freed by normal B-tree GC. The
     /// `region_bytes` field equals `live_bytes` and `dead_bytes` is always 0.
     pub fn blob_stats(&self) -> Result<BlobStats> {
         let mut system_tables = self.system_tables.lock();
@@ -2478,14 +2478,14 @@ impl WriteTransaction {
         Ok(BlobStats {
             blob_count,
             live_bytes,
-            region_bytes: live_bytes, // No separate region — data is in B-tree
+            region_bytes: live_bytes, // No separate region -- data is in B-tree
             dead_bytes: 0,
             fragmentation_ratio: 0.0,
         })
     }
 
     /// Blob compaction pass. With chunked B-tree storage, blob data is managed
-    /// by the normal B-tree page allocator — there is no separate region to
+    /// by the normal B-tree page allocator -- there is no separate region to
     /// compact. This method is retained for API compatibility and returns (0, 0).
     #[allow(clippy::unused_self)]
     pub(crate) fn compact_blobs_pass(&self, _write_from_zero: bool) -> Result<(u64, u64)> {
@@ -2555,12 +2555,17 @@ impl WriteTransaction {
                 .deallocate_savepoint(*savepoint, *transaction)?;
         }
 
+        // system_freed_pages may be non-empty after a non-durable commit if system-tree
+        // page frees were deferred due to active readers. They will be processed by a
+        // future durable commit. Only assert empty for durable commits.
         debug_assert!(
-            self.system_tables
-                .lock()
-                .system_freed_pages()
-                .lock()
-                .is_empty()
+            matches!(self.durability, InternalDurability::None)
+                || self
+                    .system_tables
+                    .lock()
+                    .system_freed_pages()
+                    .lock()
+                    .is_empty()
         );
         debug_assert!(self.tables.lock().freed_pages.lock().is_empty());
 
@@ -2960,9 +2965,12 @@ impl WriteTransaction {
 
     // Commit without a durability guarantee
     pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
+        // Use oldest_live_read_transaction (not nondurable variant) to respect
+        // ALL readers -- including those pinned to durable ancestors. This
+        // prevents freeing pages that any concurrent reader might still traverse.
         let mut free_until_transaction = self
             .transaction_tracker
-            .oldest_live_read_nondurable_transaction()?
+            .oldest_live_read_transaction()?
             .map(|x| x.next())
             .transpose()?
             .unwrap_or(self.transaction_id);
@@ -3007,8 +3015,24 @@ impl WriteTransaction {
             self.mem.get_last_durable_transaction_id()?,
         )?;
 
-        for page in post_commit_frees {
-            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+        // Only free system-tree pages immediately if no readers exist.
+        // Otherwise a concurrent reader traversing the system tree (e.g.
+        // blob_stats, list_tables) could encounter a freed/reallocated page.
+        if !post_commit_frees.is_empty() {
+            let has_live_readers = self
+                .transaction_tracker
+                .oldest_live_read_transaction()?
+                .is_some();
+            if has_live_readers {
+                // Defer: push back into SYSTEM_FREED_TABLE for a future commit.
+                let system_tables = self.system_tables.lock();
+                let system_freed_pages = system_tables.system_freed_pages();
+                system_freed_pages.lock().extend(post_commit_frees);
+            } else {
+                for page in post_commit_frees {
+                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                }
+            }
         }
 
         Ok(())
@@ -3363,7 +3387,7 @@ pub struct ReadTransaction {
     mem: Arc<TransactionalMemory>,
     tree: TableTree,
     /// System root captured at transaction creation time. Readers must use this
-    /// instead of `mem.get_system_root()` to ensure MVCC consistency — the live
+    /// instead of `mem.get_system_root()` to ensure MVCC consistency -- the live
     /// system root advances with each writer commit, and reading it at call time
     /// would give a root whose pages may have been freed and reallocated.
     system_root: Option<BtreeHeader>,

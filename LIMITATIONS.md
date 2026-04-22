@@ -6,7 +6,7 @@
 
 ## Durability
 
-- **`Durability::None` + MVCC**: Non-durable commits free pages immediately. Long-running read transactions may encounter freed pages if the read snapshot predates the page free. `Durability::Immediate` avoids this.
+- **`Durability::None` page reclamation**: Non-durable commits defer page freeing when concurrent readers exist. This prevents MVCC corruption but means page reclamation is delayed until readers close or a durable commit runs. Write-heavy non-durable workloads with long-lived readers may see higher memory/file usage.
 
 ## Storage
 

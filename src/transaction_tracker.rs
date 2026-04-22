@@ -457,19 +457,4 @@ impl TransactionTracker {
         }
         Ok(())
     }
-
-    // Returns the transaction id of the oldest non-durable transaction which has not been processed
-    // for freeing, which has live read transactions
-    pub(crate) fn oldest_live_read_nondurable_transaction(&self) -> Result<Option<TransactionId>> {
-        #[cfg(feature = "std")]
-        let state = self.state.lock()?;
-        #[cfg(not(feature = "std"))]
-        let state = self.state.lock();
-        for id in state.live_read_transactions.keys() {
-            if state.pending_non_durable_commits.contains_key(id) {
-                return Ok(Some(*id));
-            }
-        }
-        Ok(None)
-    }
 }

@@ -361,7 +361,18 @@ impl Value for InternalTableDefinition {
     where
         Self: 'a,
     {
-        debug_assert!(data.len() > 22);
+        // Minimum length: 1 (type) + 8 (length) + 1 (root null) + BtreeHeader::serialized_size()
+        // + 1 (key null) + 4 (key size) + 1 (val null) + 4 (val size) + 4 (key align)
+        // + 4 (val align) + 4 (key_type_len) = 32 + BtreeHeader::serialized_size()
+        // NOTE: Value trait prevents returning Result; controlled panic is the best we can do.
+        let min_len = 1 + size_of::<u64>() + 1 + BtreeHeader::serialized_size() + 1
+            + size_of::<u32>() + 1 + size_of::<u32>() + size_of::<u32>()
+            + size_of::<u32>() + size_of::<u32>();
+        assert!(
+            data.len() >= min_len,
+            "InternalTableDefinition: data length {} < minimum {min_len} (corrupted table metadata)",
+            data.len()
+        );
         let mut offset = 0;
         let legacy = TableType::is_legacy(data[offset]);
         debug_assert!(!legacy);

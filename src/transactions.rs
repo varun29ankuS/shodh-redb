@@ -2585,7 +2585,7 @@ impl WriteTransaction {
                     "Page is not allocated: {page:?}"
                 );
                 debug_assert!(!self.mem.uncommitted(page), "Page is uncommitted: {page:?}");
-                access_guard.as_mut().push_back(page);
+                access_guard.as_mut().push_back(page)?;
             }
 
             pagination_counter += 1;
@@ -2618,7 +2618,7 @@ impl WriteTransaction {
                     "Page is not allocated: {page:?}"
                 );
                 debug_assert!(self.mem.uncommitted(page), "Page is committed: {page:?}");
-                access_guard.as_mut().push_back(page);
+                access_guard.as_mut().push_back(page)?;
             }
 
             pagination_counter += 1;
@@ -3155,7 +3155,7 @@ impl WriteTransaction {
                         let required = PageList::required_bytes(new_pages.len());
                         let mut page_list_mut = data_freed.insert_reserve(&key, required)?;
                         for page in new_pages {
-                            page_list_mut.as_mut().push_back(page);
+                            page_list_mut.as_mut().push_back(page)?;
                         }
                     }
                 }
@@ -3223,7 +3223,7 @@ impl WriteTransaction {
                         {
                             unpersisted_pages.push(page);
                         } else {
-                            access_guard.as_mut().push_back(page);
+                            access_guard.as_mut().push_back(page)?;
                         }
                     }
                     drop(access_guard);

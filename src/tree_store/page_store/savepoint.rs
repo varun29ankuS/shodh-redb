@@ -145,14 +145,20 @@ impl SerializedSavepoint<'_> {
         let id = u64::from_le_bytes(
             data[offset..(offset + size_of::<u64>())]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| {
+                    crate::StorageError::Corrupted("savepoint: id field truncated".into())
+                })?,
         );
         offset += size_of::<u64>();
 
         let transaction_id = u64::from_le_bytes(
             data[offset..(offset + size_of::<u64>())]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| {
+                    crate::StorageError::Corrupted(
+                        "savepoint: transaction_id field truncated".into(),
+                    )
+                })?,
         );
         offset += size_of::<u64>();
 
@@ -167,7 +173,11 @@ impl SerializedSavepoint<'_> {
             Some(BtreeHeader::from_le_bytes(
                 data[offset..(offset + BtreeHeader::serialized_size())]
                     .try_into()
-                    .unwrap(),
+                    .map_err(|_| {
+                        crate::StorageError::Corrupted(
+                            "savepoint: user_root header truncated".into(),
+                        )
+                    })?,
             ))
         } else {
             None

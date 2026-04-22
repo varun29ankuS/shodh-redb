@@ -678,7 +678,7 @@ impl<'a> LeafAccessor<'a> {
                 self.page
                     .get(offset..(offset + size_of::<u32>()))?
                     .try_into()
-                    .unwrap(),
+                    .ok()?,
             ) as usize;
             Some(end)
         }
@@ -710,7 +710,7 @@ impl<'a> LeafAccessor<'a> {
                 self.page
                     .get(offset..(offset + size_of::<u32>()))?
                     .try_into()
-                    .unwrap(),
+                    .ok()?,
             ) as usize;
             Some(end)
         }
@@ -1534,7 +1534,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
                 .memory()
                 .get(offset..(offset + size_of::<u32>()))?
                 .try_into()
-                .unwrap(),
+                .ok()?,
         ) as usize)
     }
 
@@ -1558,9 +1558,11 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
 
         let offset = 8 + size_of::<Checksum>() * n;
         Some(Checksum::from_le_bytes(
-            self.page.memory()[offset..(offset + size_of::<Checksum>())]
+            self.page
+                .memory()
+                .get(offset..(offset + size_of::<Checksum>()))?
                 .try_into()
-                .unwrap(),
+                .ok()?,
         ))
     }
 
@@ -1572,9 +1574,11 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         let offset =
             8 + size_of::<Checksum>() * self.count_children() + PageNumber::serialized_size() * n;
         Some(PageNumber::from_le_bytes(
-            self.page.memory()[offset..(offset + PageNumber::serialized_size())]
+            self.page
+                .memory()
+                .get(offset..(offset + PageNumber::serialized_size()))?
                 .try_into()
-                .unwrap(),
+                .ok()?,
         ))
     }
 

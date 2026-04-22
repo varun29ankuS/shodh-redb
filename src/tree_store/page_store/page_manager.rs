@@ -955,8 +955,11 @@ impl TransactionalMemory {
         let Some(value) = tree.get(&AllocatorStateKey::TransactionId)? else {
             return Ok(false);
         };
-        let transaction_id =
-            TransactionId::new(u64::from_le_bytes(value.value().try_into().unwrap()));
+        let transaction_id = TransactionId::new(u64::from_le_bytes(
+            value.value().try_into().map_err(|_| {
+                StorageError::Corrupted("allocator state: invalid transaction ID length".into())
+            })?,
+        ));
 
         Ok(transaction_id == self.get_last_committed_transaction_id()?)
     }

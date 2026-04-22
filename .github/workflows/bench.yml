@@ -11,19 +11,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ──────────────────────────────────────────────────────────────────
+  # ------------------------------------------------------------------
   # GATE: Pure-compute benchmarks (vector_ops)
   #
-  # These are deterministic, CPU-bound workloads with low variance on
-  # shared runners. Criterion runs a Welch t-test on 100 samples with
-  # 5s measurement time per benchmark. A regression that Criterion's
-  # statistics flag as significant will fail the build.
-  # ──────────────────────────────────────────────────────────────────
+  # On PRs: check out master, build a fresh baseline, then switch to
+  # the PR branch and compare -- all in the same job on the same runner.
+  # This eliminates cross-run variance from different runner hardware.
+  #
+  # On master pushes: no comparison needed (baseline is always fresh).
+  # ------------------------------------------------------------------
   bench-gate:
     name: Performance Gate (vector ops)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Fetch enough history to check out both master and the PR branch.
+          fetch-depth: 0
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -40,55 +44,41 @@ jobs:
       - name: Install Rust
         run: rustup component add rustfmt
 
-      # Restore saved Criterion baseline (full statistical data, not a single number).
-      # Only on PRs — master pushes create fresh baselines.
-      - name: Restore Criterion baseline
-        if: github.event_name == 'pull_request'
-        uses: actions/cache/restore@v4
-        with:
-          path: target/criterion
-          key: criterion-baseline-${{ runner.os }}
-          restore-keys: criterion-baseline-
-
-      # On PRs: compare against saved baseline.
-      # On master: save a new baseline (no comparison).
       - name: Run vector_ops benchmarks
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # Compare against baseline. Criterion prints "regressed" for
-            # benchmarks that fail its t-test at 95% confidence + 10% noise threshold.
+            # Step 1: Build baseline from master on THIS runner.
+            git checkout ${{ github.event.pull_request.base.sha }}
+            cargo bench --bench criterion_vector_ops -p shodh-redb \
+              -- --save-baseline master 2>&1
+
+            # Step 2: Switch back to PR branch and compare.
+            git checkout ${{ github.sha }}
             cargo bench --bench criterion_vector_ops -p shodh-redb \
               -- --baseline master 2>&1 | tee bench_gate_output.txt
 
             # Fail if Criterion detected a statistically significant regression.
+            # Criterion's Welch t-test (95% confidence, 10% noise threshold)
             if grep -q "regressed" bench_gate_output.txt; then
               echo ""
               echo "============================================================"
               echo "REGRESSION DETECTED in vector_ops benchmarks."
-              echo "Criterion's Welch t-test (95% confidence, 10% noise threshold)"
-              echo "found a statistically significant performance regression."
+              echo "Baseline and PR measured on the same runner to eliminate"
+              echo "cross-run hardware variance."
               echo "============================================================"
               echo ""
               grep -B2 "regressed" bench_gate_output.txt
               exit 1
             fi
           else
-            # Master push: save baseline for future PR comparisons.
+            # Master push: just run benchmarks (no comparison needed).
             cargo bench --bench criterion_vector_ops -p shodh-redb \
               -- --save-baseline master
           fi
         env:
           RUSTFLAGS: ""
 
-      # Save Criterion baseline data on master pushes.
-      - name: Save Criterion baseline
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/cache/save@v4
-        with:
-          path: target/criterion
-          key: criterion-baseline-${{ runner.os }}
-
-  # ──────────────────────────────────────────────────────────────────
+  # ------------------------------------------------------------------
   # ADVISORY: I/O-bound benchmarks (kv, blob, ivfpq)
   #
   # These involve disk writes, file creation, and memory allocation.
@@ -96,7 +86,7 @@ jobs:
   # on I/O workloads, making hard gates unreliable. Instead, we post
   # an advisory comment on PRs with benchmark-action (15% comment
   # threshold) and NEVER fail CI.
-  # ──────────────────────────────────────────────────────────────────
+  # ------------------------------------------------------------------
   bench-report:
     name: Benchmark Report (I/O)
     runs-on: ubuntu-latest
@@ -146,7 +136,7 @@ jobs:
           auto-push: false
           comment-on-alert: true
           alert-threshold: "115%"
-          # Advisory only — never fail CI on I/O benchmarks.
+          # Advisory only -- never fail CI on I/O benchmarks.
           fail-on-alert: false
           comment-always: ${{ github.event_name == 'pull_request' }}
           alert-comment-cc-users: "@varun29ankuS"

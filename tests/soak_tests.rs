@@ -227,7 +227,7 @@ fn kv_reader(db: &Database, stop: &AtomicBool, next_key: &AtomicU64, stats: &Soa
                     "value mismatch at key {key}"
                 );
             }
-            // Key might not exist yet if writer hasn't committed — that's fine.
+            // Key might not exist yet if writer hasn't committed -- that's fine.
         }
         stats.kv_reads.fetch_add(20, Ordering::Relaxed);
     }
@@ -549,7 +549,7 @@ fn run_soak(durability: Durability) {
 
         // Header-level only during concurrent non-durable writes. Full/Pages
         // verification is unsafe here because non-durable page freeing bypasses
-        // MVCC — pages from the durable tree can be freed mid-traversal.
+        // MVCC -- pages from the durable tree can be freed mid-traversal.
         // A Full verification is done after quiescing writers (below).
         let report = db.verify_integrity(VerifyLevel::Header).unwrap();
         assert!(
@@ -558,7 +558,7 @@ fn run_soak(durability: Durability) {
             start.elapsed().as_secs_f64()
         );
 
-        // Check blob stats — allow off-by-one because blob_worker may have
+        // Check blob stats -- allow off-by-one because blob_worker may have
         // pushed to blob_ids but the read snapshot predates that commit,
         // or vice versa.
         {
@@ -572,14 +572,14 @@ fn run_soak(durability: Durability) {
             );
         }
 
-        // Check file size sanity — scale limit with soak duration.
+        // Check file size sanity -- scale limit with soak duration.
         // Base: 256 MB for 60s. Scale linearly for longer runs.
         let duration_secs = soak_duration().as_secs().max(1);
         let max_file_bytes = 256u64 * 1024 * 1024 * duration_secs.max(60) / 60;
         let file_size = std::fs::metadata(tmpfile.path()).unwrap().len();
         assert!(
             file_size < max_file_bytes,
-            "file size {file_size} bytes exceeds {} MB — possible leak",
+            "file size {file_size} bytes exceeds {} MB  -- possible leak",
             max_file_bytes / (1024 * 1024)
         );
 
@@ -1028,7 +1028,7 @@ fn soak_mixed_with_compaction() {
             }
         }
         Err(e) => {
-            // Compaction can fail if persistent savepoints exist — not fatal for the test.
+            // Compaction can fail if persistent savepoints exist -- not fatal for the test.
             eprintln!("  Compaction skipped: {e}");
         }
     }

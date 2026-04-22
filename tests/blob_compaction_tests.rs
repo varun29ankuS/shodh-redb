@@ -64,7 +64,7 @@ fn compact_noop_on_clean_db() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. compact_after_single_delete — with chunked storage, always noop
+// 2. compact_after_single_delete -- with chunked storage, always noop
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_after_single_delete() {
@@ -77,7 +77,7 @@ fn compact_after_single_delete() {
 
     delete_one(&db, &id2);
 
-    // With chunked storage, deleted chunks are freed immediately —
+    // With chunked storage, deleted chunks are freed immediately --
     // compact_blobs() finds no dead space.
     let report = db.compact_blobs().unwrap();
     assert!(report.was_noop);
@@ -118,7 +118,7 @@ fn compact_after_all_deleted() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. compact_preserves_content — data integrity after deletion of other blobs
+// 4. compact_preserves_content -- data integrity after deletion of other blobs
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_preserves_content() {
@@ -132,7 +132,7 @@ fn compact_preserves_content() {
     let id_a = store_one(&db, &payload_a, "pa");
     let id_b = store_one(&db, &payload_b, "pb");
 
-    // Delete a third blob — chunks freed immediately.
+    // Delete a third blob -- chunks freed immediately.
     let id_dead = store_one(&db, &[0xFF; 2048], "dead");
     delete_one(&db, &id_dead);
 
@@ -234,7 +234,7 @@ fn compact_with_dedup_interaction() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. compact_large_blobs — data integrity with large payloads
+// 7. compact_large_blobs -- data integrity with large payloads
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_large_blobs() {
@@ -277,7 +277,7 @@ fn blob_stats_with_chunked_storage() {
 
     delete_one(&db, &id2);
 
-    // With chunked storage, dead_bytes is always 0 — chunks are freed immediately.
+    // With chunked storage, dead_bytes is always 0 -- chunks are freed immediately.
     let wtx = db.begin_write().unwrap();
     let stats = wtx.blob_stats().unwrap();
     wtx.abort().unwrap();
@@ -342,7 +342,7 @@ fn online_compaction_run() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. compact_progress_callback — noop means no progress events
+// 11. compact_progress_callback -- noop means no progress events
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_progress_callback() {
@@ -368,7 +368,7 @@ fn compact_progress_callback() {
 }
 
 // ---------------------------------------------------------------------------
-// 12. compact_progress_cancellation — noop returns Ok, not Cancelled
+// 12. compact_progress_cancellation -- noop returns Ok, not Cancelled
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_progress_cancellation() {
@@ -418,7 +418,7 @@ fn compact_blocked_by_read_txn() {
 }
 
 // ---------------------------------------------------------------------------
-// 14. should_compact_never_recommends — chunked storage has no dead bytes
+// 14. should_compact_never_recommends -- chunked storage has no dead bytes
 // ---------------------------------------------------------------------------
 #[test]
 fn should_compact_never_recommends() {
@@ -441,12 +441,12 @@ fn should_compact_never_recommends() {
     let recommendation = db.should_compact_blobs().unwrap();
     assert!(
         recommendation.is_none(),
-        "chunked storage has no dead bytes — should never recommend blob compaction"
+        "chunked storage has no dead bytes  -- should never recommend blob compaction"
     );
 }
 
 // ---------------------------------------------------------------------------
-// 15. compact_then_store_new — new blobs work after compact_blobs call
+// 15. compact_then_store_new -- new blobs work after compact_blobs call
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_then_store_new() {

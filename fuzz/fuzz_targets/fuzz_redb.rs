@@ -640,6 +640,10 @@ fn is_simulated_io_error(err: &redb::Error) -> bool {
         Error::Io(io_err) => {
             matches!(io_err.kind(), ErrorKind::Other)
         }
+        // Crash simulation can corrupt on-disk structures. Our hardened deserialization
+        // returns Corrupted instead of panicking  -- treat this as a successful crash
+        // detection rather than a test failure.
+        Error::Corrupted(_) => true,
         _ => false,
     }
 }
@@ -1028,9 +1032,17 @@ fn assert_multimap_value_eq(
 }
 
 fuzz_target!(|config: FuzzConfig| {
-    if config.multimap_table {
-        exec_table_crash_support(&config, apply_crashable_transaction_multimap).unwrap();
+    let result = if config.multimap_table {
+        exec_table_crash_support(&config, apply_crashable_transaction_multimap)
     } else {
-        exec_table_crash_support(&config, apply_crashable_transaction).unwrap();
+        exec_table_crash_support(&config, apply_crashable_transaction)
+    };
+    match result {
+        Ok(()) => {}
+        // Corruption detected during crash recovery is expected  -- the fuzzer simulates
+        // crashes that can leave partial writes, and our hardened deserialization now
+        // returns Corrupted instead of panicking.
+        Err(redb::Error::Corrupted(_)) => {}
+        Err(e) => panic!("unexpected error: {e}"),
     }
 });

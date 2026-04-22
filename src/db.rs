@@ -782,7 +782,7 @@ impl Database {
     }
 
     /// Like `verify_primary_checksums` but verifies B-tree structural invariants.
-    /// Uses `TransactionGuard::Verification` — only safe when called from
+    /// Uses `TransactionGuard::Verification` -- only safe when called from
     /// `check_integrity` which has exclusive `&mut self` access.
     #[cfg(feature = "std")]
     pub(crate) fn verify_primary_structure(
@@ -1413,7 +1413,7 @@ impl Database {
         }
 
         // With chunked B-tree blob storage, blob data lives in the normal
-        // page-managed B-tree — there is no separate file region to truncate.
+        // page-managed B-tree -- there is no separate file region to truncate.
 
         Ok(BlobCompactionReport {
             blobs_relocated,
@@ -2854,7 +2854,7 @@ impl Builder {
                 fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
             }
             let mut status = MemoryStatusEx {
-                // MemoryStatusEx is repr(C): 2×u32 + 7×u64 = 64 bytes, fits in u32.
+                // MemoryStatusEx is repr(C): 2xu32 + 7xu64 = 64 bytes, fits in u32.
                 #[allow(clippy::cast_possible_truncation)]
                 dw_length: core::mem::size_of::<MemoryStatusEx>() as u32,
                 dw_memory_load: 0,
@@ -2870,7 +2870,7 @@ impl Builder {
             // initialized with dw_length set to the correct size.
             let ret = unsafe { GlobalMemoryStatusEx(core::ptr::addr_of_mut!(status)) };
             if ret != 0 {
-                // On 32-bit targets, clamp to usize::MAX (4 GiB) — the cache clamp
+                // On 32-bit targets, clamp to usize::MAX (4 GiB) -- the cache clamp
                 // will bring it down to 1 GiB anyway.
                 let total = status.ull_total_phys;
                 #[allow(clippy::cast_possible_truncation)]

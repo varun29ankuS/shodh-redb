@@ -1302,7 +1302,7 @@ impl TransactionalMemory {
             }
         }
 
-        // Increment ref count unconditionally — used by try_free_if_unpersisted
+        // Increment ref count unconditionally -- used by try_free_if_unpersisted
         // to prevent freeing pages with active readers.
         *(self
             .read_page_ref_counts
@@ -1430,7 +1430,7 @@ impl TransactionalMemory {
     ///
     /// NOTE: This does not check `read_page_ref_counts`. Freeing a page that has
     /// active readers is safe because `PageImpl` holds an `Arc<[u8]>` copy of the
-    /// data — the allocator reclamation doesn't invalidate existing readers.
+    /// data -- the allocator reclamation doesn't invalidate existing readers.
     pub(crate) fn free_if_unpersisted(
         &self,
         page: PageNumber,
@@ -1448,7 +1448,7 @@ impl TransactionalMemory {
         #[cfg(debug_assertions)]
         {
             // read_page_ref_counts is not checked here because freeing a page
-            // with active readers is safe — PageImpl holds an Arc<[u8]> copy.
+            // with active readers is safe -- PageImpl holds an Arc<[u8]> copy.
             debug_assert!(self.allocated_pages.lock().remove(&page));
             debug_assert!(!self.open_dirty_pages.lock().contains(&page));
         }

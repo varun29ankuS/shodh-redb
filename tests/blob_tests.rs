@@ -2501,7 +2501,7 @@ fn blob_compact_basic() {
         txn.commit().unwrap();
     }
 
-    // With chunked B-tree storage, deleted blobs are removed by CoW —
+    // With chunked B-tree storage, deleted blobs are removed by CoW --
     // there is no dead space or fragmentation in a separate region.
     {
         let read_txn = db.begin_read().unwrap();
@@ -2594,7 +2594,7 @@ fn blob_compact_all_deleted() {
         txn.commit().unwrap();
     }
 
-    // With chunked B-tree storage, compaction is a no-op — deleted blob
+    // With chunked B-tree storage, compaction is a no-op -- deleted blob
     // data is reclaimed by B-tree CoW, not a separate region compactor.
     let report = db.compact_blobs().unwrap();
     assert!(report.was_noop);
@@ -2773,7 +2773,7 @@ fn blob_compact_large() {
     assert!(report.was_noop);
     assert_eq!(report.bytes_reclaimed, 0);
 
-    // Verify data integrity — surviving blobs still counted
+    // Verify data integrity -- surviving blobs still counted
     let read_txn = db.begin_read().unwrap();
     let stats = read_txn.blob_stats().unwrap();
     assert_eq!(stats.blob_count, 2);

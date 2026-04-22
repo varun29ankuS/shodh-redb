@@ -149,7 +149,7 @@ fn blob_reader_cross_chunk_seek() {
     // Seek into the middle of chunk 2 (offset 140KB)
     reader.seek(SeekFrom::Start(140 * 1024)).unwrap();
 
-    // Read 30KB — should cross from chunk 2 into chunk 3
+    // Read 30KB -- should cross from chunk 2 into chunk 3
     let mut buf = vec![0u8; 30 * 1024];
     reader.read_exact(&mut buf).unwrap();
     assert_eq!(buf, &data[140 * 1024..170 * 1024]);
@@ -205,7 +205,7 @@ fn blob_mvcc_isolation() {
     assert!(read_txn2.get_blob(&id2).unwrap().is_some());
 }
 
-/// Blob delete should also remove chunks — verify by storing, deleting,
+/// Blob delete should also remove chunks -- verify by storing, deleting,
 /// then storing again (sequence numbers should not conflict).
 #[test]
 fn blob_delete_reclaims_chunks() {
@@ -240,7 +240,7 @@ fn blob_delete_reclaims_chunks() {
     assert!(read_txn.get_blob(&blob_id).unwrap().is_none());
     drop(read_txn);
 
-    // Store another blob — should succeed without conflict
+    // Store another blob -- should succeed without conflict
     let data2 = vec![0xCDu8; 50 * 1024];
     let blob_id2;
     {
@@ -474,7 +474,7 @@ fn rapid_non_durable_commits() {
 }
 
 // ---------------------------------------------------------------------------
-// Crash Recovery Tests — Flash Backend
+// Crash Recovery Tests -- Flash Backend
 // ---------------------------------------------------------------------------
 
 /// Flash hardware wrapper that fails writes after a countdown reaches zero.
@@ -671,7 +671,7 @@ fn journal_slot_corruption_recovers_from_other_slot() {
     let backend = FlashBackend::mount(hw).unwrap();
     let db = Builder::new().create_with_backend(backend).unwrap();
 
-    // Commit 1 — writes to slot A
+    // Commit 1 -- writes to slot A
     let txn = db.begin_write().unwrap();
     {
         let mut t = txn.open_table(CRASH_TABLE).unwrap();
@@ -679,7 +679,7 @@ fn journal_slot_corruption_recovers_from_other_slot() {
     }
     txn.commit().unwrap();
 
-    // Commit 2 — writes to slot B
+    // Commit 2 -- writes to slot B
     let txn2 = db.begin_write().unwrap();
     {
         let mut t = txn2.open_table(CRASH_TABLE).unwrap();
@@ -705,7 +705,7 @@ fn journal_slot_corruption_recovers_from_other_slot() {
         }
     }
 
-    // Remount from corrupted snapshot — should recover from slot A
+    // Remount from corrupted snapshot -- should recover from slot A
     let hw2 = CountdownFlashHardware::from_snapshot(geometry, snapshot, u64::MAX, u64::MAX);
     let backend2 = FlashBackend::mount(hw2).unwrap();
     let db2 = Builder::new().create_with_backend(backend2).unwrap();

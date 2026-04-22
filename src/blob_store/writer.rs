@@ -150,7 +150,7 @@ impl<'txn> BlobWriter<'txn> {
             .ok_or(crate::StorageError::BlobWriterFinished)?;
         let checksum = hasher.finish_128();
 
-        // Build BlobRef — offset=u64::MAX means own chunks (non-deduped)
+        // Build BlobRef -- offset=u64::MAX means own chunks (non-deduped)
         let blob_ref = BlobRef {
             offset: u64::MAX,
             length: self.bytes_written,

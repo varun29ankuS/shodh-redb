@@ -2875,6 +2875,18 @@ impl WriteTransaction {
         }
 
         let system_freed_pages = system_tables.system_freed_pages();
+
+        // Drain deferred system-tree frees from a previous commit that was
+        // blocked by concurrent readers. Merge them into this commit's
+        // system_freed_pages so the pre-commit reader check (below) and
+        // SYSTEM_FREED_TABLE lifecycle handle them correctly.
+        {
+            let deferred: Vec<_> = self.mem.deferred_system_tree_frees.lock().drain(..).collect();
+            if !deferred.is_empty() {
+                system_freed_pages.lock().extend(deferred);
+            }
+        }
+
         let system_tree = system_tables.table_tree.flush_table_root_updates()?;
         system_tree
             .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
@@ -2954,11 +2966,26 @@ impl WriteTransaction {
         self.transaction_tracker
             .clear_pending_non_durable_commits()?;
 
-        // Free any remaining system-tree pages that were not deferred. This only
-        // happens when no live read transactions existed at commit time, making
-        // immediate freeing safe since no reader can reference these pages.
-        for page in system_freed_pages.lock().drain(..) {
-            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+        // Post-commit: re-check for live readers before freeing system-tree pages.
+        // A reader may have registered between the pre-commit check and
+        // mem.commit(), holding a reference to the old system tree. If so,
+        // defer freeing until the next durable commit when those readers close.
+        let remaining: Vec<_> = system_freed_pages.lock().drain(..).collect();
+        if !remaining.is_empty() {
+            let has_old_readers = self
+                .transaction_tracker
+                .oldest_live_read_transaction()?
+                .is_some_and(|oldest| oldest < self.transaction_id);
+            if has_old_readers {
+                self.mem
+                    .deferred_system_tree_frees
+                    .lock()
+                    .extend(remaining);
+            } else {
+                for page in remaining {
+                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                }
+            }
         }
 
         // Drain deferred non-durable frees. After a durable commit, all old
@@ -3011,6 +3038,26 @@ impl WriteTransaction {
                         if self.mem.unpersisted(page) {
                             self.mem.free(page, &mut PageTrackerPolicy::Ignore);
                         }
+                    }
+                }
+            }
+        }
+
+        // Drain deferred system-tree frees from a previous durable commit.
+        // These are persisted pages. If no readers reference the old snapshot,
+        // free immediately; otherwise re-defer for the next durable commit.
+        {
+            let pages: Vec<_> = self.mem.deferred_system_tree_frees.lock().drain(..).collect();
+            if !pages.is_empty() {
+                let has_old_readers = self
+                    .transaction_tracker
+                    .oldest_live_read_transaction_excluding_nondurable()?
+                    .is_some();
+                if has_old_readers {
+                    self.mem.deferred_system_tree_frees.lock().extend(pages);
+                } else {
+                    for page in pages {
+                        self.mem.free(page, &mut PageTrackerPolicy::Ignore);
                     }
                 }
             }

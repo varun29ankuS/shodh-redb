@@ -159,6 +159,11 @@ pub(crate) struct TransactionalMemory {
     // were traversing the old snapshot. Drained at the start of the next
     // non-durable commit (or durable commit).
     pub(crate) deferred_nondurable_frees: Mutex<Vec<PageNumber>>,
+    // Persisted system-tree pages whose freeing was deferred because a reader
+    // registered between the pre-commit check and post-commit freeing (TOCTOU).
+    // Drained into system_freed_pages at the start of the next durable commit
+    // so they enter the standard SYSTEM_FREED_TABLE lifecycle.
+    pub(crate) deferred_system_tree_frees: Mutex<Vec<PageNumber>>,
     // Read integrity verification
     read_verification: ReadVerification,
     sampling_rng: SamplingRng,
@@ -401,6 +406,7 @@ impl TransactionalMemory {
             pending_blob_state: Mutex::new(BlobCommitState::default()),
             eof_mirror_size: portable_atomic::AtomicU64::new(initial_mirror_size),
             deferred_nondurable_frees: Mutex::new(Vec::new()),
+            deferred_system_tree_frees: Mutex::new(Vec::new()),
             read_verification,
             sampling_rng: SamplingRng::new(0xDEAD_BEEF_CAFE_1337),
             read_verification_callback,
@@ -511,6 +517,7 @@ impl TransactionalMemory {
             pending_blob_state: Mutex::new(BlobCommitState::default()),
             eof_mirror_size: portable_atomic::AtomicU64::new(0),
             deferred_nondurable_frees: Mutex::new(Vec::new()),
+            deferred_system_tree_frees: Mutex::new(Vec::new()),
             read_verification: ReadVerification::None,
             sampling_rng: SamplingRng::new(0xDEAD_BEEF_CAFE_1337),
             read_verification_callback: None,

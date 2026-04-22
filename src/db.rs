@@ -2785,10 +2785,16 @@ impl Builder {
     fn total_physical_memory() -> Option<usize> {
         #[cfg(target_os = "linux")]
         {
+            // sysconf constants from POSIX / glibc
+            const _SC_PHYS_PAGES: core::ffi::c_int = 85;
+            const _SC_PAGESIZE: core::ffi::c_int = 30;
+            unsafe extern "C" {
+                fn sysconf(name: core::ffi::c_int) -> core::ffi::c_long;
+            }
             // SAFETY: sysconf is a POSIX-defined function; _SC_PHYS_PAGES and _SC_PAGESIZE
             // are standard constants. Both calls return -1 on error (handled below).
-            let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
-            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            let pages = unsafe { sysconf(_SC_PHYS_PAGES) };
+            let page_size = unsafe { sysconf(_SC_PAGESIZE) };
             if pages > 0 && page_size > 0 {
                 Some((pages as usize).saturating_mul(page_size as usize))
             } else {
@@ -2797,13 +2803,22 @@ impl Builder {
         }
         #[cfg(target_os = "macos")]
         {
+            unsafe extern "C" {
+                fn sysctlbyname(
+                    name: *const core::ffi::c_char,
+                    oldp: *mut core::ffi::c_void,
+                    oldlenp: *mut usize,
+                    newp: *mut core::ffi::c_void,
+                    newlen: usize,
+                ) -> core::ffi::c_int;
+            }
             let mut size: u64 = 0;
             let mut len = core::mem::size_of::<u64>();
             let name = b"hw.memsize\0";
             // SAFETY: sysctlbyname with a valid null-terminated name and a properly sized
             // output buffer. The kernel writes exactly 8 bytes on success.
             let ret = unsafe {
-                libc::sysctlbyname(
+                sysctlbyname(
                     name.as_ptr() as *const _,
                     &mut size as *mut u64 as *mut _,
                     &mut len,

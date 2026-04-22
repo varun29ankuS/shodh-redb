@@ -187,16 +187,12 @@ fn train_subvectors(
             .collect();
         for handle in handles {
             results.push(handle.join().map_err(|_| {
-                crate::StorageError::Internal(
-                    "IVF-PQ subvector training thread panicked".into(),
-                )
+                crate::StorageError::Internal("IVF-PQ subvector training thread panicked".into())
             })?);
         }
         Ok::<(), crate::StorageError>(())
     })
-    .map_err(|_| {
-        crate::StorageError::Internal("IVF-PQ training scope panicked".into())
-    })?;
+    .map_err(|_| crate::StorageError::Internal("IVF-PQ training scope panicked".into()))?;
 
     let mut all_data = Vec::with_capacity(num_subvectors * 256 * sub_dim);
     for chunk in results {

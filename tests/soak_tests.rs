@@ -1004,7 +1004,10 @@ fn soak_mixed_with_compaction() {
 
     // Full integrity check after quiescing
     let report = db.verify_integrity(VerifyLevel::Full).unwrap();
-    assert!(report.valid, "post-quiesce verify_integrity failed: {report:?}");
+    assert!(
+        report.valid,
+        "post-quiesce verify_integrity failed: {report:?}"
+    );
 
     // Run compaction now that no readers/writers are active.
     // Need &mut Database, so unwrap the Arc.
@@ -1032,7 +1035,10 @@ fn soak_mixed_with_compaction() {
 
     // Verify integrity after compaction
     let report = db.verify_integrity(VerifyLevel::Full).unwrap();
-    assert!(report.valid, "post-compaction verify_integrity failed: {report:?}");
+    assert!(
+        report.valid,
+        "post-compaction verify_integrity failed: {report:?}"
+    );
 
     stats.print_summary(start.elapsed());
 }

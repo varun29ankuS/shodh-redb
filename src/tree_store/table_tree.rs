@@ -41,18 +41,12 @@ impl PageListMut {
                 "PageListMut: data too small for length header".into(),
             ));
         }
-        let len = u16::from_le_bytes(
-            self.data[..size_of::<u16>()]
-                .try_into()
-                .map_err(|_| {
-                    crate::StorageError::Corrupted(
-                        "PageListMut: length header truncated".into(),
-                    )
-                })?,
-        );
-        let new_len = len.checked_add(1).ok_or_else(|| {
-            crate::StorageError::Corrupted("PageListMut: length overflow".into())
-        })?;
+        let len = u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().map_err(|_| {
+            crate::StorageError::Corrupted("PageListMut: length header truncated".into())
+        })?);
+        let new_len = len
+            .checked_add(1)
+            .ok_or_else(|| crate::StorageError::Corrupted("PageListMut: length overflow".into()))?;
         self.data[..size_of::<u16>()].copy_from_slice(&new_len.to_le_bytes());
         let len: usize = len.into();
         let start = size_of::<u16>() + PageNumber::serialized_size() * len;

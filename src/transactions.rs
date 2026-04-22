@@ -4524,7 +4524,10 @@ mod test {
         for i in 0..10u64 {
             for j in 0..100u64 {
                 let key = 10_000 + i * 100 + j;
-                assert!(table.get(&key).unwrap().is_none(), "key {key} should not exist");
+                assert!(
+                    table.get(&key).unwrap().is_none(),
+                    "key {key} should not exist"
+                );
             }
         }
     }

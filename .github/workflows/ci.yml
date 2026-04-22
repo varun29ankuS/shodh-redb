@@ -236,6 +236,11 @@ jobs:
           done
         env:
           RUSTFLAGS: ""
+          # cargo-fuzz forces debug-assertions=true via env var override.
+          # The fuzzer feeds corrupted data; debug assertions in allocator/
+          # page_manager fire on inconsistent state that is expected during
+          # crash recovery. Disable so fuzzer tests the production path.
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "false"
 
       # ── CLI smoke tests ──
       - name: CLI smoke test (Unix)

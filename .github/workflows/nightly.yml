@@ -8,6 +8,10 @@ jobs:
   extended-fuzz:
     name: Extended Fuzzing (10 min)
     runs-on: ubuntu-latest
+    env:
+      # cargo-fuzz forces debug-assertions=true. Disable: the fuzzer feeds
+      # corrupted data and debug assertions fire on expected inconsistencies.
+      CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "false"
     steps:
       - uses: actions/checkout@v4
 

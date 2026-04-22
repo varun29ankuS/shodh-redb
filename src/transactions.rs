@@ -34,6 +34,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::mem;
 use core::borrow::Borrow;
 use core::cmp::min;
 use core::fmt::{Debug, Display, Formatter};
@@ -2960,6 +2961,15 @@ impl WriteTransaction {
             self.mem.free(page, &mut PageTrackerPolicy::Ignore);
         }
 
+        // Drain deferred non-durable frees. After a durable commit, all old
+        // non-durable snapshots are superseded and no reader can reference
+        // those pages.
+        for page in self.mem.deferred_nondurable_frees.lock().drain(..) {
+            if self.mem.unpersisted(page) {
+                self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+            }
+        }
+
         Ok(())
     }
 
@@ -2980,6 +2990,31 @@ impl WriteTransaction {
             free_until_transaction = TransactionId::min(free_until_transaction, oldest_savepoint);
         }
         self.process_freed_pages_nondurable(free_until_transaction)?;
+
+        // Also drain any deferred system-tree frees from a previous commit that
+        // was blocked by concurrent readers. Re-check: if those readers have
+        // since closed, free now; otherwise re-defer.
+        let mut still_deferred = vec![];
+        {
+            let mut deferred = self.mem.deferred_nondurable_frees.lock();
+            if !deferred.is_empty() {
+                let pages = mem::take(&mut *deferred);
+                drop(deferred);
+                let has_old_readers = self
+                    .transaction_tracker
+                    .oldest_live_read_transaction_excluding_nondurable()?
+                    .is_some();
+                if has_old_readers {
+                    still_deferred = pages;
+                } else {
+                    for page in pages {
+                        if self.mem.unpersisted(page) {
+                            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                        }
+                    }
+                }
+            }
+        }
 
         let mut post_commit_frees = vec![];
 
@@ -3017,12 +3052,28 @@ impl WriteTransaction {
             self.mem.get_last_durable_transaction_id()?,
         )?;
 
-        // These pages are safe to free unconditionally: they were allocated by a
-        // prior non-durable commit (unpersisted) and freed by system-tree mutations
-        // during THIS commit. No reader can reference them because they haven't been
-        // visible in any committed snapshot that a reader could pin to.
-        for page in post_commit_frees {
-            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+        // Post-commit safety check: the secondary slot now holds our transaction
+        // ID, so any new begin_read() opens at self.transaction_id and uses the
+        // NEW system tree. Only readers registered BEFORE our non_durable_commit()
+        // could be traversing the old system-tree pages in post_commit_frees.
+        // This check is race-free: after the secondary slot update, no new reader
+        // can register at the old snapshot.
+        if !post_commit_frees.is_empty() || !still_deferred.is_empty() {
+            post_commit_frees.extend(still_deferred);
+            let has_old_readers = self
+                .transaction_tracker
+                .oldest_live_read_transaction_excluding_nondurable()?
+                .is_some_and(|oldest| oldest < self.transaction_id);
+            if has_old_readers {
+                self.mem
+                    .deferred_nondurable_frees
+                    .lock()
+                    .extend(post_commit_frees);
+            } else {
+                for page in post_commit_frees {
+                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                }
+            }
         }
 
         Ok(())

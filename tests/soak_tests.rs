@@ -277,9 +277,14 @@ fn blob_worker(
             let idx = rng.random_range(0..ids.len());
             let read_id = ids[idx];
             drop(ids);
+            // Yield to widen MVCC race window between commit and read.
+            std::thread::yield_now();
             let rtxn = db.begin_read().unwrap();
             let result = rtxn.get_blob(&read_id).unwrap();
-            assert!(result.is_some(), "blob {read_id:?} should exist");
+            assert!(
+                result.is_some(),
+                "blob {read_id:?} missing after commit (durability={durability:?})",
+            );
             stats.blob_reads.fetch_add(1, Ordering::Relaxed);
         }
     }

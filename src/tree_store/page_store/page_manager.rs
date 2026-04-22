@@ -155,6 +155,10 @@ pub(crate) struct TransactionalMemory {
     // successful durable commit writes the mirror. Used by file_len() to
     // exclude the mirror so that new blob regions are placed correctly.
     eof_mirror_size: portable_atomic::AtomicU64,
+    // System-tree pages whose freeing was deferred because concurrent readers
+    // were traversing the old snapshot. Drained at the start of the next
+    // non-durable commit (or durable commit).
+    pub(crate) deferred_nondurable_frees: Mutex<Vec<PageNumber>>,
     // Read integrity verification
     read_verification: ReadVerification,
     sampling_rng: SamplingRng,
@@ -396,6 +400,7 @@ impl TransactionalMemory {
             compression,
             pending_blob_state: Mutex::new(BlobCommitState::default()),
             eof_mirror_size: portable_atomic::AtomicU64::new(initial_mirror_size),
+            deferred_nondurable_frees: Mutex::new(Vec::new()),
             read_verification,
             sampling_rng: SamplingRng::new(0xDEAD_BEEF_CAFE_1337),
             read_verification_callback,
@@ -505,6 +510,7 @@ impl TransactionalMemory {
             compression,
             pending_blob_state: Mutex::new(BlobCommitState::default()),
             eof_mirror_size: portable_atomic::AtomicU64::new(0),
+            deferred_nondurable_frees: Mutex::new(Vec::new()),
             read_verification: ReadVerification::None,
             sampling_rng: SamplingRng::new(0xDEAD_BEEF_CAFE_1337),
             read_verification_callback: None,

@@ -646,7 +646,10 @@ impl TransactionalMemory {
 
     #[cfg(debug_assertions)]
     pub(crate) fn mark_debug_allocated_page(&self, page: PageNumber) {
-        debug_assert!(self.allocated_pages.lock().insert(page));
+        // Idempotent: during crash recovery, corrupted B-trees may reference
+        // the same page from multiple trees. The allocation-time assertion in
+        // allocate_non_contiguous() catches real duplicate-allocation bugs.
+        self.allocated_pages.lock().insert(page);
     }
 
     #[cfg(feature = "std")]

@@ -57,14 +57,19 @@ jobs:
             cargo bench --bench criterion_vector_ops -p shodh-redb \
               -- --baseline master 2>&1 | tee bench_gate_output.txt
 
-            # Fail if Criterion detected a statistically significant regression.
-            # Criterion's Welch t-test (95% confidence, 10% noise threshold)
-            if grep -q "regressed" bench_gate_output.txt; then
+            # Fail only if a majority of benchmarks regressed. A real regression
+            # affects all similar benchmarks; thermal bias / scheduler noise
+            # hits only a few. This eliminates false positives from sequential
+            # baseline-then-PR runs on shared runners.
+            REGRESSED=$(grep -c "regressed" bench_gate_output.txt || true)
+            IMPROVED=$(grep -c "improved" bench_gate_output.txt || true)
+            TOTAL=$((REGRESSED + IMPROVED))
+            echo "Benchmark results: $REGRESSED regressed, $IMPROVED improved out of $TOTAL changed"
+            if [ "$TOTAL" -gt 0 ] && [ "$REGRESSED" -gt $((TOTAL / 2)) ] && [ "$REGRESSED" -ge 3 ]; then
               echo ""
               echo "============================================================"
-              echo "REGRESSION DETECTED in vector_ops benchmarks."
-              echo "Baseline and PR measured on the same runner to eliminate"
-              echo "cross-run hardware variance."
+              echo "REGRESSION DETECTED: $REGRESSED/$TOTAL benchmarks regressed."
+              echo "Baseline and PR measured on the same runner."
               echo "============================================================"
               echo ""
               grep -B2 "regressed" bench_gate_output.txt

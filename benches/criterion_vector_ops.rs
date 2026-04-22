@@ -265,7 +265,9 @@ fn criterion_config() -> Criterion {
         // 5s per benchmark for reliable sample distribution
         .measurement_time(Duration::from_secs(5))
         .sample_size(100)
-        .warm_up_time(Duration::from_secs(2))
+        // 5s warmup: shared runners need longer to reach thermal equilibrium
+        // so sequential baseline/PR runs see consistent CPU frequency.
+        .warm_up_time(Duration::from_secs(5))
 }
 
 criterion_group! {

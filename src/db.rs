@@ -2727,7 +2727,8 @@ impl Builder {
     ///
     /// ## Defaults
     ///
-    /// - `cache_size_bytes`: 1GiB
+    /// - `cache_size_bytes`: 25% of physical RAM, clamped to \[16 MiB, 1 GiB\].
+    ///   Falls back to 1 GiB if memory detection fails, or 0 on `no_std`.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let mut result = Self {
@@ -2736,9 +2737,7 @@ impl Builder {
             // It is part of the file format, so can be enabled in the future.
             page_size: PAGE_SIZE,
             region_size: None,
-            // TODO: Default should probably take into account the total system memory
             read_cache_size_bytes: 0,
-            // TODO: Default should probably take into account the total system memory
             write_cache_size_bytes: 0,
             compression: CompressionConfig::None,
             repair_callback: Box::new(|_| {}),
@@ -2752,8 +2751,115 @@ impl Builder {
             blob_compaction_policy: BlobCompactionPolicy::default(),
         };
 
-        result.set_cache_size(1024 * 1024 * 1024);
+        result.set_cache_size(Self::default_cache_size());
         result
+    }
+
+    /// Compute system-aware default cache size.
+    ///
+    /// On `std` targets, uses 25% of physical RAM, clamped to \[16 MiB, 1 GiB\].
+    /// On `no_std` targets (or if detection fails), returns 1 GiB.
+    fn default_cache_size() -> usize {
+        #[cfg(feature = "std")]
+        {
+            Self::detect_system_cache_size()
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            1024 * 1024 * 1024
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn detect_system_cache_size() -> usize {
+        const MIN_CACHE: usize = 16 * 1024 * 1024; // 16 MiB
+        const MAX_CACHE: usize = 1024 * 1024 * 1024; // 1 GiB
+
+        match Self::total_physical_memory() {
+            Some(bytes) => (bytes / 4).clamp(MIN_CACHE, MAX_CACHE),
+            None => MAX_CACHE,
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn total_physical_memory() -> Option<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: sysconf is a POSIX-defined function; _SC_PHYS_PAGES and _SC_PAGESIZE
+            // are standard constants. Both calls return -1 on error (handled below).
+            let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            if pages > 0 && page_size > 0 {
+                Some((pages as usize).saturating_mul(page_size as usize))
+            } else {
+                None
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut size: u64 = 0;
+            let mut len = core::mem::size_of::<u64>();
+            let name = b"hw.memsize\0";
+            // SAFETY: sysctlbyname with a valid null-terminated name and a properly sized
+            // output buffer. The kernel writes exactly 8 bytes on success.
+            let ret = unsafe {
+                libc::sysctlbyname(
+                    name.as_ptr() as *const _,
+                    &mut size as *mut u64 as *mut _,
+                    &mut len,
+                    core::ptr::null_mut(),
+                    0,
+                )
+            };
+            if ret == 0 { Some(size as usize) } else { None }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            #[repr(C)]
+            struct MemoryStatusEx {
+                dw_length: u32,
+                dw_memory_load: u32,
+                ull_total_phys: u64,
+                ull_avail_phys: u64,
+                ull_total_page_file: u64,
+                ull_avail_page_file: u64,
+                ull_total_virtual: u64,
+                ull_avail_virtual: u64,
+                ull_avail_extended_virtual: u64,
+            }
+            unsafe extern "system" {
+                fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+            }
+            let mut status = MemoryStatusEx {
+                // MemoryStatusEx is repr(C): 2×u32 + 7×u64 = 64 bytes, fits in u32.
+                #[allow(clippy::cast_possible_truncation)]
+                dw_length: core::mem::size_of::<MemoryStatusEx>() as u32,
+                dw_memory_load: 0,
+                ull_total_phys: 0,
+                ull_avail_phys: 0,
+                ull_total_page_file: 0,
+                ull_avail_page_file: 0,
+                ull_total_virtual: 0,
+                ull_avail_virtual: 0,
+                ull_avail_extended_virtual: 0,
+            };
+            // SAFETY: GlobalMemoryStatusEx is a stable Win32 API. The struct is properly
+            // initialized with dw_length set to the correct size.
+            let ret = unsafe { GlobalMemoryStatusEx(core::ptr::addr_of_mut!(status)) };
+            if ret != 0 {
+                // On 32-bit targets, clamp to usize::MAX (4 GiB) — the cache clamp
+                // will bring it down to 1 GiB anyway.
+                let total = status.ull_total_phys;
+                #[allow(clippy::cast_possible_truncation)]
+                Some(total.min(usize::MAX as u64) as usize)
+            } else {
+                None
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            None
+        }
     }
 
     /// Set a callback which will be invoked periodically in the event that the database file needs
@@ -3751,5 +3857,16 @@ mod test {
         // start_compaction should fail because of persistent savepoint
         let result = db.start_compaction();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_cache_size_within_bounds() {
+        let size = crate::db::Builder::default_cache_size();
+        let min = 16 * 1024 * 1024; // 16 MiB
+        let max = 1024 * 1024 * 1024; // 1 GiB
+        assert!(
+            size >= min && size <= max,
+            "default_cache_size {size} outside [{min}, {max}]"
+        );
     }
 }

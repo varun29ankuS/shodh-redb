@@ -4,8 +4,6 @@
 
 - **Single-writer, multiple-reader**: Only one write transaction can be active at a time. Multiple read transactions can run concurrently with a single writer. There is no multi-process support or file locking — opening the same database file from multiple processes causes corruption.
 
-- **Savepoint + concurrent readers**: `restore_savepoint` can trigger page allocator assertions in debug builds when interleaved with concurrent write workloads or non-durable commits. Use savepoints in isolated (non-concurrent) write paths.
-
 ## Durability
 
 - **`Durability::None` + MVCC**: Non-durable commits free pages immediately. Long-running read transactions may encounter freed pages if the read snapshot predates the page free. `Durability::Immediate` avoids this.

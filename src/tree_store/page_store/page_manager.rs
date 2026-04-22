@@ -1496,6 +1496,14 @@ impl TransactionalMemory {
         self.allocated_since_commit.lock().contains(&page)
     }
 
+    /// Drain all pages from the uncommitted set and return them.
+    ///
+    /// Used by `restore_savepoint` to reclaim pages allocated during a
+    /// rolled-back write that are now unreachable from any tree root.
+    pub(crate) fn drain_uncommitted(&self) -> Vec<PageNumber> {
+        self.allocated_since_commit.lock().drain().collect()
+    }
+
     pub(crate) fn unpersisted(&self, page: PageNumber) -> bool {
         self.unpersisted.lock().contains(&page)
     }

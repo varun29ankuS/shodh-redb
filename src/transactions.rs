@@ -1366,12 +1366,18 @@ impl WriteTransaction {
         //    and new roots
         // 3) update the system tree to remove invalid persistent savepoints.
 
-        // 1) restore the table tree
+        // 1) Snapshot pages allocated in this transaction before restore operations.
+        // These pages were allocated for the rolled-back writes and are now
+        // unreachable. We snapshot BEFORE the restore's own B-tree operations
+        // (which may allocate new pages that must NOT be freed).
+        let orphaned_pages = self.mem.drain_uncommitted();
+
+        // 1a) restore the table tree (set_root also clears pending_table_updates)
         {
             self.tables.lock().set_root(savepoint.get_user_root())?;
         }
 
-        // 1a) purge all transactions that happened after the savepoint from the data freed tree
+        // 1b) purge all transactions that happened after the savepoint from the data freed tree
         let txn_id = savepoint.get_transaction_id().next()?.raw_id();
         {
             let lower = TransactionIdWithPagination {
@@ -1386,10 +1392,15 @@ impl WriteTransaction {
             // No need to process the system freed table, because it only rolls forward
         }
 
-        // 2) queue all pages that became unreachable
+        // 2) queue all pages that became unreachable.
+        // First, clear freed_pages — it may contain pages freed by the
+        // rolled-back B-tree operations (e.g., page splits during inserts).
+        // Those frees are invalid after restoring the old root because the
+        // old root still references the "freed" pages.
         {
             let tables = self.tables.lock();
             let mut data_freed_pages = tables.freed_pages.lock();
+            data_freed_pages.clear();
             let mut system_tables = self.system_tables.lock();
             let data_allocated = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
             let lower = TransactionIdWithPagination {
@@ -1411,6 +1422,18 @@ impl WriteTransaction {
         for persistent_savepoint in self.list_persistent_savepoints()? {
             if persistent_savepoint > savepoint.get_id().0 {
                 self.delete_persistent_savepoint(persistent_savepoint)?;
+            }
+        }
+
+        // 4) Free orphaned pages from the rolled-back writes.
+        // These were snapshotted in step 1 before any restore B-tree operations.
+        // They are unreachable from the restored tree root and must be returned
+        // to the buddy allocator to prevent a persistent storage leak.
+        if !orphaned_pages.is_empty() {
+            let tables = self.tables.lock();
+            let mut tracker = tables.allocated_pages.lock();
+            for page in orphaned_pages {
+                self.mem.free(page, &mut tracker);
             }
         }
 
@@ -4438,7 +4461,7 @@ impl crate::storage_traits::StorageRead for ReadTransaction {
 
 #[cfg(test)]
 mod test {
-    use crate::{Database, TableDefinition};
+    use crate::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
 
@@ -4458,5 +4481,51 @@ mod test {
         let db2 = Database::create(tmpfile.path()).unwrap();
         let write_txn = db2.begin_write().unwrap();
         assert!(write_txn.transaction_id > first_txn_id);
+    }
+
+    const Y: TableDefinition<u64, &[u8]> = TableDefinition::new("y");
+
+    #[test]
+    fn savepoint_restore_then_commit() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+
+        // Seed the table with enough data to force multiple page allocations
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(Y).unwrap();
+            let value = vec![0xABu8; 512];
+            for i in 0..200u64 {
+                table.insert(&i, value.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        // Repeated savepoint-restore cycles to stress page allocator
+        for round in 0..10u64 {
+            let mut txn = db.begin_write().unwrap();
+            let savepoint = txn.ephemeral_savepoint().unwrap();
+            {
+                let mut table = txn.open_table(Y).unwrap();
+                let big_value = vec![0xCDu8; 2048];
+                for i in 0..100u64 {
+                    let key = 10_000 + round * 100 + i;
+                    table.insert(&key, big_value.as_slice()).unwrap();
+                }
+            }
+            txn.restore_savepoint(&savepoint).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Verify none of the throwaway keys were persisted
+        let rtxn = db.begin_read().unwrap();
+        let table = rtxn.open_table(Y).unwrap();
+        assert_eq!(table.len().unwrap(), 200);
+        for i in 0..10u64 {
+            for j in 0..100u64 {
+                let key = 10_000 + i * 100 + j;
+                assert!(table.get(&key).unwrap().is_none(), "key {key} should not exist");
+            }
+        }
     }
 }

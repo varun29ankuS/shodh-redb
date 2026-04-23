@@ -15,6 +15,7 @@ use crate::tree_store::{
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result, StorageError};
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
@@ -355,7 +356,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             old_value: None,
                         }))
                     } else {
-                        let split_key = accessor.last_entry().key().to_vec();
+                        let split_key = accessor
+                            .last_entry()
+                            .ok_or_else(|| StorageError::Corrupted("Empty leaf during split".into()))?
+                            .key()
+                            .to_vec();
                         Ok(Box::new(InsertionResult {
                             new_root: page.get_page_number(),
                             root_checksum: page_checksum,
@@ -540,8 +545,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width())?;
-                let (child_index, child_page) = accessor.child_for_key::<K>(key);
-                let child_checksum = accessor.child_checksum(child_index).unwrap();
+                let (child_index, child_page) = accessor.child_for_key::<K>(key)?;
+                let child_checksum = accessor.child_checksum(child_index).ok_or_else(|| {
+                    StorageError::Corrupted(format!(
+                        "Branch: missing checksum at index {child_index}"
+                    ))
+                })?;
                 let sub_result =
                     self.insert_helper(self.mem.get_page(child_page)?, child_checksum, key, value)?;
 
@@ -685,7 +694,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width())?;
-                let (child_index, child_page) = accessor.child_for_key::<K>(key);
+                let (child_index, child_page) = accessor.child_for_key::<K>(key)?;
                 self.insert_inplace_helper(self.mem.get_page_mut(child_page)?, key, value)?;
                 let mut mutator = BranchMutator::new(page.memory_mut()?);
                 mutator.write_child_page(child_index, child_page, DEFERRED);
@@ -853,14 +862,26 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         let accessor = BranchAccessor::new(&page, K::fixed_width())?;
         let original_page_number = page.get_page_number();
         let (child_index, child_page_number) = match target {
-            DeleteTarget::Key(key) => accessor.child_for_key::<K>(key),
-            DeleteTarget::First => (0, accessor.child_page(0).unwrap()),
+            DeleteTarget::Key(key) => accessor.child_for_key::<K>(key)?,
+            DeleteTarget::First => {
+                let page = accessor.child_page(0).ok_or_else(|| {
+                    StorageError::Corrupted("Branch: missing first child".into())
+                })?;
+                (0, page)
+            }
             DeleteTarget::Last => {
-                let last = accessor.count_children() - 1;
-                (last, accessor.child_page(last).unwrap())
+                let last = accessor.count_children().saturating_sub(1);
+                let page = accessor.child_page(last).ok_or_else(|| {
+                    StorageError::Corrupted(format!("Branch: missing last child at {last}"))
+                })?;
+                (last, page)
             }
         };
-        let child_checksum = accessor.child_checksum(child_index).unwrap();
+        let child_checksum = accessor.child_checksum(child_index).ok_or_else(|| {
+            StorageError::Corrupted(format!(
+                "Branch: missing checksum at index {child_index}"
+            ))
+        })?;
         let (result, found) = *self.delete_helper(
             self.mem.get_page(child_page_number)?,
             child_checksum,

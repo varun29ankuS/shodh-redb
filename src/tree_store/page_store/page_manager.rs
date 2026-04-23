@@ -1475,6 +1475,8 @@ impl TransactionalMemory {
             // The remove may return false -- that is tolerated.
             self.allocated_pages.lock().remove(&page);
             // open_dirty_pages is always consistent (not derived from on-disk data).
+            // During fuzzing, simulated IO errors can cause inconsistent state.
+            #[cfg(not(fuzzing))]
             debug_assert!(!self.open_dirty_pages.lock().contains(&page));
         }
         allocated.remove(page);

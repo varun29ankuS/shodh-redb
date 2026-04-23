@@ -721,7 +721,7 @@ impl<'a> LeafAccessor<'a> {
     }
 
     pub(super) fn offset_of_first_value(&self) -> usize {
-        self.offset_of_value(0).unwrap()
+        self.offset_of_value(0).unwrap_or(0)
     }
 
     pub(super) fn offset_of_value(&self, n: usize) -> Option<usize> {
@@ -741,8 +741,8 @@ impl<'a> LeafAccessor<'a> {
         if end == 0 {
             return 0;
         }
-        let end_offset = self.value_end(end - 1).unwrap();
-        let start_offset = self.value_start(start).unwrap();
+        let end_offset = self.value_end(end - 1).unwrap_or(0);
+        let start_offset = self.value_start(start).unwrap_or(0);
         end_offset.saturating_sub(start_offset)
     }
 
@@ -751,18 +751,23 @@ impl<'a> LeafAccessor<'a> {
         if end == 0 {
             return 0;
         }
-        let end_offset = self.key_end(end - 1).unwrap();
-        let start_offset = self.key_start(start).unwrap();
+        let end_offset = self.key_end(end - 1).unwrap_or(0);
+        let start_offset = self.key_start(start).unwrap_or(0);
         end_offset.saturating_sub(start_offset)
     }
 
     pub(crate) fn total_length(&self) -> usize {
+        if self.num_pairs == 0 {
+            return self.key_section_start();
+        }
         // Values are stored last
-        self.value_end(self.num_pairs() - 1).unwrap()
+        self.value_end(self.num_pairs() - 1).unwrap_or(self.key_section_start())
     }
 
     fn key_unchecked(&self, n: usize) -> &[u8] {
-        &self.page[self.key_start(n).unwrap()..self.key_end(n).unwrap()]
+        let start = self.key_start(n).unwrap_or(0);
+        let end = self.key_end(n).unwrap_or(start);
+        self.page.get(start..end).unwrap_or(&[])
     }
 
     pub(crate) fn entry(&self, n: usize) -> Option<EntryAccessor<'a>> {
@@ -777,8 +782,11 @@ impl<'a> LeafAccessor<'a> {
         Some((key, value))
     }
 
-    pub(super) fn last_entry(&self) -> EntryAccessor<'a> {
-        self.entry(self.num_pairs() - 1).unwrap()
+    pub(super) fn last_entry(&self) -> Option<EntryAccessor<'a>> {
+        if self.num_pairs == 0 {
+            return None;
+        }
+        self.entry(self.num_pairs() - 1)
     }
 }
 
@@ -1120,7 +1128,7 @@ impl<'b> LeafMutator<'b> {
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
     ) -> Self {
-        assert_eq!(page[0], LEAF);
+        debug_assert_eq!(page[0], LEAF);
         Self {
             page,
             fixed_key_size,
@@ -1137,13 +1145,15 @@ impl<'b> LeafMutator<'b> {
         new_key: &[u8],
         new_value: &[u8],
     ) -> bool {
-        let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size)
-            .expect("internal: constructed page is valid");
+        let Ok(accessor) = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size)
+        else {
+            return false;
+        };
         if overwrite {
-            let remaining = page.memory().len() - accessor.total_length();
-            let required_delta = isize::try_from(new_key.len() + new_value.len()).unwrap()
-                - isize::try_from(accessor.length_of_pairs(position, position + 1)).unwrap();
-            required_delta <= isize::try_from(remaining).unwrap()
+            let remaining = page.memory().len().saturating_sub(accessor.total_length());
+            let required_delta = isize::try_from(new_key.len() + new_value.len()).unwrap_or(0)
+                - isize::try_from(accessor.length_of_pairs(position, position + 1)).unwrap_or(0);
+            required_delta <= isize::try_from(remaining).unwrap_or(0)
         } else {
             // If this is a large page, only allow in-place appending to avoid write amplification
             //
@@ -1152,7 +1162,7 @@ impl<'b> LeafMutator<'b> {
             if page.get_page_number().page_order > 0 && position < accessor.num_pairs() {
                 return false;
             }
-            let remaining = page.memory().len() - accessor.total_length();
+            let remaining = page.memory().len().saturating_sub(accessor.total_length());
             let mut required_delta = new_key.len() + new_value.len();
             if fixed_key_size.is_none() {
                 required_delta += size_of::<u32>();
@@ -1167,10 +1177,10 @@ impl<'b> LeafMutator<'b> {
     // Insert the given key, value pair at index i and shift all following pairs to the right
     pub(crate) fn insert(&mut self, i: usize, overwrite: bool, key: &[u8], value: &[u8]) {
         let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size)
-            .expect("internal: constructed page is valid");
+            .unwrap_or_else(|_| panic!("internal: LeafMutator::insert on invalid page"));
         let required_delta = if overwrite {
-            isize::try_from(key.len() + value.len()).unwrap()
-                - isize::try_from(accessor.length_of_pairs(i, i + 1)).unwrap()
+            isize::try_from(key.len() + value.len()).unwrap_or(0)
+                - isize::try_from(accessor.length_of_pairs(i, i + 1)).unwrap_or(0)
         } else {
             let mut delta = key.len() + value.len();
             if self.fixed_key_size.is_none() {
@@ -1179,16 +1189,16 @@ impl<'b> LeafMutator<'b> {
             if self.fixed_value_size.is_none() {
                 delta += size_of::<u32>();
             }
-            delta.try_into().unwrap()
+            delta.try_into().unwrap_or(0)
         };
-        assert!(
-            isize::try_from(accessor.total_length()).unwrap() + required_delta
-                <= isize::try_from(self.page.len()).unwrap()
+        debug_assert!(
+            isize::try_from(accessor.total_length()).unwrap_or(0) + required_delta
+                <= isize::try_from(self.page.len()).unwrap_or(0)
         );
 
         let num_pairs = accessor.num_pairs();
-        let last_key_end = accessor.key_end(accessor.num_pairs() - 1).unwrap();
-        let last_value_end = accessor.value_end(accessor.num_pairs() - 1).unwrap();
+        let last_key_end = accessor.key_end(num_pairs.saturating_sub(1)).unwrap_or(0);
+        let last_value_end = accessor.value_end(num_pairs.saturating_sub(1)).unwrap_or(0);
         let shift_index = if overwrite { i + 1 } else { i };
         let shift_key_start = accessor.key_start(shift_index).unwrap_or(last_key_end);
         let shift_value_start = accessor.value_start(shift_index).unwrap_or(last_value_end);
@@ -1384,33 +1394,32 @@ impl<'b> LeafMutator<'b> {
             return;
         }
         let offset = 4 + size_of::<u32>() * i;
-        let mut ptr = u32::from_le_bytes(
-            self.page[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        );
-        ptr = (isize::try_from(ptr).unwrap() + delta).try_into().unwrap();
-        self.page[offset..(offset + size_of::<u32>())].copy_from_slice(&ptr.to_le_bytes());
+        if let Some(slice) = self.page.get(offset..offset + size_of::<u32>()) {
+            let mut ptr = u32::from_le_bytes(slice.try_into().unwrap());
+            let new_val = isize::try_from(ptr).unwrap_or(0) + delta;
+            ptr = new_val.try_into().unwrap_or(0);
+            self.page[offset..(offset + size_of::<u32>())].copy_from_slice(&ptr.to_le_bytes());
+        }
     }
 
     fn update_value_end(&mut self, i: usize, delta: isize) {
         if self.fixed_value_size.is_some() {
             return;
         }
-        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size)
-            .expect("internal: constructed page is valid");
-        let num_pairs = accessor.num_pairs();
+        let num_pairs = match LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size) {
+            Ok(a) => a.num_pairs(),
+            Err(_) => return,
+        };
         let mut offset = 4 + size_of::<u32>() * i;
         if self.fixed_key_size.is_none() {
             offset += size_of::<u32>() * num_pairs;
         }
-        let mut ptr = u32::from_le_bytes(
-            self.page[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        );
-        ptr = (isize::try_from(ptr).unwrap() + delta).try_into().unwrap();
-        self.page[offset..(offset + size_of::<u32>())].copy_from_slice(&ptr.to_le_bytes());
+        if let Some(slice) = self.page.get(offset..offset + size_of::<u32>()) {
+            let mut ptr = u32::from_le_bytes(slice.try_into().unwrap());
+            let new_val = isize::try_from(ptr).unwrap_or(0) + delta;
+            ptr = new_val.try_into().unwrap_or(0);
+            self.page[offset..(offset + size_of::<u32>())].copy_from_slice(&ptr.to_le_bytes());
+        }
     }
 }
 
@@ -1479,21 +1488,33 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
     }
 
     pub(crate) fn total_length(&self) -> usize {
+        if self.num_keys == 0 {
+            return self.key_section_start();
+        }
         // Keys are stored at the end
-        self.key_end(self.num_keys() - 1).unwrap()
+        self.key_end(self.num_keys() - 1).unwrap_or(self.key_section_start())
     }
 
-    pub(super) fn child_for_key<K: Key>(&self, query: &[u8]) -> (usize, PageNumber) {
+    pub(super) fn child_for_key<K: Key>(
+        &self,
+        query: &[u8],
+    ) -> core::result::Result<(usize, PageNumber), StorageError> {
         let mut min_child = 0; // inclusive
         let mut max_child = self.num_keys(); // inclusive
         while min_child < max_child {
             let mid = min_child.midpoint(max_child);
-            match K::compare(query, self.key(mid).unwrap()) {
+            let key = self.key(mid).ok_or_else(|| {
+                StorageError::Corrupted(format!("Branch: missing key at index {mid}"))
+            })?;
+            match K::compare(query, key) {
                 Ordering::Less => {
                     max_child = mid;
                 }
                 Ordering::Equal => {
-                    return (mid, self.child_page(mid).unwrap());
+                    let page = self.child_page(mid).ok_or_else(|| {
+                        StorageError::Corrupted(format!("Branch: missing child at index {mid}"))
+                    })?;
+                    return Ok((mid, page));
                 }
                 Ordering::Greater => {
                     min_child = mid + 1;
@@ -1502,7 +1523,10 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         }
         debug_assert_eq!(min_child, max_child);
 
-        (min_child, self.child_page(min_child).unwrap())
+        let page = self.child_page(min_child).ok_or_else(|| {
+            StorageError::Corrupted(format!("Branch: missing child at index {min_child}"))
+        })?;
+        Ok((min_child, page))
     }
 
     fn key_section_start(&self) -> usize {
@@ -1892,7 +1916,7 @@ pub(crate) struct BranchMutator<'b> {
 
 impl<'b> BranchMutator<'b> {
     pub(crate) fn new(page: &'b mut [u8]) -> Self {
-        assert_eq!(page[0], BRANCH);
+        debug_assert_eq!(page[0], BRANCH);
         Self { page }
     }
 

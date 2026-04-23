@@ -851,7 +851,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             BRANCH => {
                 let (child_index, child_page) = {
                     let accessor = BranchAccessor::new(&page, K::fixed_width())?;
-                    accessor.child_for_key::<K>(query)
+                    accessor.child_for_key::<K>(query)?
                 };
                 let child_page_mut = if self.mem.uncommitted(child_page) {
                     self.mem.get_page_mut(child_page)?
@@ -1539,7 +1539,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             BRANCH => {
                 self.maybe_verify_page(&page, expected_checksum)?;
                 let accessor = BranchAccessor::new(&page, K::fixed_width())?;
-                let (child_index, child_page_num) = accessor.child_for_key::<K>(query);
+                let (child_index, child_page_num) = accessor.child_for_key::<K>(query)?;
                 let child_checksum = accessor.child_checksum(child_index).ok_or_else(|| {
                     StorageError::invalid_child_checksum(page.get_page_number(), child_index)
                 })?;
@@ -1790,8 +1790,8 @@ fn stats_helper(
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size)?;
             let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
-            let overhead_bytes = accessor.total_length() - leaf_bytes;
-            let fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
+            let overhead_bytes = accessor.total_length().saturating_sub(leaf_bytes);
+            let fragmented_bytes = page.memory().len().saturating_sub(accessor.total_length()) as u64;
             let stored_leaf_bytes: u64 = leaf_bytes.try_into().map_err(|_| {
                 StorageError::page_corrupted(page_number, "leaf bytes overflows u64")
             })?;
@@ -1814,7 +1814,8 @@ fn stats_helper(
             let mut branch_pages = 1;
             let mut stored_leaf_bytes = 0;
             let mut metadata_bytes = accessor.total_length() as u64;
-            let mut fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
+            let mut fragmented_bytes =
+                page.memory().len().saturating_sub(accessor.total_length()) as u64;
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
                     let stats = stats_helper(child, mem, fixed_key_size, fixed_value_size)?;

@@ -902,7 +902,7 @@ fn find_iter_left<K: Key, V: Value>(
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width())?;
-            let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
+            let (child_index, child_page_number) = accessor.child_for_key::<K>(query)?;
             let child_checksum = accessor.child_checksum(child_index);
             let child_page = manager.get_page(child_page_number)?;
             if child_index + 1 < accessor.count_children() {
@@ -971,7 +971,7 @@ fn find_iter_right<K: Key, V: Value>(
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width())?;
-            let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
+            let (child_index, child_page_number) = accessor.child_for_key::<K>(query)?;
             let child_checksum = accessor.child_checksum(child_index);
             let child_page = manager.get_page(child_page_number)?;
             if child_index > 0 && accessor.child_page(child_index - 1).is_some() {

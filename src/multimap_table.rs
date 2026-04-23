@@ -85,8 +85,9 @@ fn multimap_stats_helper(
                     }
                 }
             }
-            let mut overhead_bytes = (accessor.total_length() as u64) - leaf_bytes;
-            let mut fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
+            let mut overhead_bytes = (accessor.total_length() as u64).saturating_sub(leaf_bytes);
+            let mut fragmented_bytes =
+                page.memory().len().saturating_sub(accessor.total_length()) as u64;
             let mut max_child_height = 0;
             let (mut leaf_pages, mut branch_pages) = if is_branch { (0, 1) } else { (1, 0) };
 
@@ -134,7 +135,8 @@ fn multimap_stats_helper(
             let mut branch_pages = 1;
             let mut stored_leaf_bytes = 0;
             let mut metadata_bytes = accessor.total_length() as u64;
-            let mut fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
+            let mut fragmented_bytes =
+                page.memory().len().saturating_sub(accessor.total_length()) as u64;
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
                     let stats =

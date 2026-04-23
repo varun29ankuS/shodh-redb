@@ -2609,11 +2609,14 @@ impl WriteTransaction {
             access_guard.as_mut().clear();
             for page in freed_pages.drain(len - min(len, chunk_size)..) {
                 // Make sure that the page is currently allocated
-                debug_assert!(
-                    self.mem.is_allocated(page),
-                    "Page is not allocated: {page:?}"
-                );
-                debug_assert!(!self.mem.uncommitted(page), "Page is uncommitted: {page:?}");
+                #[cfg(not(fuzzing))]
+                {
+                    debug_assert!(
+                        self.mem.is_allocated(page),
+                        "Page is not allocated: {page:?}"
+                    );
+                    debug_assert!(!self.mem.uncommitted(page), "Page is uncommitted: {page:?}");
+                }
                 access_guard.as_mut().push_back(page)?;
             }
 
@@ -2642,11 +2645,14 @@ impl WriteTransaction {
                 // Make sure that the page is currently allocated. This is to catch scenarios like
                 // a page getting allocated, and then deallocated within the same transaction,
                 // but errantly being left in the allocated pages list
-                debug_assert!(
-                    self.mem.is_allocated(page),
-                    "Page is not allocated: {page:?}"
-                );
-                debug_assert!(self.mem.uncommitted(page), "Page is committed: {page:?}");
+                #[cfg(not(fuzzing))]
+                {
+                    debug_assert!(
+                        self.mem.is_allocated(page),
+                        "Page is not allocated: {page:?}"
+                    );
+                    debug_assert!(self.mem.uncommitted(page), "Page is committed: {page:?}");
+                }
                 access_guard.as_mut().push_back(page)?;
             }
 

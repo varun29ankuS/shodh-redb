@@ -908,7 +908,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
     }
 
     // After crash recovery with corrupted data, page counts can legitimately
-    // differ from baseline — repair may consolidate internal pages or leak
+    // differ from baseline -- repair may consolidate internal pages or leak
     // unreachable pages. The integrity check is the real validation.
     assert!(db.check_integrity().unwrap());
 

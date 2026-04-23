@@ -743,7 +743,7 @@ impl<'a> LeafAccessor<'a> {
         }
         let end_offset = self.value_end(end - 1).unwrap();
         let start_offset = self.value_start(start).unwrap();
-        end_offset - start_offset
+        end_offset.saturating_sub(start_offset)
     }
 
     // Returns the length of all keys between [start, end)
@@ -753,7 +753,7 @@ impl<'a> LeafAccessor<'a> {
         }
         let end_offset = self.key_end(end - 1).unwrap();
         let start_offset = self.key_start(start).unwrap();
-        end_offset - start_offset
+        end_offset.saturating_sub(start_offset)
     }
 
     pub(crate) fn total_length(&self) -> usize {

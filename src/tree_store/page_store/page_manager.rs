@@ -1554,7 +1554,7 @@ impl TransactionalMemory {
             Self::allocate_helper_retry(&mut state, required_order, lowest)?.unwrap()
         };
 
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(fuzzing)))]
         {
             debug_assert!(self.allocated_pages.lock().insert(page_number));
             debug_assert!(

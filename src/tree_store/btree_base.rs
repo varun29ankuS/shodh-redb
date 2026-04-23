@@ -271,7 +271,14 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
     ) -> Result<Self> {
-        let raw = &page.memory()[offset..(offset + len)];
+        let end = offset.saturating_add(len);
+        if end > page.memory().len() {
+            return Err(StorageError::Corrupted(format!(
+                "AccessGuard: offset {offset} + len {len} exceeds page size {}",
+                page.memory().len()
+            )));
+        }
+        let raw = &page.memory()[offset..end];
         let decompressed_value = match decompress_value(raw)? {
             Cow::Borrowed(_) => {
                 // Uncompressed -- strip flags byte
@@ -299,7 +306,10 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
         if let Some(ref decompressed) = self.decompressed_value {
             V::from_bytes(decompressed)
         } else {
-            V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+            let mem = self.page.memory();
+            let end = self.offset.saturating_add(self.len).min(mem.len());
+            let start = self.offset.min(end);
+            V::from_bytes(&mem[start..end])
         }
     }
 }
@@ -375,7 +385,14 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             assert!(mem.uncommitted(parent_page.get_page_number()));
         }
         let decompressed_value = if compression.is_enabled() && len > 0 {
-            let raw = &page.memory()[offset..(offset + len)];
+            let end = offset.saturating_add(len);
+            if end > page.memory().len() {
+                return Err(StorageError::Corrupted(format!(
+                    "AccessGuardMut: offset {offset} + len {len} exceeds page size {}",
+                    page.memory().len()
+                )));
+            }
+            let raw = &page.memory()[offset..end];
             let decompressed = decompress_value(raw)?;
             match decompressed {
                 Cow::Borrowed(_) => None,

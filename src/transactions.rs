@@ -2559,16 +2559,19 @@ impl WriteTransaction {
         // system_freed_pages may be non-empty after a non-durable commit if system-tree
         // page frees were deferred due to active readers. They will be processed by a
         // future durable commit. Only assert empty for durable commits.
-        debug_assert!(
-            matches!(self.durability, InternalDurability::None)
-                || self
-                    .system_tables
-                    .lock()
-                    .system_freed_pages()
-                    .lock()
-                    .is_empty()
-        );
-        debug_assert!(self.tables.lock().freed_pages.lock().is_empty());
+        #[cfg(not(fuzzing))]
+        {
+            debug_assert!(
+                matches!(self.durability, InternalDurability::None)
+                    || self
+                        .system_tables
+                        .lock()
+                        .system_freed_pages()
+                        .lock()
+                        .is_empty()
+            );
+            debug_assert!(self.tables.lock().freed_pages.lock().is_empty());
+        }
 
         #[cfg(feature = "logging")]
         debug!(

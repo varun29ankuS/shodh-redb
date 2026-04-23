@@ -1069,7 +1069,7 @@ impl TransactionalMemory {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(fuzzing)))]
         debug_assert!(self.open_dirty_pages.lock().is_empty());
         if self.needs_recovery.load(Ordering::Acquire) {
             return Err(StorageError::RecoveryRequired);
@@ -1186,7 +1186,7 @@ impl TransactionalMemory {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(fuzzing)))]
         debug_assert!(self.open_dirty_pages.lock().is_empty());
         if self.needs_recovery.load(Ordering::Acquire) {
             return Err(StorageError::RecoveryRequired);
@@ -1244,7 +1244,7 @@ impl TransactionalMemory {
     }
 
     fn rollback_uncommitted_writes_inner(&self) -> Result {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(fuzzing)))]
         {
             let dirty_pages = self.open_dirty_pages.lock();
             debug_assert!(

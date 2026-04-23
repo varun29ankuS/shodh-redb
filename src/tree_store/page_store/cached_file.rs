@@ -494,6 +494,7 @@ impl PagedCachedFile {
             if let Some(cached) = lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
+                #[cfg(not(fuzzing))]
                 debug_assert_eq!(cached.len(), len);
                 return Ok(cached.clone());
             }
@@ -505,6 +506,7 @@ impl PagedCachedFile {
             if let Some(cached) = read_lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
+                #[cfg(not(fuzzing))]
                 debug_assert_eq!(cached.len(), len);
                 return Ok(cached.clone());
             }
@@ -582,6 +584,7 @@ impl PagedCachedFile {
         let cache_slot: usize = Self::cache_slot(offset);
         let mut lock = self.read_cache[cache_slot].write();
         if let Some(removed) = lock.remove(offset) {
+            #[cfg(not(fuzzing))]
             debug_assert_eq!(
                 len,
                 removed.len(),

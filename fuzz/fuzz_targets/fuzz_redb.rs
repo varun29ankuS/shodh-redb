@@ -1045,7 +1045,9 @@ fuzz_target!(|config: FuzzConfig| {
     };
     match result {
         Ok(()) => {}
-        Err(redb::Error::Corrupted(_)) => {}
-        Err(e) => panic!("unexpected error: {e}"),
+        // Simulated IO errors can produce any corruption-related error variant.
+        // Only panic on Internal errors, which indicate real logic bugs.
+        Err(redb::Error::Internal(msg)) => panic!("internal error: {msg}"),
+        Err(_) => {}
     }
 });

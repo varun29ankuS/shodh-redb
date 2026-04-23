@@ -228,22 +228,24 @@ jobs:
 
       - name: Fuzzer (60s core + 30s each new target)
         if: matrix.fuzz
+        shell: bash {0}
         run: |
+          set -o pipefail
           HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
           # cargo-fuzz exits 70 on timeout, 77 on crash. Tolerate timeouts
           # (slow inputs on corrupted data) but fail on real crashes.
           run_fuzz() {
-            local rc=0
-            cargo +nightly fuzz run --sanitizer=none --target "$HOST_TARGET" "$@" || rc=$?
+            cargo +nightly fuzz run --sanitizer=none --target "$HOST_TARGET" "$@"
+            local rc=$?
             if [ "$rc" -eq 70 ]; then
               echo "::warning::Fuzzer timeout on $1 (tolerated)"
               return 0
             fi
             return "$rc"
           }
-          run_fuzz fuzz_redb -- -max_len=10000 -max_total_time=60 -timeout=30
+          run_fuzz fuzz_redb -- -max_len=10000 -max_total_time=60 -timeout=30 || exit $?
           for target in fuzz_cdc_deser fuzz_cluster_blob fuzz_incremental_deser fuzz_merge_ops fuzz_pq_codebook; do
-            run_fuzz "$target" -- -max_len=10000 -max_total_time=30 -timeout=30
+            run_fuzz "$target" -- -max_len=10000 -max_total_time=30 -timeout=30 || exit $?
           done
         env:
           RUSTFLAGS: ""

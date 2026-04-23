@@ -1,6 +1,11 @@
 use crate::compat::{HashMap, Mutex};
 #[cfg(feature = "std")]
 use crate::db::CorruptPageInfo;
+
+/// Maximum B-tree depth before we treat the tree as corrupted.
+/// Real B-trees of page-sized nodes rarely exceed 10-20 levels.
+/// 64 is generous but still prevents unbounded recursion on corrupted data.
+pub(crate) const MAX_TREE_DEPTH: u32 = 64;
 use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
@@ -100,16 +105,21 @@ impl UntypedBtree {
         F: FnMut(&PagePath) -> Result,
     {
         if let Some(page_number) = self.root.map(|x| x.root) {
-            self.visit_pages_helper(PagePath::new_root(page_number), &mut visitor)?;
+            self.visit_pages_helper(PagePath::new_root(page_number), &mut visitor, 0)?;
         }
 
         Ok(())
     }
 
-    fn visit_pages_helper<F>(&self, path: PagePath, visitor: &mut F) -> Result
+    fn visit_pages_helper<F>(&self, path: PagePath, visitor: &mut F, depth: u32) -> Result
     where
         F: FnMut(&PagePath) -> Result,
     {
+        if depth > MAX_TREE_DEPTH {
+            return Err(StorageError::Corrupted(format!(
+                "B-tree depth {depth} exceeds maximum {MAX_TREE_DEPTH}"
+            )));
+        }
         visitor(&path)?;
         let page = self.mem.get_page(path.page_number())?;
 
@@ -124,7 +134,7 @@ impl UntypedBtree {
                         StorageError::invalid_child_pointer(page.get_page_number(), i)
                     })?;
                     let child_path = path.with_child(child_page);
-                    self.visit_pages_helper(child_path, visitor)?;
+                    self.visit_pages_helper(child_path, visitor, depth + 1)?;
                 }
             }
             x => {
@@ -161,10 +171,12 @@ pub(crate) fn salvage_tree_leaves(
         pairs,
         corruptions,
         &mut recovered,
+        0,
     );
     recovered
 }
 
+#[allow(clippy::too_many_arguments)]
 #[cfg(feature = "std")]
 fn salvage_node(
     page_number: PageNumber,
@@ -174,7 +186,16 @@ fn salvage_node(
     pairs: &mut Vec<(Vec<u8>, Vec<u8>)>,
     corruptions: &mut Vec<CorruptPageInfo>,
     recovered: &mut u64,
+    depth: u32,
 ) {
+    if depth > MAX_TREE_DEPTH {
+        corruptions.push(CorruptPageInfo {
+            page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+            table_name: None,
+            description: format!("B-tree depth {depth} exceeds maximum {MAX_TREE_DEPTH}"),
+        });
+        return;
+    }
     let Ok(page) = mem.get_page(page_number) else {
         corruptions.push(CorruptPageInfo {
             page_number: u64::from_le_bytes(page_number.to_le_bytes()),
@@ -255,6 +276,7 @@ fn salvage_node(
                     pairs,
                     corruptions,
                     recovered,
+                    depth + 1,
                 );
             }
         }
@@ -375,7 +397,7 @@ impl UntypedBtreeMut {
                 }
                 BRANCH => {
                     drop(page);
-                    self.dirty_leaf_visitor_helper(page_number, &visitor)?;
+                    self.dirty_leaf_visitor_helper(page_number, &visitor, 0)?;
                 }
                 x => {
                     return Err(StorageError::invalid_page_type(page.get_page_number(), x));
@@ -386,10 +408,20 @@ impl UntypedBtreeMut {
         Ok(())
     }
 
-    fn dirty_leaf_visitor_helper<F>(&mut self, page_number: PageNumber, visitor: &F) -> Result
+    fn dirty_leaf_visitor_helper<F>(
+        &mut self,
+        page_number: PageNumber,
+        visitor: &F,
+        depth: u32,
+    ) -> Result
     where
         F: Fn(PageMut) -> Result,
     {
+        if depth > MAX_TREE_DEPTH {
+            return Err(StorageError::Corrupted(format!(
+                "B-tree depth {depth} exceeds maximum {MAX_TREE_DEPTH}"
+            )));
+        }
         if !self.mem.uncommitted(page_number) {
             return Err(StorageError::page_corrupted(
                 page_number,
@@ -409,7 +441,7 @@ impl UntypedBtreeMut {
                         .child_page(i)
                         .ok_or_else(|| StorageError::invalid_child_pointer(page_number, i))?;
                     if self.mem.uncommitted(child_page) {
-                        self.dirty_leaf_visitor_helper(child_page, visitor)?;
+                        self.dirty_leaf_visitor_helper(child_page, visitor, depth + 1)?;
                     }
                 }
             }
@@ -427,7 +459,7 @@ impl UntypedBtreeMut {
     ) -> Result<bool> {
         if let Some(root) = self.get_root()
             && let Some((new_root, new_checksum)) =
-                self.relocate_helper(root.root, relocation_map)?
+                self.relocate_helper(root.root, relocation_map, 0)?
         {
             self.root = Some(BtreeHeader::new(new_root, new_checksum, root.length));
             return Ok(true);
@@ -440,7 +472,13 @@ impl UntypedBtreeMut {
         &mut self,
         page_number: PageNumber,
         relocation_map: &HashMap<PageNumber, PageNumber>,
+        depth: u32,
     ) -> Result<Option<(PageNumber, Checksum)>> {
+        if depth > MAX_TREE_DEPTH {
+            return Err(StorageError::Corrupted(format!(
+                "B-tree depth {depth} exceeds maximum {MAX_TREE_DEPTH} during relocation"
+            )));
+        }
         let old_page = self.mem.get_page(page_number)?;
         let mut new_page = if let Some(new_page_number) = relocation_map.get(&page_number) {
             self.mem.get_page_mut(*new_page_number)?
@@ -462,7 +500,7 @@ impl UntypedBtreeMut {
                         .child_page(i)
                         .ok_or_else(|| StorageError::invalid_child_pointer(page_number, i))?;
                     if let Some((new_child, new_checksum)) =
-                        self.relocate_helper(child, relocation_map)?
+                        self.relocate_helper(child, relocation_map, depth + 1)?
                     {
                         mutator.write_child_page(i, new_child, new_checksum);
                     }
@@ -1765,7 +1803,7 @@ pub(crate) fn btree_stats(
     fixed_value_size: Option<usize>,
 ) -> Result<BtreeStats> {
     if let Some(root) = root {
-        stats_helper(root, mem, fixed_key_size, fixed_value_size)
+        stats_helper(root, mem, fixed_key_size, fixed_value_size, 0)
     } else {
         Ok(BtreeStats {
             tree_height: 0,
@@ -1783,7 +1821,13 @@ fn stats_helper(
     mem: &TransactionalMemory,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
+    depth: u32,
 ) -> Result<BtreeStats> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(StorageError::Corrupted(format!(
+            "B-tree depth {depth} exceeds maximum {MAX_TREE_DEPTH}"
+        )));
+    }
     let page = mem.get_page(page_number)?;
     let node_mem = page.memory();
     match node_mem[0] {
@@ -1819,7 +1863,8 @@ fn stats_helper(
                 page.memory().len().saturating_sub(accessor.total_length()) as u64;
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
-                    let stats = stats_helper(child, mem, fixed_key_size, fixed_value_size)?;
+                    let stats =
+                        stats_helper(child, mem, fixed_key_size, fixed_value_size, depth + 1)?;
                     max_child_height = max(max_child_height, stats.tree_height);
                     leaf_pages += stats.leaf_pages;
                     branch_pages += stats.branch_pages;

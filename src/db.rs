@@ -1283,8 +1283,17 @@ impl Database {
         txn.abort()?;
 
         let mut compacted = false;
-        // Iteratively compact until no progress is made
+        // Iteratively compact until no progress is made.
+        // Cap iterations to prevent unbounded loops on corrupted metadata.
+        let max_compact_iterations = 100u32;
+        let mut iteration = 0u32;
         loop {
+            if iteration >= max_compact_iterations {
+                return Err(CompactionError::Storage(StorageError::Corrupted(format!(
+                    "Compaction did not converge after {max_compact_iterations} iterations"
+                ))));
+            }
+            iteration += 1;
             let mut progress = false;
 
             let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;

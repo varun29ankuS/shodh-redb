@@ -228,32 +228,11 @@ jobs:
 
       - name: Fuzzer (60s core + 30s each new target)
         if: matrix.fuzz
-        shell: bash {0}
         run: |
           HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
-          # cargo-fuzz always exits 1 on any finding (timeout or crash).
-          # Check artifact directory: timeout-* files are tolerated (slow
-          # inputs on corrupted data), crash-* files are real failures.
-          run_fuzz() {
-            local name=$1; shift
-            local artifact_dir="fuzz/artifacts/$name"
-            rm -rf "$artifact_dir"
-            cargo +nightly fuzz run --sanitizer=none --target "$HOST_TARGET" "$name" "$@"
-            local rc=$?
-            if [ "$rc" -ne 0 ]; then
-              # Check if any crash (non-timeout) artifacts were produced
-              if ls "$artifact_dir"/crash-* "$artifact_dir"/oom-* 2>/dev/null | grep -q .; then
-                echo "::error::Fuzzer found crash in $name"
-                return 1
-              fi
-              echo "::warning::Fuzzer timeout on $name (tolerated)"
-              return 0
-            fi
-            return 0
-          }
-          run_fuzz fuzz_redb -- -max_len=10000 -max_total_time=60 -timeout=30 || exit $?
+          cargo +nightly fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_redb -- -max_len=10000 -max_total_time=60 -timeout=30
           for target in fuzz_cdc_deser fuzz_cluster_blob fuzz_incremental_deser fuzz_merge_ops fuzz_pq_codebook; do
-            run_fuzz "$target" -- -max_len=10000 -max_total_time=30 -timeout=30 || exit $?
+            cargo +nightly fuzz run --sanitizer=none --target "$HOST_TARGET" "$target" -- -max_len=10000 -max_total_time=30 -timeout=30
           done
         env:
           RUSTFLAGS: ""

@@ -461,8 +461,9 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
         let mut master_free_list = self.master_free_list.lock();
         let mut allocated = self.allocated.lock();
         for page in self.free_on_drop.drain(..) {
-            if !self.mem.free_if_uncommitted(page, &mut allocated) {
-                master_free_list.push(page);
+            match self.mem.free_if_uncommitted(page, &mut allocated) {
+                Ok(true) => {}
+                Ok(false) | Err(_) => master_free_list.push(page),
             }
         }
     }

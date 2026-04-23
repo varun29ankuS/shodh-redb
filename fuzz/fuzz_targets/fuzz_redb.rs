@@ -1036,23 +1036,14 @@ fn assert_multimap_value_eq(
 }
 
 fuzz_target!(|config: FuzzConfig| {
-    // Wrap in catch_unwind: corrupted on-disk data from simulated crashes can
-    // trigger bounds-check assertions (assert!, not debug_assert!) in the
-    // bitmap, buddy allocator, and page manager during recovery. These panics
-    // are equivalent to Error::Corrupted -- the library detected inconsistency
-    // in data that was partially written before the simulated crash.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if config.multimap_table {
-            exec_table_crash_support(&config, apply_crashable_transaction_multimap)
-        } else {
-            exec_table_crash_support(&config, apply_crashable_transaction)
-        }
-    }));
+    let result = if config.multimap_table {
+        exec_table_crash_support(&config, apply_crashable_transaction_multimap)
+    } else {
+        exec_table_crash_support(&config, apply_crashable_transaction)
+    };
     match result {
-        Ok(Ok(())) => {}
-        Ok(Err(redb::Error::Corrupted(_))) => {}
-        // Panic during crash recovery on corrupted data -- treated as corruption.
-        Err(_) => {}
-        Ok(Err(e)) => panic!("unexpected error: {e}"),
+        Ok(()) => {}
+        Err(redb::Error::Corrupted(_)) => {}
+        Err(e) => panic!("unexpected error: {e}"),
     }
 });

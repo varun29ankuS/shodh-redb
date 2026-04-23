@@ -1434,7 +1434,7 @@ impl WriteTransaction {
             let tables = self.tables.lock();
             let mut tracker = tables.allocated_pages.lock();
             for page in orphaned_pages {
-                self.mem.free(page, &mut tracker);
+                self.mem.free(page, &mut tracker)?;
             }
         }
 
@@ -2985,7 +2985,7 @@ impl WriteTransaction {
                 self.mem.deferred_system_tree_frees.lock().extend(remaining);
             } else {
                 for page in remaining {
-                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                    self.mem.free(page, &mut PageTrackerPolicy::Ignore)?;
                 }
             }
         }
@@ -2995,7 +2995,7 @@ impl WriteTransaction {
         // those pages.
         for page in self.mem.deferred_nondurable_frees.lock().drain(..) {
             if self.mem.unpersisted(page) {
-                self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                self.mem.free(page, &mut PageTrackerPolicy::Ignore)?;
             }
         }
 
@@ -3038,7 +3038,7 @@ impl WriteTransaction {
                 } else {
                     for page in pages {
                         if self.mem.unpersisted(page) {
-                            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                            self.mem.free(page, &mut PageTrackerPolicy::Ignore)?;
                         }
                     }
                 }
@@ -3064,7 +3064,7 @@ impl WriteTransaction {
                     self.mem.deferred_system_tree_frees.lock().extend(pages);
                 } else {
                     for page in pages {
-                        self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                        self.mem.free(page, &mut PageTrackerPolicy::Ignore)?;
                     }
                 }
             }
@@ -3125,7 +3125,7 @@ impl WriteTransaction {
                     .extend(post_commit_frees);
             } else {
                 for page in post_commit_frees {
-                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                    self.mem.free(page, &mut PageTrackerPolicy::Ignore)?;
                 }
             }
         }
@@ -3178,7 +3178,7 @@ impl WriteTransaction {
                 }
             } else {
                 self.mem
-                    .free(new_page_number, &mut PageTrackerPolicy::Ignore);
+                    .free(new_page_number, &mut PageTrackerPolicy::Ignore)?;
                 break;
             }
         }
@@ -3212,7 +3212,7 @@ impl WriteTransaction {
                 let (_, page_list) = entry?;
                 for i in 0..page_list.value().len() {
                     self.mem
-                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore);
+                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore)?;
                 }
             }
         }
@@ -3228,7 +3228,7 @@ impl WriteTransaction {
                 let (_, page_list) = entry?;
                 for i in 0..page_list.value().len() {
                     self.mem
-                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore);
+                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore)?;
                 }
             }
         }
@@ -3284,7 +3284,7 @@ impl WriteTransaction {
                     let page = pages.get(i);
                     if !self
                         .mem
-                        .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore)
+                        .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore)?
                     {
                         new_pages.push(page);
                     }

@@ -479,7 +479,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             let mut allocated = self.allocated.lock();
             assert!(
                 self.mem
-                    .free_if_uncommitted(old_page_number, &mut allocated)
+                    .free_if_uncommitted(old_page_number, &mut allocated)?
             );
         }
 

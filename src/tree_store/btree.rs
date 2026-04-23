@@ -480,7 +480,7 @@ impl UntypedBtreeMut {
         // No need to track allocations, because this method is only called during compaction when
         // there can't be any savepoints
         let mut ignore = PageTrackerPolicy::Ignore;
-        if !self.mem.free_if_uncommitted(page_number, &mut ignore) {
+        if !self.mem.free_if_uncommitted(page_number, &mut ignore)? {
             freed_pages.push(page_number);
         }
 
@@ -974,7 +974,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         let mut freed_pages = self.freed_pages.lock();
         let mut allocated_pages = self.allocated_pages.lock();
         for page in freed {
-            if !self.mem.free_if_uncommitted(page, &mut allocated_pages) {
+            if !self.mem.free_if_uncommitted(page, &mut allocated_pages)? {
                 freed_pages.push(page);
             }
         }

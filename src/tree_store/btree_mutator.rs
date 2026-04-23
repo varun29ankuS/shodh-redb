@@ -126,15 +126,16 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         }
     }
 
-    fn conditional_free(&mut self, page_number: PageNumber) {
+    fn conditional_free(&mut self, page_number: PageNumber) -> Result<()> {
         if self.modify_uncommitted {
             let mut allocated = self.allocated.lock();
-            if !self.mem.free_if_uncommitted(page_number, &mut allocated) {
+            if !self.mem.free_if_uncommitted(page_number, &mut allocated)? {
                 self.freed.push(page_number);
             }
         } else {
             self.freed.push(page_number);
         }
+        Ok(())
     }
 
     pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
@@ -439,7 +440,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             let arc = page.to_arc();
                             drop(page);
                             let mut allocated = self.allocated.lock();
-                            self.mem.free(page_number, &mut allocated);
+                            self.mem.free(page_number, &mut allocated)?;
                             if self.compression.is_enabled() {
                                 Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
                             } else {
@@ -455,7 +456,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         }
                     } else {
                         drop(page);
-                        self.conditional_free(page_number);
+                        self.conditional_free(page_number)?;
                         None
                     };
 
@@ -482,7 +483,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             let arc = page.to_arc();
                             drop(page);
                             let mut allocated = self.allocated.lock();
-                            self.mem.free(page_number, &mut allocated);
+                            self.mem.free(page_number, &mut allocated)?;
                             if self.compression.is_enabled() {
                                 Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
                             } else {
@@ -498,7 +499,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         }
                     } else {
                         drop(page);
-                        self.conditional_free(page_number);
+                        self.conditional_free(page_number)?;
                         None
                     };
 
@@ -638,7 +639,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 // Free the original page, since we've replaced it
                 let page_number = page.get_page_number();
                 drop(page);
-                self.conditional_free(page_number);
+                self.conditional_free(page_number)?;
 
                 result
             }
@@ -802,7 +803,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             let arc = page.to_arc();
             drop(page);
             let mut allocated = self.allocated.lock();
-            self.mem.free(page_number, &mut allocated);
+            self.mem.free(page_number, &mut allocated)?;
             if self.compression.is_enabled() {
                 Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
             } else {
@@ -886,7 +887,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     builder.push_all(&accessor);
                     builder.replace_child(child_index, new_child, new_child_checksum);
                     let new_page = builder.build()?;
-                    self.conditional_free(original_page_number);
+                    self.conditional_free(original_page_number)?;
                     new_page.get_page_number()
                 };
             return Ok(Box::new((Subtree(result_page, DEFERRED), found)));
@@ -969,7 +970,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
 
                     drop(page);
-                    self.conditional_free(original_page_number);
+                    self.conditional_free(original_page_number)?;
                     // child_page_number does not need to be freed, because it's a leaf and the
                     // MutAccessGuard will free it
 
@@ -1026,7 +1027,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
-                self.conditional_free(page_number);
+                self.conditional_free(page_number)?;
                 // child_page_number does not need to be freed, because it's a leaf and the
                 // MutAccessGuard will free it
 
@@ -1087,7 +1088,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
-                self.conditional_free(page_number);
+                self.conditional_free(page_number)?;
 
                 result
             }
@@ -1150,16 +1151,16 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
-                self.conditional_free(page_number);
+                self.conditional_free(page_number)?;
                 drop(partial_child_page);
-                self.conditional_free(partial_child);
+                self.conditional_free(partial_child)?;
 
                 result
             }
         };
 
         drop(page);
-        self.conditional_free(original_page_number);
+        self.conditional_free(original_page_number)?;
 
         Ok(Box::new((final_result, found)))
     }

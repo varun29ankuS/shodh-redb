@@ -26,11 +26,6 @@ features = ["std"]
 # code path (which handles corruption via Result/StorageError).
 [profile.release]
 debug-assertions = false
-# Allow catch_unwind to work: corrupted on-disk data from simulated
-# crashes can trigger assert!() in bitmap/allocator during recovery.
-# The fuzz harness wraps iterations in catch_unwind to treat these as
-# expected corruption rather than test failures.
-panic = "unwind"
 
 # Prevent this from interfering with workspaces
 [workspace]

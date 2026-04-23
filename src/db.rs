@@ -1908,7 +1908,7 @@ impl Database {
             let fake = Arc::new(TransactionGuard::Verification);
             let tables = TableTree::new(data_root, PageHint::None, fake, mem.clone())?;
             tables.visit_all_pages(|path| {
-                mem.mark_page_allocated(path.page_number());
+                mem.mark_page_allocated(path.page_number())?;
                 Ok(())
             })?;
         }
@@ -1925,17 +1925,17 @@ impl Database {
             let fake = Arc::new(TransactionGuard::Verification);
             let system_tables = TableTree::new(system_root, PageHint::None, fake, mem.clone())?;
             system_tables.visit_all_pages(|path| {
-                mem.mark_page_allocated(path.page_number());
+                mem.mark_page_allocated(path.page_number())?;
                 Ok(())
             })?;
         }
 
         Self::visit_freed_tree(system_root, DATA_FREED_TABLE, mem.clone(), |page| {
-            mem.mark_page_allocated(page);
+            mem.mark_page_allocated(page)?;
             Ok(())
         })?;
         Self::visit_freed_tree(system_root, SYSTEM_FREED_TABLE, mem.clone(), |page| {
-            mem.mark_page_allocated(page);
+            mem.mark_page_allocated(page)?;
             Ok(())
         })?;
         #[cfg(debug_assertions)]

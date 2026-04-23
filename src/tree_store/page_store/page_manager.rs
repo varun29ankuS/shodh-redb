@@ -775,14 +775,15 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) {
+    pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) -> Result {
         let mut state = self.state.lock();
         let region_index = page_number.region;
         let allocator = state.get_region_mut(region_index);
-        allocator.record_alloc(page_number.page_index, page_number.page_order);
+        allocator.record_alloc(page_number.page_index, page_number.page_order)?;
         #[cfg(debug_assertions)]
         // Idempotent: corrupted on-disk data may reference the same page twice.
         self.allocated_pages.lock().insert(page_number);
+        Ok(())
     }
 
     fn write_header(&self, header: &DatabaseHeader) -> Result {
@@ -1010,7 +1011,7 @@ impl TransactionalMemory {
 
         // Resize the allocators to match the current file size
         let layout = state.header.layout();
-        state.allocators.resize_to(layout);
+        state.allocators.resize_to(layout)?;
         drop(state);
 
         self.state.lock().header.recovery_required = false;
@@ -1263,7 +1264,7 @@ impl TransactionalMemory {
                 .mark_free(page_number.page_order, region_index);
             state
                 .get_region_mut(region_index)
-                .free(page_number.page_index, page_number.page_order);
+                .free(page_number.page_index, page_number.page_order)?;
             #[cfg(debug_assertions)]
             // Tolerate missing entries: corrupted data may cause inconsistent tracking.
             self.allocated_pages.lock().remove(page_number);
@@ -1425,9 +1426,9 @@ impl TransactionalMemory {
         Ok(state.header.primary_slot().transaction_id)
     }
 
-    pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
+    pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) -> Result {
         self.allocated_since_commit.lock().remove(&page);
-        self.free_helper(page, allocated);
+        self.free_helper(page, allocated)
     }
 
     /// Attempt to free a page. Returns `false` if the page has active read
@@ -1435,13 +1436,17 @@ impl TransactionalMemory {
     /// the page is NOT freed and the caller should defer the free to a later
     /// commit.
     #[allow(dead_code)] // Will be removed in MVCC cleanup phase
-    pub(crate) fn try_free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) -> bool {
+    pub(crate) fn try_free(
+        &self,
+        page: PageNumber,
+        allocated: &mut PageTrackerPolicy,
+    ) -> Result<bool> {
         self.allocated_since_commit.lock().remove(&page);
         if self.read_page_ref_counts.lock().contains_key(&page) {
-            return false;
+            return Ok(false);
         }
-        self.free_helper(page, allocated);
-        true
+        self.free_helper(page, allocated)?;
+        Ok(true)
     }
 
     /// Free the page if it is in the unpersisted set. Returns true if freed.
@@ -1453,16 +1458,16 @@ impl TransactionalMemory {
         &self,
         page: PageNumber,
         allocated: &mut PageTrackerPolicy,
-    ) -> bool {
+    ) -> Result<bool> {
         if self.unpersisted.lock().remove(&page) {
-            self.free_helper(page, allocated);
-            true
+            self.free_helper(page, allocated)?;
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
-    fn free_helper(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
+    fn free_helper(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) -> Result {
         #[cfg(debug_assertions)]
         {
             // Idempotent: during crash recovery on corrupted data, a page may
@@ -1478,7 +1483,7 @@ impl TransactionalMemory {
         // Free in the regional allocator
         state
             .get_region_mut(region_index)
-            .free(page.page_index, page.page_order);
+            .free(page.page_index, page.page_order)?;
         // Ensure that the region is marked as having free space
         state
             .get_region_tracker_mut()
@@ -1495,6 +1500,7 @@ impl TransactionalMemory {
             .unwrap();
         self.storage.invalidate_cache(address_range.start, len);
         self.storage.cancel_pending_write(address_range.start, len);
+        Ok(())
     }
 
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
@@ -1502,12 +1508,12 @@ impl TransactionalMemory {
         &self,
         page: PageNumber,
         allocated: &mut PageTrackerPolicy,
-    ) -> bool {
+    ) -> Result<bool> {
         if self.allocated_since_commit.lock().remove(&page) {
-            self.free_helper(page, allocated);
-            true
+            self.free_helper(page, allocated)?;
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -1604,9 +1610,9 @@ impl TransactionalMemory {
             };
             let region = state.get_region_mut(candidate_region);
             let r = if lowest {
-                region.alloc_lowest(required_order)
+                region.alloc_lowest(required_order)?
             } else {
-                region.alloc(required_order)
+                region.alloc(required_order)?
             };
             if let Some(page) = r {
                 return Ok(Some(PageNumber::new(
@@ -1626,7 +1632,7 @@ impl TransactionalMemory {
         let layout = state.header.layout();
         let last_region_index = layout.num_regions() - 1;
         let last_allocator = state.get_region(last_region_index);
-        let trailing_free = last_allocator.trailing_free_pages();
+        let trailing_free = last_allocator.trailing_free_pages()?;
         let last_allocator_len = last_allocator.len();
         if trailing_free == 0 {
             return Ok(false);
@@ -1645,7 +1651,7 @@ impl TransactionalMemory {
 
         let mut new_layout = layout;
         new_layout.reduce_last_region(reduce_by);
-        state.allocators.resize_to(new_layout);
+        state.allocators.resize_to(new_layout)?;
         if new_layout.len() > layout.len() {
             return Err(StorageError::Internal(alloc::string::String::from(
                 "Shrink produced a layout larger than the original",
@@ -1761,7 +1767,7 @@ impl TransactionalMemory {
             return result;
         }
 
-        state.allocators.resize_to(new_layout);
+        state.allocators.resize_to(new_layout)?;
         state.header.set_layout(new_layout);
         Ok(())
     }
@@ -1810,7 +1816,7 @@ impl TransactionalMemory {
         }
         let last_region = layout.num_regions() - 1;
         Ok(u64::from(
-            state.get_region(last_region).trailing_free_pages(),
+            state.get_region(last_region).trailing_free_pages()?,
         ))
     }
 

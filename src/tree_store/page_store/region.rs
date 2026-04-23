@@ -101,7 +101,8 @@ impl RegionTracker {
     pub(crate) fn mark_free(&mut self, order: u8, region: u32) {
         let order: usize = order.into();
         for i in 0..=order {
-            self.order_trackers[i].clear(region);
+            // Region tracker is always sized to fit all regions; indices are valid.
+            self.order_trackers[i].clear(region).unwrap();
         }
     }
 
@@ -109,7 +110,8 @@ impl RegionTracker {
         let order: usize = order.into();
         assert!(order < self.order_trackers.len());
         for i in order..self.order_trackers.len() {
-            self.order_trackers[i].set(region);
+            // Region tracker is always sized to fit all regions; indices are valid.
+            self.order_trackers[i].set(region).unwrap();
         }
     }
 
@@ -161,7 +163,7 @@ impl Allocators {
         result
     }
 
-    pub(super) fn resize_to(&mut self, new_layout: DatabaseLayout) {
+    pub(super) fn resize_to(&mut self, new_layout: DatabaseLayout) -> crate::Result<()> {
         let shrink = match (new_layout.num_regions() as usize).cmp(&self.region_allocators.len()) {
             cmp::Ordering::Less => true,
             cmp::Ordering::Equal => {
@@ -173,7 +175,7 @@ impl Allocators {
                     cmp::Ordering::Less => true,
                     cmp::Ordering::Equal => {
                         // No-op
-                        return;
+                        return Ok(());
                     }
                     cmp::Ordering::Greater => false,
                 }
@@ -195,7 +197,7 @@ impl Allocators {
                 .unwrap_or_else(|| new_layout.full_region_layout());
             let allocator = self.region_allocators.last_mut().unwrap();
             if allocator.len() > last_region.num_pages() {
-                allocator.resize(last_region.num_pages());
+                allocator.resize(last_region.num_pages())?;
             }
         } else {
             let old_num_regions = self.region_allocators.len();
@@ -205,7 +207,7 @@ impl Allocators {
                     let allocator = &mut self.region_allocators[i as usize];
                     assert!(new_region.num_pages() >= allocator.len());
                     if new_region.num_pages() != allocator.len() {
-                        allocator.resize(new_region.num_pages());
+                        allocator.resize(new_region.num_pages())?;
                         let highest_free = allocator.highest_free_order().unwrap();
                         self.region_tracker.mark_free(highest_free, i);
                     }
@@ -224,5 +226,6 @@ impl Allocators {
                 }
             }
         }
+        Ok(())
     }
 }

@@ -898,10 +898,11 @@ fn exec_table_crash_support<T: Clone + Debug>(
 
     // Drain the freed-page table by committing until page counts stabilize.
     // After simulated IO errors the database may be too corrupted to write.
+    // Cap iterations to avoid timeout on corrupted data where counts oscillate.
     if let Ok(txn) = db.begin_write() {
         if let Ok(stats) = txn.stats() {
             let mut prev = stats.allocated_pages();
-            loop {
+            for _ in 0..20 {
                 let Ok(txn) = db.begin_write() else { break };
                 if txn.commit().is_err() {
                     break;

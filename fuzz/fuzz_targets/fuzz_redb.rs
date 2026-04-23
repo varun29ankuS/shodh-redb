@@ -901,24 +901,18 @@ fn exec_table_crash_support<T: Clone + Debug>(
     if let Ok(txn) = db.begin_write() {
         if let Ok(stats) = txn.stats() {
             let mut prev = stats.allocated_pages();
-            drop(txn);
             loop {
-                match db.begin_write().and_then(|t| {
-                    t.commit()?;
-                    Ok(())
-                }) {
-                    Ok(()) => {}
-                    Err(_) => break,
+                let Ok(txn) = db.begin_write() else { break };
+                if txn.commit().is_err() {
+                    break;
                 }
-                match db.begin_write().and_then(|t| {
-                    let p = t.stats()?.allocated_pages();
-                    drop(t);
-                    Ok(p)
-                }) {
-                    Ok(cur) if cur == prev => break,
-                    Ok(cur) => prev = cur,
-                    Err(_) => break,
+                let Ok(txn) = db.begin_write() else { break };
+                let Ok(s) = txn.stats() else { break };
+                let cur = s.allocated_pages();
+                if cur == prev {
+                    break;
                 }
+                prev = cur;
             }
         }
     }

@@ -761,7 +761,8 @@ impl<'a> LeafAccessor<'a> {
             return self.key_section_start();
         }
         // Values are stored last
-        self.value_end(self.num_pairs() - 1).unwrap_or(self.key_section_start())
+        self.value_end(self.num_pairs() - 1)
+            .unwrap_or(self.key_section_start())
     }
 
     fn key_unchecked(&self, n: usize) -> &[u8] {
@@ -1406,10 +1407,11 @@ impl<'b> LeafMutator<'b> {
         if self.fixed_value_size.is_some() {
             return;
         }
-        let num_pairs = match LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size) {
-            Ok(a) => a.num_pairs(),
-            Err(_) => return,
-        };
+        let num_pairs =
+            match LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size) {
+                Ok(a) => a.num_pairs(),
+                Err(_) => return,
+            };
         let mut offset = 4 + size_of::<u32>() * i;
         if self.fixed_key_size.is_none() {
             offset += size_of::<u32>() * num_pairs;
@@ -1492,7 +1494,8 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
             return self.key_section_start();
         }
         // Keys are stored at the end
-        self.key_end(self.num_keys() - 1).unwrap_or(self.key_section_start())
+        self.key_end(self.num_keys() - 1)
+            .unwrap_or(self.key_section_start())
     }
 
     pub(super) fn child_for_key<K: Key>(

@@ -1791,7 +1791,8 @@ fn stats_helper(
             let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size)?;
             let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
             let overhead_bytes = accessor.total_length().saturating_sub(leaf_bytes);
-            let fragmented_bytes = page.memory().len().saturating_sub(accessor.total_length()) as u64;
+            let fragmented_bytes =
+                page.memory().len().saturating_sub(accessor.total_length()) as u64;
             let stored_leaf_bytes: u64 = leaf_bytes.try_into().map_err(|_| {
                 StorageError::page_corrupted(page_number, "leaf bytes overflows u64")
             })?;

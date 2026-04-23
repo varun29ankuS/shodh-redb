@@ -358,7 +358,9 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     } else {
                         let split_key = accessor
                             .last_entry()
-                            .ok_or_else(|| StorageError::Corrupted("Empty leaf during split".into()))?
+                            .ok_or_else(|| {
+                                StorageError::Corrupted("Empty leaf during split".into())
+                            })?
                             .key()
                             .to_vec();
                         Ok(Box::new(InsertionResult {
@@ -864,9 +866,9 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         let (child_index, child_page_number) = match target {
             DeleteTarget::Key(key) => accessor.child_for_key::<K>(key)?,
             DeleteTarget::First => {
-                let page = accessor.child_page(0).ok_or_else(|| {
-                    StorageError::Corrupted("Branch: missing first child".into())
-                })?;
+                let page = accessor
+                    .child_page(0)
+                    .ok_or_else(|| StorageError::Corrupted("Branch: missing first child".into()))?;
                 (0, page)
             }
             DeleteTarget::Last => {
@@ -878,9 +880,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             }
         };
         let child_checksum = accessor.child_checksum(child_index).ok_or_else(|| {
-            StorageError::Corrupted(format!(
-                "Branch: missing checksum at index {child_index}"
-            ))
+            StorageError::Corrupted(format!("Branch: missing checksum at index {child_index}"))
         })?;
         let (result, found) = *self.delete_helper(
             self.mem.get_page(child_page_number)?,

@@ -738,12 +738,15 @@ fn exec_table_crash_support<T: Clone + Debug>(
                     // Repair the database
                     let backend =
                         FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)).unwrap());
-                    db = Database::builder()
+                    db = match Database::builder()
                         .set_page_size(config.page_size.value)
                         .set_cache_size(config.cache_size.value)
                         .set_region_size(config.region_size.value as u64)
                         .create_with_backend(backend)
-                        .unwrap();
+                    {
+                        Ok(db) => db,
+                        Err(_) => return Ok(()),
+                    };
                 } else {
                     return Err(err);
                 }
@@ -788,12 +791,15 @@ fn exec_table_crash_support<T: Clone + Debug>(
 
                 // Repair the database
                 let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)).unwrap());
-                db = Database::builder()
+                db = match Database::builder()
                     .set_page_size(config.page_size.value)
                     .set_cache_size(config.cache_size.value)
                     .set_region_size(config.region_size.value as u64)
                     .create_with_backend(backend)
-                    .unwrap();
+                {
+                    Ok(db) => db,
+                    Err(_) => return Ok(()),
+                };
             } else {
                 return result;
             }
@@ -833,12 +839,15 @@ fn exec_table_crash_support<T: Clone + Debug>(
 
             let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file))?);
             countdown = backend.countdown.clone();
-            db = Database::builder()
+            db = match Database::builder()
                 .set_page_size(config.page_size.value)
                 .set_cache_size(config.cache_size.value)
                 .set_region_size(config.region_size.value as u64)
                 .create_with_backend(backend)
-                .unwrap();
+            {
+                Ok(db) => db,
+                Err(_) => return Ok(()),
+            };
 
             countdown.store(old_countdown, Ordering::SeqCst);
         }

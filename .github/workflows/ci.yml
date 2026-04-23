@@ -230,18 +230,26 @@ jobs:
         if: matrix.fuzz
         shell: bash {0}
         run: |
-          set -o pipefail
           HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
-          # cargo-fuzz exits 70 on timeout, 77 on crash. Tolerate timeouts
-          # (slow inputs on corrupted data) but fail on real crashes.
+          # cargo-fuzz always exits 1 on any finding (timeout or crash).
+          # Check artifact directory: timeout-* files are tolerated (slow
+          # inputs on corrupted data), crash-* files are real failures.
           run_fuzz() {
-            cargo +nightly fuzz run --sanitizer=none --target "$HOST_TARGET" "$@"
+            local name=$1; shift
+            local artifact_dir="fuzz/artifacts/$name"
+            rm -rf "$artifact_dir"
+            cargo +nightly fuzz run --sanitizer=none --target "$HOST_TARGET" "$name" "$@"
             local rc=$?
-            if [ "$rc" -eq 70 ]; then
-              echo "::warning::Fuzzer timeout on $1 (tolerated)"
+            if [ "$rc" -ne 0 ]; then
+              # Check if any crash (non-timeout) artifacts were produced
+              if ls "$artifact_dir"/crash-* "$artifact_dir"/oom-* 2>/dev/null | grep -q .; then
+                echo "::error::Fuzzer found crash in $name"
+                return 1
+              fi
+              echo "::warning::Fuzzer timeout on $name (tolerated)"
               return 0
             fi
-            return "$rc"
+            return 0
           }
           run_fuzz fuzz_redb -- -max_len=10000 -max_total_time=60 -timeout=30 || exit $?
           for target in fuzz_cdc_deser fuzz_cluster_blob fuzz_incremental_deser fuzz_merge_ops fuzz_pq_codebook; do

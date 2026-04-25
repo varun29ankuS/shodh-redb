@@ -1,5 +1,19 @@
+//! Blob compaction tests adapted for chunked B-tree storage.
+//!
+//! With chunked storage, blob data lives in the normal page-managed B-tree
+//! (BLOB_CHUNKS system table). There is no separate "blob region" to compact.
+//! Deleted blob chunks are freed immediately by the B-tree page allocator.
+//!
+//! Therefore:
+//! - `blob_stats().dead_bytes` is always 0
+//! - `compact_blobs()` is always a no-op (`was_noop: true`)
+//! - `should_compact_blobs()` never recommends compaction
+//! - Data integrity is maintained through normal B-tree MVCC
+//!
+//! These tests verify both the no-op compaction API behavior and the underlying
+//! data integrity of the chunked blob storage.
+
 use shodh_redb::*;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
@@ -50,7 +64,7 @@ fn compact_noop_on_clean_db() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. compact_after_single_delete
+// 2. compact_after_single_delete -- with chunked storage, always noop
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_after_single_delete() {
@@ -63,12 +77,10 @@ fn compact_after_single_delete() {
 
     delete_one(&db, &id2);
 
+    // With chunked storage, deleted chunks are freed immediately --
+    // compact_blobs() finds no dead space.
     let report = db.compact_blobs().unwrap();
-    assert!(!report.was_noop);
-    assert!(
-        report.bytes_reclaimed > 0,
-        "should reclaim deleted blob space"
-    );
+    assert!(report.was_noop);
 
     // Survivors must still be readable.
     let rtx = db.begin_read().unwrap();
@@ -95,11 +107,9 @@ fn compact_after_all_deleted() {
     delete_one(&db, &id2);
 
     let report = db.compact_blobs().unwrap();
-    assert!(!report.was_noop);
-    assert_eq!(report.blobs_relocated, 0, "no live blobs to relocate");
-    assert!(report.bytes_reclaimed > 0);
+    assert!(report.was_noop);
 
-    // Verify stats after compaction.
+    // Verify stats: no live blobs.
     let wtx = db.begin_write().unwrap();
     let stats = wtx.blob_stats().unwrap();
     wtx.abort().unwrap();
@@ -108,24 +118,25 @@ fn compact_after_all_deleted() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. compact_preserves_content
+// 4. compact_preserves_content -- data integrity after deletion of other blobs
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_preserves_content() {
     let tmpfile = create_tempfile();
     let mut db = Database::create(tmpfile.path()).unwrap();
 
-    // Use non-trivial payloads so offset shifts are meaningful.
+    // Use non-trivial payloads.
     let payload_a: Vec<u8> = (0u8..=255).cycle().take(8192).collect();
     let payload_b: Vec<u8> = (128u8..=255).cycle().take(4096).collect();
 
     let id_a = store_one(&db, &payload_a, "pa");
     let id_b = store_one(&db, &payload_b, "pb");
 
-    // Create dead space by storing and deleting a third blob.
+    // Delete a third blob -- chunks freed immediately.
     let id_dead = store_one(&db, &[0xFF; 2048], "dead");
     delete_one(&db, &id_dead);
 
+    // compact_blobs is a noop but call it to exercise the path.
     db.compact_blobs().unwrap();
 
     let rtx = db.begin_read().unwrap();
@@ -160,7 +171,7 @@ fn compact_preserves_metadata() {
         .unwrap();
     txn.commit().unwrap();
 
-    // Create dead space.
+    // Delete another blob.
     let dead = store_one(&db, &[0; 512], "dead");
     delete_one(&db, &dead);
 
@@ -201,18 +212,18 @@ fn compact_with_dedup_interaction() {
 
     let shared_data = b"identical-payload-for-dedup";
 
-    // Store the same content twice -- dedup should share the physical blob.
+    // Store the same content twice -- dedup should share the physical chunks.
     let id1 = store_one(&db, shared_data, "dup-1");
     let id2 = store_one(&db, shared_data, "dup-2");
-    // Store a third unique blob, then delete it to create dead space.
+    // Store a third unique blob, then delete it.
     let id3 = store_one(&db, b"unique-garbage", "garbage");
     delete_one(&db, &id3);
 
-    // Delete one dedup reference -- the shared physical blob must survive.
+    // Delete one dedup reference -- the shared chunks must survive.
     delete_one(&db, &id1);
 
     let report = db.compact_blobs().unwrap();
-    assert!(!report.was_noop);
+    assert!(report.was_noop);
 
     // The surviving reference must still read correctly.
     let rtx = db.begin_read().unwrap();
@@ -223,7 +234,7 @@ fn compact_with_dedup_interaction() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. compact_large_blobs
+// 7. compact_large_blobs -- data integrity with large payloads
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_large_blobs() {
@@ -239,14 +250,9 @@ fn compact_large_blobs() {
 
     delete_one(&db, &id_del);
 
+    // Noop with chunked storage, but verify data integrity.
     let report = db.compact_blobs().unwrap();
-    assert!(!report.was_noop);
-    // Reclaimed space should be at least the deleted blob's size.
-    assert!(
-        report.bytes_reclaimed >= 1024 * 1024,
-        "reclaimed {} but expected >= 1 MiB",
-        report.bytes_reclaimed
-    );
+    assert!(report.was_noop);
 
     let rtx = db.begin_read().unwrap();
     let (d1, _) = rtx.get_blob(&id_big).unwrap().unwrap();
@@ -258,10 +264,10 @@ fn compact_large_blobs() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. compact_report_accuracy
+// 8. blob_stats_with_chunked_storage
 // ---------------------------------------------------------------------------
 #[test]
-fn compact_report_accuracy() {
+fn blob_stats_with_chunked_storage() {
     let tmpfile = create_tempfile();
     let mut db = Database::create(tmpfile.path()).unwrap();
 
@@ -271,36 +277,20 @@ fn compact_report_accuracy() {
 
     delete_one(&db, &id2);
 
-    // Stats before compaction.
+    // With chunked storage, dead_bytes is always 0 -- chunks are freed immediately.
     let wtx = db.begin_write().unwrap();
-    let stats_before = wtx.blob_stats().unwrap();
+    let stats = wtx.blob_stats().unwrap();
     wtx.abort().unwrap();
 
-    assert!(stats_before.dead_bytes > 0);
+    assert_eq!(stats.dead_bytes, 0);
+    assert_eq!(stats.blob_count, 2);
+    assert_eq!(stats.live_bytes, 8192);
+    assert_eq!(stats.region_bytes, stats.live_bytes);
+    assert!((stats.fragmentation_ratio - 0.0).abs() < f64::EPSILON);
 
+    // compact_blobs is a noop.
     let report = db.compact_blobs().unwrap();
-
-    // Stats after compaction.
-    let wtx = db.begin_write().unwrap();
-    let stats_after = wtx.blob_stats().unwrap();
-    wtx.abort().unwrap();
-
-    // The report's bytes_reclaimed should equal the actual region shrinkage.
-    let actual_reclaimed = stats_before
-        .region_bytes
-        .saturating_sub(stats_after.region_bytes);
-    assert_eq!(
-        report.bytes_reclaimed, actual_reclaimed,
-        "report.bytes_reclaimed ({}) != actual region delta ({})",
-        report.bytes_reclaimed, actual_reclaimed,
-    );
-
-    // After compaction, dead_bytes should be 0.
-    assert_eq!(stats_after.dead_bytes, 0);
-    assert!(
-        (stats_after.fragmentation_ratio - 0.0).abs() < f64::EPSILON,
-        "fragmentation should be 0 after compaction"
-    );
+    assert!(report.was_noop);
 }
 
 // ---------------------------------------------------------------------------
@@ -318,24 +308,12 @@ fn online_compaction_readers_between_phases() {
 
     let mut handle = db.start_blob_compaction().unwrap();
 
-    // Phase 1
-    let p1 = handle.step().unwrap();
-    assert_eq!(p1.phase, 1);
-    assert!(!p1.complete);
+    // With chunked storage, step() completes immediately (no work).
+    let p = handle.step().unwrap();
+    // The compaction handle reports complete since there is nothing to do.
+    assert!(p.complete);
 
-    // Read between phases -- the blob must be accessible.
-    {
-        let rtx = db.begin_read().unwrap();
-        let (data, _) = rtx.get_blob(&id1).unwrap().unwrap();
-        assert_eq!(data.as_slice(), payload);
-    }
-
-    // Phase 2
-    let p2 = handle.step().unwrap();
-    assert_eq!(p2.phase, 2);
-    assert!(p2.complete);
-
-    // Read after completion.
+    // Blob must still be accessible.
     let rtx = db.begin_read().unwrap();
     let (data, _) = rtx.get_blob(&id1).unwrap().unwrap();
     assert_eq!(data.as_slice(), payload);
@@ -355,8 +333,8 @@ fn online_compaction_run() {
 
     let mut handle = db.start_blob_compaction().unwrap();
     let report = handle.run().unwrap();
-    assert!(!report.was_noop);
-    assert!(report.bytes_reclaimed > 0);
+    // With chunked storage, no bytes are reclaimed (chunks freed on delete).
+    assert_eq!(report.bytes_reclaimed, 0);
 
     let rtx = db.begin_read().unwrap();
     let (data, _) = rtx.get_blob(&id_keep).unwrap().unwrap();
@@ -364,10 +342,12 @@ fn online_compaction_run() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. compact_progress_callback
+// 11. compact_progress_callback -- noop means no progress events
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_progress_callback() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     let tmpfile = create_tempfile();
     let mut db = Database::create(tmpfile.path()).unwrap();
 
@@ -383,17 +363,12 @@ fn compact_progress_callback() {
         })
         .unwrap();
 
-    assert!(!report.was_noop);
-    // The callback is invoked at least twice: before pass 1 and after pass 1.
-    assert!(
-        call_count.load(Ordering::Relaxed) >= 2,
-        "callback called {} times, expected >= 2",
-        call_count.load(Ordering::Relaxed),
-    );
+    // With chunked storage, dead_bytes=0 so compact_blobs_with_progress is a noop.
+    assert!(report.was_noop);
 }
 
 // ---------------------------------------------------------------------------
-// 12. compact_progress_cancellation
+// 12. compact_progress_cancellation -- noop returns Ok, not Cancelled
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_progress_cancellation() {
@@ -404,17 +379,16 @@ fn compact_progress_cancellation() {
     let id_del = store_one(&db, &[0; 1024], "d");
     delete_one(&db, &id_del);
 
+    // With chunked storage, the cancellation callback never fires (noop early return).
     let result = db.compact_blobs_with_progress(|_a, _b, _c, _d| {
         false // cancel immediately on first callback
     });
 
-    match result {
-        Err(CompactionError::Cancelled) => {} // expected
-        Err(other) => panic!("expected Cancelled, got: {other}"),
-        Ok(_) => panic!("expected Cancelled error, but compaction succeeded"),
-    }
+    // Noop path returns Ok, not Cancelled.
+    let report = result.unwrap();
+    assert!(report.was_noop);
 
-    // Database must remain usable after cancellation.
+    // Database must remain usable.
     let rtx = db.begin_read().unwrap();
     let (data, _) = rtx.get_blob(&id_keep).unwrap().unwrap();
     assert_eq!(data.as_slice(), b"survive");
@@ -444,13 +418,13 @@ fn compact_blocked_by_read_txn() {
 }
 
 // ---------------------------------------------------------------------------
-// 14. should_compact_respects_policy
+// 14. should_compact_never_recommends -- chunked storage has no dead bytes
 // ---------------------------------------------------------------------------
 #[test]
-fn should_compact_respects_policy() {
+fn should_compact_never_recommends() {
     let tmpfile = create_tempfile();
 
-    // Set extremely low thresholds so any dead space triggers recommendation.
+    // Even with extremely low thresholds, no dead space exists.
     let policy = BlobCompactionPolicy {
         fragmentation_threshold: 0.0001,
         min_dead_bytes: 1,
@@ -466,38 +440,13 @@ fn should_compact_respects_policy() {
 
     let recommendation = db.should_compact_blobs().unwrap();
     assert!(
-        recommendation.is_some(),
-        "policy with low thresholds should recommend compaction"
-    );
-
-    let stats = recommendation.unwrap();
-    assert!(stats.dead_bytes > 0);
-    assert!(stats.fragmentation_ratio > 0.0);
-
-    // Now test with very high thresholds -- should NOT recommend.
-    let tmpfile2 = create_tempfile();
-    let policy_high = BlobCompactionPolicy {
-        fragmentation_threshold: 0.99,
-        min_dead_bytes: u64::MAX,
-    };
-    let db2 = Builder::new()
-        .set_blob_compaction_policy(policy_high)
-        .create(tmpfile2.path())
-        .unwrap();
-
-    let _id = store_one(&db2, &[0xAA; 256], "keep");
-    let id_del2 = store_one(&db2, &[0xBB; 256], "del");
-    delete_one(&db2, &id_del2);
-
-    let recommendation2 = db2.should_compact_blobs().unwrap();
-    assert!(
-        recommendation2.is_none(),
-        "policy with extreme thresholds should not recommend compaction"
+        recommendation.is_none(),
+        "chunked storage has no dead bytes  -- should never recommend blob compaction"
     );
 }
 
 // ---------------------------------------------------------------------------
-// 15. compact_then_store_new
+// 15. compact_then_store_new -- new blobs work after compact_blobs call
 // ---------------------------------------------------------------------------
 #[test]
 fn compact_then_store_new() {
@@ -509,7 +458,7 @@ fn compact_then_store_new() {
     delete_one(&db, &id_del);
 
     let report = db.compact_blobs().unwrap();
-    assert!(!report.was_noop);
+    assert!(report.was_noop);
 
     // Store new blobs after compaction -- must succeed and be readable.
     let id_new = store_one(&db, b"after-compaction", "ac");

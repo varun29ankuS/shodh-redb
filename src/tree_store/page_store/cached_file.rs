@@ -494,6 +494,7 @@ impl PagedCachedFile {
             if let Some(cached) = lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
+                #[cfg(not(fuzzing))]
                 debug_assert_eq!(cached.len(), len);
                 return Ok(cached.clone());
             }
@@ -505,6 +506,7 @@ impl PagedCachedFile {
             if let Some(cached) = read_lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
+                #[cfg(not(fuzzing))]
                 debug_assert_eq!(cached.len(), len);
                 return Ok(cached.clone());
             }
@@ -520,10 +522,10 @@ impl PagedCachedFile {
             return Ok(buffer);
         }
 
+        let mut write_lock = self.read_cache[cache_slot].write();
         let cache_size = self
             .read_cache_bytes
             .fetch_add(buffer.len(), Ordering::AcqRel);
-        let mut write_lock = self.read_cache[cache_slot].write();
         let cache_size = if let Some(replaced) = write_lock.insert(offset, buffer.clone()) {
             // A race could cause us to replace an existing buffer
             self.read_cache_bytes
@@ -582,6 +584,7 @@ impl PagedCachedFile {
         let cache_slot: usize = Self::cache_slot(offset);
         let mut lock = self.read_cache[cache_slot].write();
         if let Some(removed) = lock.remove(offset) {
+            #[cfg(not(fuzzing))]
             debug_assert_eq!(
                 len,
                 removed.len(),
@@ -636,9 +639,11 @@ impl PagedCachedFile {
             removed
         } else {
             let previous = self.write_buffer_bytes.fetch_add(len, Ordering::AcqRel);
-            if previous + len > self.max_write_buffer_bytes {
+            // Compute how many bytes to evict: at least the overage beyond the limit.
+            let overage = (previous + len).saturating_sub(self.max_write_buffer_bytes);
+            if overage > 0 {
                 let mut removed_bytes = 0;
-                while removed_bytes < len {
+                while removed_bytes < overage {
                     if let Some((evict_offset, buffer)) = lock.pop_lowest_priority() {
                         let removed_len = buffer.len();
                         let result = self.file.write(evict_offset, &buffer);

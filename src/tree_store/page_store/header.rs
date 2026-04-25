@@ -393,7 +393,9 @@ impl TransactionHeader {
         let checksum = Checksum::from_le_bytes(
             data[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| {
+                    StorageError::Corrupted("commit slot: checksum field truncated".into())
+                })?,
         );
         let corrupted = checksum != xxh3_checksum(&data[..SLOT_CHECKSUM_OFFSET]);
 
@@ -401,7 +403,9 @@ impl TransactionHeader {
             Some(BtreeHeader::from_le_bytes(
                 data[USER_ROOT_OFFSET..(USER_ROOT_OFFSET + BtreeHeader::serialized_size())]
                     .try_into()
-                    .unwrap(),
+                    .map_err(|_| {
+                        StorageError::Corrupted("commit slot: user_root truncated".into())
+                    })?,
             ))
         } else {
             None
@@ -410,7 +414,9 @@ impl TransactionHeader {
             Some(BtreeHeader::from_le_bytes(
                 data[SYSTEM_ROOT_OFFSET..(SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size())]
                     .try_into()
-                    .unwrap(),
+                    .map_err(|_| {
+                        StorageError::Corrupted("commit slot: system_root truncated".into())
+                    })?,
             ))
         } else {
             None

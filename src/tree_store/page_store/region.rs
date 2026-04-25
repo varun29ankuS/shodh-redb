@@ -29,22 +29,23 @@ impl RegionTracker {
     // num_orders: u32 number of order allocators
     // allocator_lens: u32 length of each allocator
     // data: BtreeBitmap data for each order
-    pub(super) fn to_vec(&self) -> Vec<u8> {
+    pub(super) fn to_vec(&self) -> crate::Result<Vec<u8>> {
         let mut result = vec![];
         let orders: u32 = self.order_trackers.len().try_into().unwrap();
-        let allocator_lens: Vec<u32> = self
+        let vecs: Vec<Vec<u8>> = self
             .order_trackers
             .iter()
-            .map(|x| x.to_vec().len().try_into().unwrap())
-            .collect();
+            .map(|x| x.to_vec())
+            .collect::<crate::Result<Vec<_>>>()?;
+        let allocator_lens: Vec<u32> = vecs.iter().map(|v| v.len().try_into().unwrap()).collect();
         result.extend(orders.to_le_bytes());
         for allocator_len in allocator_lens {
             result.extend(allocator_len.to_le_bytes());
         }
-        for order in &self.order_trackers {
-            result.extend(&order.to_vec());
+        for serialized in &vecs {
+            result.extend(serialized);
         }
-        result
+        Ok(result)
     }
 
     pub(super) fn from_bytes(page: &[u8]) -> Result<Self, crate::StorageError> {
@@ -100,7 +101,8 @@ impl RegionTracker {
     pub(crate) fn mark_free(&mut self, order: u8, region: u32) {
         let order: usize = order.into();
         for i in 0..=order {
-            self.order_trackers[i].clear(region);
+            // Region tracker is always sized to fit all regions; indices are valid.
+            self.order_trackers[i].clear(region).unwrap();
         }
     }
 
@@ -108,7 +110,8 @@ impl RegionTracker {
         let order: usize = order.into();
         assert!(order < self.order_trackers.len());
         for i in order..self.order_trackers.len() {
-            self.order_trackers[i].set(region);
+            // Region tracker is always sized to fit all regions; indices are valid.
+            self.order_trackers[i].set(region).unwrap();
         }
     }
 
@@ -160,7 +163,7 @@ impl Allocators {
         result
     }
 
-    pub(super) fn resize_to(&mut self, new_layout: DatabaseLayout) {
+    pub(super) fn resize_to(&mut self, new_layout: DatabaseLayout) -> crate::Result<()> {
         let shrink = match (new_layout.num_regions() as usize).cmp(&self.region_allocators.len()) {
             cmp::Ordering::Less => true,
             cmp::Ordering::Equal => {
@@ -172,7 +175,7 @@ impl Allocators {
                     cmp::Ordering::Less => true,
                     cmp::Ordering::Equal => {
                         // No-op
-                        return;
+                        return Ok(());
                     }
                     cmp::Ordering::Greater => false,
                 }
@@ -194,7 +197,7 @@ impl Allocators {
                 .unwrap_or_else(|| new_layout.full_region_layout());
             let allocator = self.region_allocators.last_mut().unwrap();
             if allocator.len() > last_region.num_pages() {
-                allocator.resize(last_region.num_pages());
+                allocator.resize(last_region.num_pages())?;
             }
         } else {
             let old_num_regions = self.region_allocators.len();
@@ -204,7 +207,7 @@ impl Allocators {
                     let allocator = &mut self.region_allocators[i as usize];
                     assert!(new_region.num_pages() >= allocator.len());
                     if new_region.num_pages() != allocator.len() {
-                        allocator.resize(new_region.num_pages());
+                        allocator.resize(new_region.num_pages())?;
                         let highest_free = allocator.highest_free_order().unwrap();
                         self.region_tracker.mark_free(highest_free, i);
                     }
@@ -223,5 +226,6 @@ impl Allocators {
                 }
             }
         }
+        Ok(())
     }
 }

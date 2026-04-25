@@ -85,8 +85,9 @@ fn multimap_stats_helper(
                     }
                 }
             }
-            let mut overhead_bytes = (accessor.total_length() as u64) - leaf_bytes;
-            let mut fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
+            let mut overhead_bytes = (accessor.total_length() as u64).saturating_sub(leaf_bytes);
+            let mut fragmented_bytes =
+                page.memory().len().saturating_sub(accessor.total_length()) as u64;
             let mut max_child_height = 0;
             let (mut leaf_pages, mut branch_pages) = if is_branch { (0, 1) } else { (1, 0) };
 
@@ -134,7 +135,8 @@ fn multimap_stats_helper(
             let mut branch_pages = 1;
             let mut stored_leaf_bytes = 0;
             let mut metadata_bytes = accessor.total_length() as u64;
-            let mut fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
+            let mut fragmented_bytes =
+                page.memory().len().saturating_sub(accessor.total_length()) as u64;
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
                     let stats =
@@ -382,7 +384,7 @@ pub(crate) fn relocate_subtrees(
     // No need to track allocations, because this method is only called during compaction when
     // there can't be any savepoints
     let mut ignore = PageTrackerPolicy::Ignore;
-    if !mem.free_if_uncommitted(old_page_number, &mut ignore) {
+    if !mem.free_if_uncommitted(old_page_number, &mut ignore)? {
         freed_pages.lock().push(old_page_number);
     }
     Ok((new_page_number, DEFERRED))
@@ -1026,8 +1028,9 @@ impl<V: Key + 'static> Drop for MultimapValue<'_, V> {
             let mut freed_pages = freed_pages_arc.lock();
             let mut allocated_pages = self.allocated_pages.lock();
             for page in &self.free_on_drop {
-                if !mem_arc.free_if_uncommitted(*page, &mut allocated_pages) {
-                    freed_pages.push(*page);
+                match mem_arc.free_if_uncommitted(*page, &mut allocated_pages) {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => freed_pages.push(*page),
                 }
             }
         }
@@ -1468,7 +1471,10 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                                     .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                                 drop(page);
                                 let mut allocated_pages = self.allocated_pages.lock();
-                                if !self.mem.free_if_uncommitted(new_root, &mut allocated_pages) {
+                                if !self
+                                    .mem
+                                    .free_if_uncommitted(new_root, &mut allocated_pages)?
+                                {
                                     (*self.freed_pages).lock().push(new_root);
                                 }
                             } else {

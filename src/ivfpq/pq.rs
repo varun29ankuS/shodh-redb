@@ -176,7 +176,7 @@ fn train_subvectors(
     sub_dim: usize,
     k: usize,
     max_iter: usize,
-) -> Vec<f32> {
+) -> crate::Result<Vec<f32>> {
     let mut results: Vec<Vec<f32>> = Vec::with_capacity(num_subvectors);
 
     std::thread::scope(|s| {
@@ -186,15 +186,19 @@ fn train_subvectors(
             })
             .collect();
         for handle in handles {
-            results.push(handle.join().unwrap());
+            results.push(handle.join().map_err(|_| {
+                crate::StorageError::Internal("IVF-PQ subvector training thread panicked".into())
+            })?);
         }
-    });
+        Ok::<(), crate::StorageError>(())
+    })
+    .map_err(|_| crate::StorageError::Internal("IVF-PQ training scope panicked".into()))?;
 
     let mut all_data = Vec::with_capacity(num_subvectors * 256 * sub_dim);
     for chunk in results {
         all_data.extend_from_slice(&chunk);
     }
-    all_data
+    Ok(all_data)
 }
 
 /// Sequential sub-vector training for no_std environments.
@@ -207,13 +211,13 @@ fn train_subvectors(
     sub_dim: usize,
     k: usize,
     max_iter: usize,
-) -> Vec<f32> {
+) -> crate::Result<Vec<f32>> {
     let mut all_data = Vec::with_capacity(num_subvectors * 256 * sub_dim);
     for m in 0..num_subvectors {
         let chunk = train_one_subvector(flat_vectors, dim, n, m, sub_dim, k, max_iter);
         all_data.extend_from_slice(&chunk);
     }
-    all_data
+    Ok(all_data)
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +248,7 @@ pub fn train_codebooks(
 
     let k = 256usize.min(n); // Can't have more codewords than training vectors.
 
-    let all_data = train_subvectors(flat_vectors, dim, n, num_subvectors, sub_dim, k, max_iter);
+    let all_data = train_subvectors(flat_vectors, dim, n, num_subvectors, sub_dim, k, max_iter)?;
 
     Ok(Codebooks {
         data: all_data,

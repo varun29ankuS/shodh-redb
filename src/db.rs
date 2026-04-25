@@ -755,29 +755,25 @@ impl Database {
     }
 
     /// Like `verify_primary_checksums` but collects per-page corruption details.
+    ///
+    /// Accepts a `guard` to ensure page ref-counting is active during traversal,
+    /// preventing `try_free_if_unpersisted` from freeing pages under verification.
     #[cfg(feature = "std")]
     pub(crate) fn verify_primary_checksums_detailed(
         mem: Arc<TransactionalMemory>,
+        data_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+        guard: Arc<TransactionGuard>,
     ) -> Result<(u64, Vec<CorruptPageInfo>)> {
         let mut total_pages = 0u64;
         let mut all_corruptions = Vec::new();
 
-        let table_tree = TableTree::new(
-            mem.get_data_root(),
-            PageHint::None,
-            Arc::new(TransactionGuard::Verification),
-            mem.clone(),
-        )?;
+        let table_tree = TableTree::new(data_root, PageHint::None, guard.clone(), mem.clone())?;
         let (pages, corruptions) = table_tree.verify_checksums_detailed()?;
         total_pages += pages;
         all_corruptions.extend(corruptions);
 
-        let system_table_tree = TableTree::new(
-            mem.get_system_root(),
-            PageHint::None,
-            Arc::new(TransactionGuard::Verification),
-            mem.clone(),
-        )?;
+        let system_table_tree = TableTree::new(system_root, PageHint::None, guard, mem.clone())?;
         let (pages, corruptions) = system_table_tree.verify_checksums_detailed()?;
         total_pages += pages;
         all_corruptions.extend(corruptions);
@@ -786,26 +782,41 @@ impl Database {
     }
 
     /// Like `verify_primary_checksums` but verifies B-tree structural invariants.
+    /// Uses `TransactionGuard::Verification` -- only safe when called from
+    /// `check_integrity` which has exclusive `&mut self` access.
     #[cfg(feature = "std")]
     pub(crate) fn verify_primary_structure(
         mem: Arc<TransactionalMemory>,
     ) -> Result<Vec<CorruptPageInfo>> {
+        Self::verify_structure_with_roots(
+            mem.clone(),
+            mem.get_data_root(),
+            mem.get_system_root(),
+            Arc::new(TransactionGuard::Verification),
+        )
+    }
+
+    /// Verify B-tree structural integrity using pre-captured root pointers.
+    ///
+    /// This avoids a race where `get_data_root()` / `get_system_root()` could
+    /// return a different root than the one protected by the caller's read guard,
+    /// leading to false-positive corruption reports when a concurrent writer
+    /// commits between root capture and tree traversal.
+    ///
+    /// Accepts a `guard` so page ref-counting prevents concurrent page reclamation.
+    #[cfg(feature = "std")]
+    fn verify_structure_with_roots(
+        mem: Arc<TransactionalMemory>,
+        data_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+        guard: Arc<TransactionGuard>,
+    ) -> Result<Vec<CorruptPageInfo>> {
         let mut all_corruptions = Vec::new();
 
-        let table_tree = TableTree::new(
-            mem.get_data_root(),
-            PageHint::None,
-            Arc::new(TransactionGuard::Verification),
-            mem.clone(),
-        )?;
+        let table_tree = TableTree::new(data_root, PageHint::None, guard.clone(), mem.clone())?;
         all_corruptions.extend(table_tree.verify_structure_detailed()?);
 
-        let system_table_tree = TableTree::new(
-            mem.get_system_root(),
-            PageHint::None,
-            Arc::new(TransactionGuard::Verification),
-            mem.clone(),
-        )?;
+        let system_table_tree = TableTree::new(system_root, PageHint::None, guard, mem.clone())?;
         all_corruptions.extend(system_table_tree.verify_structure_detailed()?);
 
         Ok(all_corruptions)
@@ -892,8 +903,12 @@ impl Database {
         }
 
         let mem = Arc::new(mem);
-        let (pages_checked, mut corrupt_details) =
-            Self::verify_primary_checksums_detailed(mem.clone())?;
+        let (pages_checked, mut corrupt_details) = Self::verify_primary_checksums_detailed(
+            mem.clone(),
+            mem.get_data_root(),
+            mem.get_system_root(),
+            Arc::new(TransactionGuard::Verification),
+        )?;
         let pages_corrupt = corrupt_details.len() as u64;
 
         let structural_valid = if level == VerifyLevel::Full {
@@ -1125,12 +1140,37 @@ impl Database {
             });
         }
 
-        let (pages_checked, mut corrupt_details) =
-            Self::verify_primary_checksums_detailed(self.mem.clone())?;
+        // Register a read transaction to ensure MVCC protection during
+        // verification. Without this, process_freed_pages in a concurrent
+        // writer can free pages that the verification traversal is reading,
+        // causing checksum mismatches and debug_assert failures.
+        //
+        // Capture the root pointers atomically with guard registration so
+        // that concurrent commits cannot change the root between guard
+        // creation and the actual tree walk. This prevents false-positive
+        // structural corruption reports (e.g. "leaf at depth 1, expected 2")
+        // when a root split races with verification.
+        let guard = Arc::new(self.allocate_read_transaction()?);
+        // Use persisted roots (primary slot) to avoid racing with non-durable
+        // writers that may free pages from unreachable tables in the secondary slot.
+        let snapshot_data_root = self.mem.get_persisted_data_root();
+        let snapshot_system_root = self.mem.get_persisted_system_root();
+
+        let (pages_checked, mut corrupt_details) = Self::verify_primary_checksums_detailed(
+            self.mem.clone(),
+            snapshot_data_root,
+            snapshot_system_root,
+            guard.clone(),
+        )?;
         let pages_corrupt = corrupt_details.len() as u64;
 
         let structural_valid = if level == VerifyLevel::Full {
-            let structural_corruptions = Self::verify_primary_structure(self.mem.clone())?;
+            let structural_corruptions = Self::verify_structure_with_roots(
+                self.mem.clone(),
+                snapshot_data_root,
+                snapshot_system_root,
+                guard.clone(),
+            )?;
             if !structural_corruptions.is_empty() {
                 corrupt_details.extend(structural_corruptions);
                 Some(false)
@@ -1372,18 +1412,8 @@ impl Database {
             }
         }
 
-        // -- Truncate the file ------------------------------------------------
-        // IMPORTANT: Use committed state only. get_blob_state() may return
-        // non-durable pending state (if a prior Durability::None blob write
-        // set pending_blob_state.next_sequence != 0), which would cause
-        // truncation to a wrong length and permanent database corruption.
-        let blob_state = self.mem.get_committed_blob_state();
-        let target_len = blob_state.region_offset + blob_state.region_length;
-        if target_len > 0 {
-            self.mem
-                .truncate_to(target_len)
-                .map_err(CompactionError::Storage)?;
-        }
+        // With chunked B-tree blob storage, blob data lives in the normal
+        // page-managed B-tree -- there is no separate file region to truncate.
 
         Ok(BlobCompactionReport {
             blobs_relocated,
@@ -1516,14 +1546,7 @@ impl Database {
             }
         }
 
-        // -- Truncate the file ------------------------------------------------
-        let blob_state = self.mem.get_committed_blob_state();
-        let target_len = blob_state.region_offset + blob_state.region_length;
-        if target_len > 0 {
-            self.mem
-                .truncate_to(target_len)
-                .map_err(CompactionError::Storage)?;
-        }
+        // With chunked B-tree blob storage, no separate file region to truncate.
 
         // Final progress: 100%
         let _ = callback(blobs_relocated, total_blobs, total_live_size, total_bytes);
@@ -1885,7 +1908,7 @@ impl Database {
             let fake = Arc::new(TransactionGuard::Verification);
             let tables = TableTree::new(data_root, PageHint::None, fake, mem.clone())?;
             tables.visit_all_pages(|path| {
-                mem.mark_page_allocated(path.page_number());
+                mem.mark_page_allocated(path.page_number())?;
                 Ok(())
             })?;
         }
@@ -1902,17 +1925,17 @@ impl Database {
             let fake = Arc::new(TransactionGuard::Verification);
             let system_tables = TableTree::new(system_root, PageHint::None, fake, mem.clone())?;
             system_tables.visit_all_pages(|path| {
-                mem.mark_page_allocated(path.page_number());
+                mem.mark_page_allocated(path.page_number())?;
                 Ok(())
             })?;
         }
 
         Self::visit_freed_tree(system_root, DATA_FREED_TABLE, mem.clone(), |page| {
-            mem.mark_page_allocated(page);
+            mem.mark_page_allocated(page)?;
             Ok(())
         })?;
         Self::visit_freed_tree(system_root, SYSTEM_FREED_TABLE, mem.clone(), |page| {
-            mem.mark_page_allocated(page);
+            mem.mark_page_allocated(page)?;
             Ok(())
         })?;
         #[cfg(debug_assertions)]
@@ -2474,7 +2497,12 @@ impl CompactionHandle<'_> {
     }
 
     /// Runs compaction to completion, returning the total number of steps performed.
+    ///
+    /// Compaction is bounded to at most 10,000 steps to prevent non-convergence
+    /// from causing an infinite loop. If the limit is reached, the compaction
+    /// stops and returns the number of steps completed so far.
     pub fn run(&self) -> core::result::Result<u64, CompactionError> {
+        const MAX_STEPS: u64 = 10_000;
         let mut steps = 0u64;
         loop {
             let progress = self.step()?;
@@ -2482,6 +2510,9 @@ impl CompactionHandle<'_> {
                 break;
             }
             steps += 1;
+            if steps >= MAX_STEPS {
+                break;
+            }
         }
         self.db.observer.on_compaction_complete(steps);
         Ok(steps)
@@ -2563,15 +2594,7 @@ impl BlobCompactionHandle<'_> {
                 }
             }
 
-            // Truncate the file
-            let blob_state = self.db.mem.get_committed_blob_state();
-            let target_len = blob_state.region_offset + blob_state.region_length;
-            if target_len > 0 {
-                self.db
-                    .mem
-                    .truncate_to(target_len)
-                    .map_err(CompactionError::Storage)?;
-            }
+            // With chunked B-tree blob storage, no separate file region to truncate.
 
             self.phase = 2;
             Ok(BlobCompactionProgress {
@@ -2704,7 +2727,8 @@ impl Builder {
     ///
     /// ## Defaults
     ///
-    /// - `cache_size_bytes`: 1GiB
+    /// - `cache_size_bytes`: 25% of physical RAM, clamped to \[16 MiB, 1 GiB\].
+    ///   Falls back to 1 GiB if memory detection fails, or 0 on `no_std`.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let mut result = Self {
@@ -2713,9 +2737,7 @@ impl Builder {
             // It is part of the file format, so can be enabled in the future.
             page_size: PAGE_SIZE,
             region_size: None,
-            // TODO: Default should probably take into account the total system memory
             read_cache_size_bytes: 0,
-            // TODO: Default should probably take into account the total system memory
             write_cache_size_bytes: 0,
             compression: CompressionConfig::None,
             repair_callback: Box::new(|_| {}),
@@ -2729,8 +2751,138 @@ impl Builder {
             blob_compaction_policy: BlobCompactionPolicy::default(),
         };
 
-        result.set_cache_size(1024 * 1024 * 1024);
+        result.set_cache_size(Self::default_cache_size());
         result
+    }
+
+    /// Compute system-aware default cache size.
+    ///
+    /// On `std` targets, uses 25% of physical RAM, clamped to \[16 MiB, 1 GiB\].
+    /// On `no_std` targets (or if detection fails), returns 1 GiB.
+    fn default_cache_size() -> usize {
+        #[cfg(feature = "std")]
+        {
+            Self::detect_system_cache_size()
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            1024 * 1024 * 1024
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn detect_system_cache_size() -> usize {
+        const MIN_CACHE: usize = 16 * 1024 * 1024; // 16 MiB
+        const MAX_CACHE: usize = 1024 * 1024 * 1024; // 1 GiB
+
+        match Self::total_physical_memory() {
+            Some(bytes) => (bytes / 4).clamp(MIN_CACHE, MAX_CACHE),
+            None => MAX_CACHE,
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn total_physical_memory() -> Option<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            // sysconf constants from POSIX / glibc
+            const _SC_PHYS_PAGES: core::ffi::c_int = 85;
+            const _SC_PAGESIZE: core::ffi::c_int = 30;
+            unsafe extern "C" {
+                fn sysconf(name: core::ffi::c_int) -> core::ffi::c_long;
+            }
+            // SAFETY: sysconf is a POSIX-defined function; _SC_PHYS_PAGES and _SC_PAGESIZE
+            // are standard constants. Both calls return -1 on error (handled below).
+            let pages = unsafe { sysconf(_SC_PHYS_PAGES) };
+            let page_size = unsafe { sysconf(_SC_PAGESIZE) };
+            if pages > 0 && page_size > 0 {
+                // Values are positive (checked above) and physical page counts fit in usize.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                Some((pages as usize).saturating_mul(page_size as usize))
+            } else {
+                None
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            unsafe extern "C" {
+                fn sysctlbyname(
+                    name: *const core::ffi::c_char,
+                    oldp: *mut core::ffi::c_void,
+                    oldlenp: *mut usize,
+                    newp: *mut core::ffi::c_void,
+                    newlen: usize,
+                ) -> core::ffi::c_int;
+            }
+            let mut size: u64 = 0;
+            let mut len = core::mem::size_of::<u64>();
+            let name = b"hw.memsize\0";
+            // SAFETY: sysctlbyname with a valid null-terminated name and a properly sized
+            // output buffer. The kernel writes exactly 8 bytes on success.
+            let ret = unsafe {
+                sysctlbyname(
+                    name.as_ptr() as *const _,
+                    &mut size as *mut u64 as *mut _,
+                    &mut len,
+                    core::ptr::null_mut(),
+                    0,
+                )
+            };
+            if ret == 0 {
+                // On 32-bit targets, clamp to usize::MAX; the cache clamp handles the rest.
+                #[allow(clippy::cast_possible_truncation)]
+                Some(size.min(usize::MAX as u64) as usize)
+            } else {
+                None
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            #[repr(C)]
+            struct MemoryStatusEx {
+                dw_length: u32,
+                dw_memory_load: u32,
+                ull_total_phys: u64,
+                ull_avail_phys: u64,
+                ull_total_page_file: u64,
+                ull_avail_page_file: u64,
+                ull_total_virtual: u64,
+                ull_avail_virtual: u64,
+                ull_avail_extended_virtual: u64,
+            }
+            unsafe extern "system" {
+                fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+            }
+            let mut status = MemoryStatusEx {
+                // MemoryStatusEx is repr(C): 2xu32 + 7xu64 = 64 bytes, fits in u32.
+                #[allow(clippy::cast_possible_truncation)]
+                dw_length: core::mem::size_of::<MemoryStatusEx>() as u32,
+                dw_memory_load: 0,
+                ull_total_phys: 0,
+                ull_avail_phys: 0,
+                ull_total_page_file: 0,
+                ull_avail_page_file: 0,
+                ull_total_virtual: 0,
+                ull_avail_virtual: 0,
+                ull_avail_extended_virtual: 0,
+            };
+            // SAFETY: GlobalMemoryStatusEx is a stable Win32 API. The struct is properly
+            // initialized with dw_length set to the correct size.
+            let ret = unsafe { GlobalMemoryStatusEx(core::ptr::addr_of_mut!(status)) };
+            if ret != 0 {
+                // On 32-bit targets, clamp to usize::MAX (4 GiB) -- the cache clamp
+                // will bring it down to 1 GiB anyway.
+                let total = status.ull_total_phys;
+                #[allow(clippy::cast_possible_truncation)]
+                Some(total.min(usize::MAX as u64) as usize)
+            } else {
+                None
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            None
+        }
     }
 
     /// Set a callback which will be invoked periodically in the event that the database file needs
@@ -3728,5 +3880,16 @@ mod test {
         // start_compaction should fail because of persistent savepoint
         let result = db.start_compaction();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_cache_size_within_bounds() {
+        let size = crate::db::Builder::default_cache_size();
+        let min = 16 * 1024 * 1024; // 16 MiB
+        let max = 1024 * 1024 * 1024; // 1 GiB
+        assert!(
+            size >= min && size <= max,
+            "default_cache_size {size} outside [{min}, {max}]"
+        );
     }
 }

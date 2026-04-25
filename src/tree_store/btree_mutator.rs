@@ -15,6 +15,7 @@ use crate::tree_store::{
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result, StorageError};
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
@@ -126,15 +127,16 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         }
     }
 
-    fn conditional_free(&mut self, page_number: PageNumber) {
+    fn conditional_free(&mut self, page_number: PageNumber) -> Result<()> {
         if self.modify_uncommitted {
             let mut allocated = self.allocated.lock();
-            if !self.mem.free_if_uncommitted(page_number, &mut allocated) {
+            if !self.mem.free_if_uncommitted(page_number, &mut allocated)? {
                 self.freed.push(page_number);
             }
         } else {
             self.freed.push(page_number);
         }
+        Ok(())
     }
 
     pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
@@ -354,7 +356,13 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             old_value: None,
                         }))
                     } else {
-                        let split_key = accessor.last_entry().key().to_vec();
+                        let split_key = accessor
+                            .last_entry()
+                            .ok_or_else(|| {
+                                StorageError::Corrupted("Empty leaf during split".into())
+                            })?
+                            .key()
+                            .to_vec();
                         Ok(Box::new(InsertionResult {
                             new_root: page.get_page_number(),
                             root_checksum: page_checksum,
@@ -439,7 +447,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             let arc = page.to_arc();
                             drop(page);
                             let mut allocated = self.allocated.lock();
-                            self.mem.free(page_number, &mut allocated);
+                            self.mem.free(page_number, &mut allocated)?;
                             if self.compression.is_enabled() {
                                 Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
                             } else {
@@ -455,7 +463,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         }
                     } else {
                         drop(page);
-                        self.conditional_free(page_number);
+                        self.conditional_free(page_number)?;
                         None
                     };
 
@@ -482,7 +490,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             let arc = page.to_arc();
                             drop(page);
                             let mut allocated = self.allocated.lock();
-                            self.mem.free(page_number, &mut allocated);
+                            self.mem.free(page_number, &mut allocated)?;
                             if self.compression.is_enabled() {
                                 Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
                             } else {
@@ -498,7 +506,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         }
                     } else {
                         drop(page);
-                        self.conditional_free(page_number);
+                        self.conditional_free(page_number)?;
                         None
                     };
 
@@ -539,8 +547,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width())?;
-                let (child_index, child_page) = accessor.child_for_key::<K>(key);
-                let child_checksum = accessor.child_checksum(child_index).unwrap();
+                let (child_index, child_page) = accessor.child_for_key::<K>(key)?;
+                let child_checksum = accessor.child_checksum(child_index).ok_or_else(|| {
+                    StorageError::Corrupted(format!(
+                        "Branch: missing checksum at index {child_index}"
+                    ))
+                })?;
                 let sub_result =
                     self.insert_helper(self.mem.get_page(child_page)?, child_checksum, key, value)?;
 
@@ -638,7 +650,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 // Free the original page, since we've replaced it
                 let page_number = page.get_page_number();
                 drop(page);
-                self.conditional_free(page_number);
+                self.conditional_free(page_number)?;
 
                 result
             }
@@ -684,7 +696,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width())?;
-                let (child_index, child_page) = accessor.child_for_key::<K>(key);
+                let (child_index, child_page) = accessor.child_for_key::<K>(key)?;
                 self.insert_inplace_helper(self.mem.get_page_mut(child_page)?, key, value)?;
                 let mut mutator = BranchMutator::new(page.memory_mut()?);
                 mutator.write_child_page(child_index, child_page, DEFERRED);
@@ -802,7 +814,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             let arc = page.to_arc();
             drop(page);
             let mut allocated = self.allocated.lock();
-            self.mem.free(page_number, &mut allocated);
+            self.mem.free(page_number, &mut allocated)?;
             if self.compression.is_enabled() {
                 Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
             } else {
@@ -852,14 +864,24 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         let accessor = BranchAccessor::new(&page, K::fixed_width())?;
         let original_page_number = page.get_page_number();
         let (child_index, child_page_number) = match target {
-            DeleteTarget::Key(key) => accessor.child_for_key::<K>(key),
-            DeleteTarget::First => (0, accessor.child_page(0).unwrap()),
+            DeleteTarget::Key(key) => accessor.child_for_key::<K>(key)?,
+            DeleteTarget::First => {
+                let page = accessor
+                    .child_page(0)
+                    .ok_or_else(|| StorageError::Corrupted("Branch: missing first child".into()))?;
+                (0, page)
+            }
             DeleteTarget::Last => {
-                let last = accessor.count_children() - 1;
-                (last, accessor.child_page(last).unwrap())
+                let last = accessor.count_children().saturating_sub(1);
+                let page = accessor.child_page(last).ok_or_else(|| {
+                    StorageError::Corrupted(format!("Branch: missing last child at {last}"))
+                })?;
+                (last, page)
             }
         };
-        let child_checksum = accessor.child_checksum(child_index).unwrap();
+        let child_checksum = accessor.child_checksum(child_index).ok_or_else(|| {
+            StorageError::Corrupted(format!("Branch: missing checksum at index {child_index}"))
+        })?;
         let (result, found) = *self.delete_helper(
             self.mem.get_page(child_page_number)?,
             child_checksum,
@@ -886,7 +908,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     builder.push_all(&accessor);
                     builder.replace_child(child_index, new_child, new_child_checksum);
                     let new_page = builder.build()?;
-                    self.conditional_free(original_page_number);
+                    self.conditional_free(original_page_number)?;
                     new_page.get_page_number()
                 };
             return Ok(Box::new((Subtree(result_page, DEFERRED), found)));
@@ -969,7 +991,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
 
                     drop(page);
-                    self.conditional_free(original_page_number);
+                    self.conditional_free(original_page_number)?;
                     // child_page_number does not need to be freed, because it's a leaf and the
                     // MutAccessGuard will free it
 
@@ -1026,7 +1048,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
-                self.conditional_free(page_number);
+                self.conditional_free(page_number)?;
                 // child_page_number does not need to be freed, because it's a leaf and the
                 // MutAccessGuard will free it
 
@@ -1087,7 +1109,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
-                self.conditional_free(page_number);
+                self.conditional_free(page_number)?;
 
                 result
             }
@@ -1150,16 +1172,16 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
-                self.conditional_free(page_number);
+                self.conditional_free(page_number)?;
                 drop(partial_child_page);
-                self.conditional_free(partial_child);
+                self.conditional_free(partial_child)?;
 
                 result
             }
         };
 
         drop(page);
-        self.conditional_free(original_page_number);
+        self.conditional_free(original_page_number)?;
 
         Ok(Box::new((final_result, found)))
     }

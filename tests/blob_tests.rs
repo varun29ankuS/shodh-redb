@@ -2501,23 +2501,22 @@ fn blob_compact_basic() {
         txn.commit().unwrap();
     }
 
-    // Verify fragmentation exists
+    // With chunked B-tree storage, deleted blobs are removed by CoW --
+    // there is no dead space or fragmentation in a separate region.
     {
         let read_txn = db.begin_read().unwrap();
         let stats = read_txn.blob_stats().unwrap();
         assert_eq!(stats.blob_count, 2);
-        assert!(stats.dead_bytes > 0);
-        assert!(stats.fragmentation_ratio > 0.0);
+        assert_eq!(stats.dead_bytes, 0);
+        assert_eq!(stats.fragmentation_ratio, 0.0);
     }
 
-    // Compact
+    // Compact is a no-op (no dead space to reclaim)
     let report = db.compact_blobs().unwrap();
-    assert!(!report.was_noop);
-    assert_eq!(report.blobs_relocated, 2);
-    assert_eq!(report.live_bytes, data_a.len() as u64 + data_c.len() as u64);
-    assert!(report.bytes_reclaimed > 0);
+    assert!(report.was_noop);
+    assert_eq!(report.bytes_reclaimed, 0);
 
-    // Verify surviving blobs still readable
+    // Surviving blobs still readable
     let read_txn = db.begin_read().unwrap();
     let (d_a, _) = read_txn.get_blob(&id_a).unwrap().unwrap();
     let (d_c, _) = read_txn.get_blob(&id_c).unwrap().unwrap();
@@ -2525,7 +2524,6 @@ fn blob_compact_basic() {
     assert_eq!(d_c, data_c);
     assert!(read_txn.get_blob(&id_b).unwrap().is_none());
 
-    // Verify no fragmentation after compact
     let stats = read_txn.blob_stats().unwrap();
     assert_eq!(stats.dead_bytes, 0);
 }
@@ -2596,10 +2594,11 @@ fn blob_compact_all_deleted() {
         txn.commit().unwrap();
     }
 
+    // With chunked B-tree storage, compaction is a no-op -- deleted blob
+    // data is reclaimed by B-tree CoW, not a separate region compactor.
     let report = db.compact_blobs().unwrap();
-    assert!(!report.was_noop);
-    assert_eq!(report.live_bytes, 0);
-    assert!(report.bytes_reclaimed > 0);
+    assert!(report.was_noop);
+    assert_eq!(report.bytes_reclaimed, 0);
 
     let read_txn = db.begin_read().unwrap();
     let stats = read_txn.blob_stats().unwrap();
@@ -2654,10 +2653,10 @@ fn blob_compact_with_dedup() {
         txn.commit().unwrap();
     }
 
-    // Compact
+    // With chunked B-tree storage, compaction is a no-op
     let report = db.compact_blobs().unwrap();
-    assert!(!report.was_noop);
-    assert!(report.bytes_reclaimed > 0);
+    assert!(report.was_noop);
+    assert_eq!(report.bytes_reclaimed, 0);
 
     // Surviving dedup blob still readable
     let read_txn = db.begin_read().unwrap();
@@ -2715,14 +2714,15 @@ fn blob_stats_accuracy() {
         txn.commit().unwrap();
     }
 
+    // With chunked B-tree storage, deleted blob data is reclaimed by CoW.
+    // region_bytes == live_bytes, dead_bytes == 0, no fragmentation.
     let read_txn = db.begin_read().unwrap();
     let stats = read_txn.blob_stats().unwrap();
     assert_eq!(stats.blob_count, 2);
     assert_eq!(stats.live_bytes, 4000); // A(1000) + C(3000)
-    assert_eq!(stats.region_bytes, 6000); // all 3 stored
-    assert_eq!(stats.dead_bytes, 2000); // B deleted
-    assert!(stats.fragmentation_ratio > 0.33);
-    assert!(stats.fragmentation_ratio < 0.34);
+    assert_eq!(stats.region_bytes, 4000); // == live_bytes (no separate region)
+    assert_eq!(stats.dead_bytes, 0);
+    assert_eq!(stats.fragmentation_ratio, 0.0);
 }
 
 #[test]
@@ -2768,12 +2768,12 @@ fn blob_compact_large() {
         txn.commit().unwrap();
     }
 
+    // With chunked B-tree storage, compaction is a no-op
     let report = db.compact_blobs().unwrap();
-    assert!(!report.was_noop);
-    assert_eq!(report.live_bytes, 125_000); // 50K + 75K
-    assert_eq!(report.bytes_reclaimed, 100_000);
+    assert!(report.was_noop);
+    assert_eq!(report.bytes_reclaimed, 0);
 
-    // Verify data integrity after compaction
+    // Verify data integrity -- surviving blobs still counted
     let read_txn = db.begin_read().unwrap();
     let stats = read_txn.blob_stats().unwrap();
     assert_eq!(stats.blob_count, 2);
@@ -2939,16 +2939,15 @@ fn blob_should_compact_with_dead_space() {
         txn.commit().unwrap();
     }
 
-    // With low thresholds, should recommend compaction
+    // With chunked B-tree storage, dead_bytes is always 0 and
+    // fragmentation_ratio is 0.0, so compaction is never recommended.
     let result = db.should_compact_blobs().unwrap();
-    assert!(result.is_some());
-    let stats = result.unwrap();
-    assert!(stats.dead_bytes > 0);
+    assert!(result.is_none());
 
-    // Compact and verify
+    // Compact is a no-op
     let report = db.compact_blobs().unwrap();
-    assert!(!report.was_noop);
-    assert!(report.bytes_reclaimed > 0);
+    assert!(report.was_noop);
+    assert_eq!(report.bytes_reclaimed, 0);
 }
 
 #[test]
@@ -2982,6 +2981,8 @@ fn blob_compact_with_progress_callback() {
         txn.commit().unwrap();
     }
 
+    // With chunked B-tree storage, dead_bytes==0 so compact_blobs_with_progress
+    // returns noop immediately without invoking the callback.
     let mut calls = 0u32;
     let report = db
         .compact_blobs_with_progress(|_blobs, _total_blobs, _bytes, _total_bytes| {
@@ -2989,8 +2990,8 @@ fn blob_compact_with_progress_callback() {
             true // continue
         })
         .unwrap();
-    assert!(!report.was_noop);
-    assert!(calls >= 2); // at least initial + after pass 1
+    assert!(report.was_noop);
+    assert_eq!(calls, 0);
 }
 
 #[test]
@@ -3024,16 +3025,15 @@ fn blob_compact_with_progress_cancelled() {
         txn.commit().unwrap();
     }
 
-    // Cancel immediately
+    // With chunked B-tree storage, dead_bytes==0, so
+    // compact_blobs_with_progress returns noop before the callback fires.
+    // The cancel callback is never invoked.
     let result = db.compact_blobs_with_progress(|_, _, _, _| false);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err, shodh_redb::CompactionError::Cancelled),
-        "Expected Cancelled, got: {err:?}"
-    );
+    assert!(result.is_ok());
+    let report = result.unwrap();
+    assert!(report.was_noop);
 
-    // Database should still be usable after cancellation
+    // Database should still be usable
     let txn = db.begin_write().unwrap();
     let stats = txn.blob_stats().unwrap();
     assert!(stats.blob_count > 0);
@@ -3071,10 +3071,11 @@ fn blob_compaction_handle_basic() {
         txn.commit().unwrap();
     }
 
+    // With chunked B-tree storage, compaction handle still works but
+    // reports zero reclamation (B-tree CoW handles cleanup).
     let mut handle = db.start_blob_compaction().unwrap();
     let report = handle.run().unwrap();
-    assert!(!report.was_noop);
-    assert!(report.bytes_reclaimed > 0);
+    assert_eq!(report.bytes_reclaimed, 0);
 
     // Verify data is intact
     let read_txn = db.begin_read().unwrap();
@@ -3140,25 +3141,21 @@ fn blob_compaction_handle_step_by_step() {
 
     let mut handle = db.start_blob_compaction().unwrap();
 
-    // Phase 1: Append
+    // With chunked B-tree storage, dead_bytes==0, so the handle starts
+    // at phase 2 (already complete). First step returns complete immediately.
     let p1 = handle.step().unwrap();
-    assert_eq!(p1.phase, 1);
-    assert!(!p1.complete);
-    assert!(p1.blobs_relocated > 0);
+    assert_eq!(p1.phase, 2);
+    assert!(p1.complete);
+    assert_eq!(p1.blobs_relocated, 0);
 
-    // Read transaction can proceed between phases
+    // Read transaction can proceed
     {
         let read_txn = db.begin_read().unwrap();
         let stats = read_txn.blob_stats().unwrap();
         assert_eq!(stats.blob_count, 1);
     }
 
-    // Phase 2: Shift + truncate
-    let p2 = handle.step().unwrap();
-    assert_eq!(p2.phase, 2);
-    assert!(p2.complete);
-
     // Extra step after completion is idempotent
-    let p3 = handle.step().unwrap();
-    assert!(p3.complete);
+    let p2 = handle.step().unwrap();
+    assert!(p2.complete);
 }

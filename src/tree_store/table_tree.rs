@@ -35,13 +35,29 @@ pub(crate) struct PageListMut {
 }
 
 impl PageListMut {
-    pub(crate) fn push_back(&mut self, value: PageNumber) {
-        let len = u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().unwrap());
-        self.data[..size_of::<u16>()].copy_from_slice(&(len + 1).to_le_bytes());
+    pub(crate) fn push_back(&mut self, value: PageNumber) -> crate::Result {
+        if self.data.len() < size_of::<u16>() {
+            return Err(crate::StorageError::Corrupted(
+                "PageListMut: data too small for length header".into(),
+            ));
+        }
+        let len = u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().map_err(|_| {
+            crate::StorageError::Corrupted("PageListMut: length header truncated".into())
+        })?);
+        let new_len = len
+            .checked_add(1)
+            .ok_or_else(|| crate::StorageError::Corrupted("PageListMut: length overflow".into()))?;
+        self.data[..size_of::<u16>()].copy_from_slice(&new_len.to_le_bytes());
         let len: usize = len.into();
         let start = size_of::<u16>() + PageNumber::serialized_size() * len;
-        self.data[start..(start + PageNumber::serialized_size())]
-            .copy_from_slice(&value.to_le_bytes());
+        let end = start + PageNumber::serialized_size();
+        if end > self.data.len() {
+            return Err(crate::StorageError::Corrupted(
+                "PageListMut: not enough space for new page entry".into(),
+            ));
+        }
+        self.data[start..end].copy_from_slice(&value.to_le_bytes());
+        Ok(())
     }
 
     pub(crate) fn clear(&mut self) {

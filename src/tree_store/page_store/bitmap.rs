@@ -26,7 +26,7 @@ impl BtreeBitmap {
         self.get_level(self.get_height() - 1).any_unset()
     }
 
-    pub(crate) fn get(&self, i: u32) -> bool {
+    pub(crate) fn get(&self, i: u32) -> Result<bool, crate::StorageError> {
         self.get_level(self.get_height() - 1).get(i)
     }
 
@@ -58,8 +58,10 @@ impl BtreeBitmap {
         &self.heights[i as usize]
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn get_height(&self) -> u32 {
-        self.heights.len().try_into().unwrap()
+        // Height is bounded by page order (max ~20), so this always fits in u32.
+        self.heights.len() as u32
     }
 
     pub(crate) fn xxh3_hash(&self) -> u128 {
@@ -70,9 +72,10 @@ impl BtreeBitmap {
         result
     }
 
-    pub(crate) fn to_vec(&self) -> Vec<u8> {
+    pub(crate) fn to_vec(&self) -> crate::Result<Vec<u8>> {
         let mut result = vec![];
-        let height: u32 = self.heights.len().try_into().unwrap();
+        #[allow(clippy::cast_possible_truncation)]
+        let height: u32 = self.heights.len() as u32;
         result.extend(height.to_le_bytes());
 
         let vecs: Vec<Vec<u8>> = self.heights.iter().map(|x| x.to_vec()).collect();
@@ -80,7 +83,11 @@ impl BtreeBitmap {
         let end_metadata = data_offset;
         for serialized in &vecs {
             data_offset += serialized.len();
-            let offset_u32: u32 = data_offset.try_into().unwrap();
+            let offset_u32: u32 = u32::try_from(data_offset).map_err(|_| {
+                crate::StorageError::Internal(
+                    "BtreeBitmap serialized data exceeds u32 range".into(),
+                )
+            })?;
             result.extend(offset_u32.to_le_bytes());
         }
 
@@ -89,7 +96,7 @@ impl BtreeBitmap {
             result.extend(serialized);
         }
 
-        result
+        Ok(result)
     }
 
     pub(crate) fn from_bytes(data: &[u8]) -> Result<Self, crate::StorageError> {
@@ -191,20 +198,23 @@ impl BtreeBitmap {
     }
 
     // Returns the first unset id, and sets it
-    pub(crate) fn alloc(&mut self) -> Option<u32> {
-        let entry = self.find_first_unset()?;
-        self.set(entry);
-        Some(entry)
+    pub(crate) fn alloc(&mut self) -> Result<Option<u32>, crate::StorageError> {
+        let Some(entry) = self.find_first_unset() else {
+            return Ok(None);
+        };
+        self.set(entry)?;
+        Ok(Some(entry))
     }
 
-    pub(crate) fn set(&mut self, i: u32) {
-        let full = self.get_level_mut(self.get_height() - 1).set(i);
-        self.update_to_root(i, full);
+    pub(crate) fn set(&mut self, i: u32) -> Result<bool, crate::StorageError> {
+        let full = self.get_level_mut(self.get_height() - 1).set(i)?;
+        self.update_to_root(i, full)?;
+        Ok(full)
     }
 
-    pub(crate) fn clear(&mut self, i: u32) {
-        self.get_level_mut(self.get_height() - 1).clear(i);
-        self.update_to_root(i, false);
+    pub(crate) fn clear(&mut self, i: u32) -> Result<(), crate::StorageError> {
+        self.get_level_mut(self.get_height() - 1).clear(i)?;
+        self.update_to_root(i, false)
     }
 
     fn get_level_mut(&mut self, i: u32) -> &mut U64GroupedBitmap {
@@ -214,18 +224,18 @@ impl BtreeBitmap {
 
     // Recursively update to the root, starting at the given entry in the given height
     // full parameter must be set if all bits in the entry's group of u64 are full
-    fn update_to_root(&mut self, i: u32, mut full: bool) {
+    fn update_to_root(&mut self, i: u32, mut full: bool) -> Result<(), crate::StorageError> {
         if self.get_height() == 1 {
-            return;
+            return Ok(());
         }
 
         let mut parent_height = self.get_height() - 2;
         let mut parent_entry = i / 64;
         loop {
             full = if full {
-                self.get_level_mut(parent_height).set(parent_entry)
+                self.get_level_mut(parent_height).set(parent_entry)?
             } else {
-                self.get_level_mut(parent_height).clear(parent_entry);
+                self.get_level_mut(parent_height).clear(parent_entry)?;
                 false
             };
 
@@ -235,6 +245,7 @@ impl BtreeBitmap {
             parent_height -= 1;
             parent_entry /= 64;
         }
+        Ok(())
     }
 }
 
@@ -381,28 +392,41 @@ impl U64GroupedBitmap {
         }
     }
 
-    pub fn get(&self, bit: u32) -> bool {
-        assert!(bit < self.len);
+    pub fn get(&self, bit: u32) -> Result<bool, crate::StorageError> {
+        if bit >= self.len {
+            return Err(crate::StorageError::Corrupted(
+                "bitmap: bit index out of bounds".into(),
+            ));
+        }
         let (index, bit_index) = Self::data_index_of(bit);
         let group = self.data[index];
-        group & U64GroupedBitmap::select_mask(bit_index) != 0
+        Ok(group & U64GroupedBitmap::select_mask(bit_index) != 0)
     }
 
     // Returns true iff the bit's group is all set
-    pub fn set(&mut self, bit: u32) -> bool {
-        assert!(bit < self.len);
+    pub fn set(&mut self, bit: u32) -> Result<bool, crate::StorageError> {
+        if bit >= self.len {
+            return Err(crate::StorageError::Corrupted(
+                "bitmap: bit index out of bounds".into(),
+            ));
+        }
         let (index, bit_index) = Self::data_index_of(bit);
         let mut group = self.data[index];
         group |= Self::select_mask(bit_index);
         self.data[index] = group;
 
-        group == u64::MAX
+        Ok(group == u64::MAX)
     }
 
-    pub fn clear(&mut self, bit: u32) {
-        assert!(bit < self.len, "{bit} must be less than {}", self.len);
+    pub fn clear(&mut self, bit: u32) -> Result<(), crate::StorageError> {
+        if bit >= self.len {
+            return Err(crate::StorageError::Corrupted(
+                "bitmap: bit index out of bounds".into(),
+            ));
+        }
         let (index, bit_index) = Self::data_index_of(bit);
         self.data[index] &= !Self::select_mask(bit_index);
+        Ok(())
     }
 }
 
@@ -419,32 +443,32 @@ mod test {
         let num_pages = 2;
         let mut allocator = BtreeBitmap::new(num_pages, num_pages);
         for i in 0..num_pages {
-            allocator.clear(i);
+            allocator.clear(i).unwrap();
         }
         for i in 0..num_pages {
-            assert_eq!(i, allocator.alloc().unwrap());
+            assert_eq!(i, allocator.alloc().unwrap().unwrap());
         }
-        assert!(allocator.alloc().is_none());
+        assert!(allocator.alloc().unwrap().is_none());
     }
 
     #[test]
     fn record_alloc() {
         let mut allocator = BtreeBitmap::new(2, 2);
-        allocator.clear(0);
-        allocator.clear(1);
-        allocator.set(0);
-        assert_eq!(1, allocator.alloc().unwrap());
-        assert!(allocator.alloc().is_none());
+        allocator.clear(0).unwrap();
+        allocator.clear(1).unwrap();
+        allocator.set(0).unwrap();
+        assert_eq!(1, allocator.alloc().unwrap().unwrap());
+        assert!(allocator.alloc().unwrap().is_none());
     }
 
     #[test]
     fn free() {
         let mut allocator = BtreeBitmap::new(1, 1);
-        allocator.clear(0);
-        assert_eq!(0, allocator.alloc().unwrap());
-        assert!(allocator.alloc().is_none());
-        allocator.clear(0);
-        assert_eq!(0, allocator.alloc().unwrap());
+        allocator.clear(0).unwrap();
+        assert_eq!(0, allocator.alloc().unwrap().unwrap());
+        assert!(allocator.alloc().unwrap().is_none());
+        allocator.clear(0).unwrap();
+        assert_eq!(0, allocator.alloc().unwrap().unwrap());
     }
 
     #[test]
@@ -452,16 +476,16 @@ mod test {
         let num_pages = 65;
         let mut allocator = BtreeBitmap::new(num_pages, num_pages);
         for i in 0..num_pages {
-            allocator.clear(i);
+            allocator.clear(i).unwrap();
         }
         for i in 0..num_pages {
-            assert_eq!(i, allocator.alloc().unwrap());
+            assert_eq!(i, allocator.alloc().unwrap().unwrap());
         }
-        allocator.clear(5);
-        allocator.clear(15);
-        assert_eq!(5, allocator.alloc().unwrap());
-        assert_eq!(15, allocator.alloc().unwrap());
-        assert!(allocator.alloc().is_none());
+        allocator.clear(5).unwrap();
+        allocator.clear(15).unwrap();
+        assert_eq!(5, allocator.alloc().unwrap().unwrap());
+        assert_eq!(15, allocator.alloc().unwrap().unwrap());
+        assert!(allocator.alloc().unwrap().is_none());
     }
 
     #[test]
@@ -469,10 +493,10 @@ mod test {
         let num_pages = 65;
         let mut allocator = BtreeBitmap::new(num_pages, num_pages);
         for i in 0..num_pages {
-            allocator.clear(i);
+            allocator.clear(i).unwrap();
         }
         // Allocate everything
-        while allocator.alloc().is_some() {}
+        while allocator.alloc().unwrap().is_some() {}
         // The last u64 must be used, since the leaf layer is compact
         assert_eq!(
             u64::MAX,
@@ -485,13 +509,13 @@ mod test {
         let num_pages = 129;
         let mut allocator = BtreeBitmap::new(num_pages, num_pages);
         assert!(allocator.find_first_unset().is_none());
-        allocator.clear(128);
+        allocator.clear(128).unwrap();
         assert_eq!(allocator.find_first_unset().unwrap(), 128);
-        allocator.clear(65);
+        allocator.clear(65).unwrap();
         assert_eq!(allocator.find_first_unset().unwrap(), 65);
-        allocator.clear(8);
+        allocator.clear(8).unwrap();
         assert_eq!(allocator.find_first_unset().unwrap(), 8);
-        allocator.clear(0);
+        allocator.clear(0).unwrap();
         assert_eq!(allocator.find_first_unset().unwrap(), 0);
     }
 
@@ -500,9 +524,9 @@ mod test {
         let mut bm = BtreeBitmap::new_padded(60, 60, 1_048_576);
         let height = bm.heights.len();
 
-        bm.clear(0);
-        bm.clear(30);
-        bm.clear(59);
+        bm.clear(0).unwrap();
+        bm.clear(30).unwrap();
+        bm.clear(59).unwrap();
 
         bm.resize(5000, true);
 
@@ -510,24 +534,24 @@ mod test {
         assert_eq!(bm.heights.len(), height);
 
         // Previously cleared bits survive the resize
-        assert!(!bm.get(0));
-        assert!(!bm.get(30));
-        assert!(!bm.get(59));
+        assert!(!bm.get(0).unwrap());
+        assert!(!bm.get(30).unwrap());
+        assert!(!bm.get(59).unwrap());
 
         // Newly grown region should be marked full (true)
-        assert!(bm.get(60));
-        assert!(bm.get(4999));
+        assert!(bm.get(60).unwrap());
+        assert!(bm.get(4999).unwrap());
 
         // Alloc should return the previously cleared entries
-        assert_eq!(bm.alloc(), Some(0));
-        assert_eq!(bm.alloc(), Some(30));
-        assert_eq!(bm.alloc(), Some(59));
-        assert!(bm.alloc().is_none());
+        assert_eq!(bm.alloc().unwrap(), Some(0));
+        assert_eq!(bm.alloc().unwrap(), Some(30));
+        assert_eq!(bm.alloc().unwrap(), Some(59));
+        assert!(bm.alloc().unwrap().is_none());
 
         // Clear a bit in the newly grown area, alloc should find it
-        bm.clear(3000);
-        assert_eq!(bm.alloc(), Some(3000));
-        assert!(bm.alloc().is_none());
+        bm.clear(3000).unwrap();
+        assert_eq!(bm.alloc().unwrap(), Some(3000));
+        assert!(bm.alloc().unwrap().is_none());
     }
 
     #[test]
@@ -540,35 +564,35 @@ mod test {
         let num_pages = rng.random_range(2..10000);
         let mut allocator = BtreeBitmap::new(num_pages, num_pages);
         for i in 0..num_pages {
-            allocator.clear(i);
+            allocator.clear(i).unwrap();
         }
         let mut allocated = HashSet::new();
 
         for _ in 0..(num_pages * 2) {
             if rng.random_bool(0.75) {
-                if let Some(page) = allocator.alloc() {
+                if let Some(page) = allocator.alloc().unwrap() {
                     allocated.insert(page);
                 } else {
                     assert_eq!(allocated.len(), num_pages as usize);
                 }
             } else if let Some(to_free) = allocated.iter().choose(&mut rng).copied() {
-                allocator.clear(to_free);
+                allocator.clear(to_free).unwrap();
                 allocated.remove(&to_free);
             }
         }
 
         for _ in allocated.len()..(num_pages as usize) {
-            allocator.alloc().unwrap();
+            allocator.alloc().unwrap().unwrap();
         }
-        assert!(allocator.alloc().is_none());
+        assert!(allocator.alloc().unwrap().is_none());
 
         for i in 0..num_pages {
-            allocator.clear(i);
+            allocator.clear(i).unwrap();
         }
 
         for _ in 0..num_pages {
-            allocator.alloc().unwrap();
+            allocator.alloc().unwrap().unwrap();
         }
-        assert!(allocator.alloc().is_none());
+        assert!(allocator.alloc().unwrap().is_none());
     }
 }

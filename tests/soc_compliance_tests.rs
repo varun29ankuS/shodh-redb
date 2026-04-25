@@ -10932,7 +10932,9 @@ fn blob_stats_after_delete() {
     w.delete_blob(&id2).unwrap();
     let stats = w.blob_stats().unwrap();
     assert_eq!(stats.blob_count, 1);
-    assert!(stats.dead_bytes > 0);
+    // With chunked B-tree storage, deleted blob chunks are freed immediately --
+    // there is no dead space accumulation as with region-based storage.
+    assert_eq!(stats.dead_bytes, 0);
     w.commit().unwrap();
 }
 

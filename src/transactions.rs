@@ -1,8 +1,8 @@
 use crate::blob_store::reader::BlobReader;
 use crate::blob_store::types::{
-    BlobDedupConfig, BlobId, BlobMeta, BlobRef, BlobStats, CausalEdge, CausalEdgeKey, CausalPath,
-    ContentType, DedupStats, DedupVal, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, Sha256Key,
-    StoreOptions, TagKey, TemporalKey,
+    BLOB_CHUNK_SIZE, BlobChunkKey, BlobDedupConfig, BlobId, BlobMeta, BlobRef, BlobStats,
+    CausalEdge, CausalEdgeKey, CausalPath, ContentType, DedupStats, DedupVal, MAX_TAGS_PER_BLOB,
+    NamespaceKey, NamespaceVal, Sha256Key, StoreOptions, TagKey, TemporalKey,
 };
 use crate::blob_store::writer::BlobWriter;
 use crate::cdc::CdcConfig;
@@ -38,6 +38,7 @@ use core::borrow::Borrow;
 use core::cmp::min;
 use core::fmt::{Debug, Display, Formatter};
 use core::marker::PhantomData;
+use core::mem;
 use core::mem::size_of;
 use core::ops::{RangeBounds, RangeFull};
 use core::panic;
@@ -92,6 +93,16 @@ const BLOB_DEDUP_INDEX: SystemTableDefinition<Sha256Key, DedupVal> =
     SystemTableDefinition::new("blob_dedup_idx");
 const BLOB_DEDUP_MAP: SystemTableDefinition<BlobId, Sha256Key> =
     SystemTableDefinition::new("blob_dedup_map");
+/// Chunked blob data storage: blob data is split into BLOB_CHUNK_SIZE-byte
+/// chunks and stored in this B-tree table. This gives blob data full MVCC
+/// semantics via the page store's copy-on-write mechanism.
+const BLOB_CHUNKS: SystemTableDefinition<BlobChunkKey, &[u8]> =
+    SystemTableDefinition::new("blob_chunks");
+/// Monotonic counters for blob store. Key 0 = next blob sequence number,
+/// Key 1 = HLC state. Replaces the header-embedded `BlobCommitState`.
+const BLOB_COUNTERS: SystemTableDefinition<u64, u64> = SystemTableDefinition::new("blob_counters");
+const BLOB_COUNTER_NEXT_SEQ: u64 = 0;
+const BLOB_COUNTER_HLC: u64 = 1;
 const CDC_LOG_TABLE: SystemTableDefinition<CdcKey, CdcRecord> =
     SystemTableDefinition::new("cdc_log");
 const CDC_CURSOR_TABLE: SystemTableDefinition<&str, u64> =
@@ -1356,12 +1367,18 @@ impl WriteTransaction {
         //    and new roots
         // 3) update the system tree to remove invalid persistent savepoints.
 
-        // 1) restore the table tree
+        // 1) Snapshot pages allocated in this transaction before restore operations.
+        // These pages were allocated for the rolled-back writes and are now
+        // unreachable. We snapshot BEFORE the restore's own B-tree operations
+        // (which may allocate new pages that must NOT be freed).
+        let orphaned_pages = self.mem.drain_uncommitted();
+
+        // 1a) restore the table tree (set_root also clears pending_table_updates)
         {
             self.tables.lock().set_root(savepoint.get_user_root())?;
         }
 
-        // 1a) purge all transactions that happened after the savepoint from the data freed tree
+        // 1b) purge all transactions that happened after the savepoint from the data freed tree
         let txn_id = savepoint.get_transaction_id().next()?.raw_id();
         {
             let lower = TransactionIdWithPagination {
@@ -1376,10 +1393,15 @@ impl WriteTransaction {
             // No need to process the system freed table, because it only rolls forward
         }
 
-        // 2) queue all pages that became unreachable
+        // 2) queue all pages that became unreachable.
+        // First, clear freed_pages -- it may contain pages freed by the
+        // rolled-back B-tree operations (e.g., page splits during inserts).
+        // Those frees are invalid after restoring the old root because the
+        // old root still references the "freed" pages.
         {
             let tables = self.tables.lock();
             let mut data_freed_pages = tables.freed_pages.lock();
+            data_freed_pages.clear();
             let mut system_tables = self.system_tables.lock();
             let data_allocated = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
             let lower = TransactionIdWithPagination {
@@ -1401,6 +1423,18 @@ impl WriteTransaction {
         for persistent_savepoint in self.list_persistent_savepoints()? {
             if persistent_savepoint > savepoint.get_id().0 {
                 self.delete_persistent_savepoint(persistent_savepoint)?;
+            }
+        }
+
+        // 4) Free orphaned pages from the rolled-back writes.
+        // These were snapshotted in step 1 before any restore B-tree operations.
+        // They are unreachable from the restored tree root and must be returned
+        // to the buddy allocator to prevent a persistent storage leak.
+        if !orphaned_pages.is_empty() {
+            let tables = self.tables.lock();
+            let mut tracker = tables.allocated_pages.lock();
+            for page in orphaned_pages {
+                self.mem.free(page, &mut tracker)?;
             }
         }
 
@@ -1639,27 +1673,17 @@ impl WriteTransaction {
         if self.blob_writer_active.load(Ordering::Acquire) {
             return Err(StorageError::BlobWriterActive);
         }
-        // 1. Get current blob state
-        let mut blob_state = self.mem.get_blob_state();
 
-        // 2. Initialize blob region offset on first use
-        if blob_state.region_offset == 0 {
-            let file_len = self.mem.file_len()?;
-            blob_state.region_offset = file_len;
-        }
+        // 1. Assign sequence number from the B-tree counter
+        let sequence = self.next_blob_sequence()?;
 
-        // 3. Assign sequence number and compute content prefix hash
-        let sequence = blob_state.next_sequence;
-        blob_state.next_sequence = sequence + 1;
-
+        // 2. Compute content prefix hash and full checksum
         let prefix_len = data.len().min(4096);
         let content_prefix_hash = xxh3_hash64(&data[..prefix_len]);
         let blob_id = BlobId::new(sequence, content_prefix_hash);
-
-        // 4. Compute full checksum
         let checksum = xxh3_hash128(data);
 
-        // 5. Dedup check: compute SHA-256 and look for existing identical blob
+        // 3. Dedup check: compute SHA-256 and look for existing identical blob
         let dedup_eligible =
             self.blob_dedup_config.enabled && data.len() >= self.blob_dedup_config.min_size;
         let sha_key = if dedup_eligible {
@@ -1678,17 +1702,15 @@ impl WriteTransaction {
         };
 
         let mut dedup_saved = 0u64;
+        #[allow(clippy::cast_possible_truncation)]
         let blob_ref = if let Some(existing) = dedup_hit
             && existing.checksum == checksum
             && existing.length == data.len() as u64
         {
-            // Reuse existing physical data -- SHA-256 matched AND xxh3-128
-            // checksum + length confirmed. Without the secondary check a
-            // SHA-256 collision (or corrupted dedup index entry) would
-            // silently bind the new blob_id to wrong physical data.
+            // Reuse existing chunks via source_sequence stored in `offset`.
             dedup_saved = existing.length;
             BlobRef {
-                offset: existing.offset,
+                offset: existing.offset, // source_sequence for chunk reads
                 length: existing.length,
                 checksum,
                 ref_count: 1,
@@ -1696,14 +1718,11 @@ impl WriteTransaction {
                 compression: 0,
             }
         } else {
-            // 5b. Write blob data to the blob region
-            let blob_offset = blob_state.region_length;
-            let file_offset = blob_state.region_offset + blob_offset;
-            self.mem.blob_write(file_offset, data)?;
-            blob_state.region_length += data.len() as u64;
+            // 4. Write blob data as chunks into the BLOB_CHUNKS B-tree
+            self.write_blob_chunks(sequence, data)?;
 
             BlobRef {
-                offset: blob_offset,
+                offset: u64::MAX, // sentinel = own chunks (non-deduped)
                 length: data.len() as u64,
                 checksum,
                 ref_count: 1,
@@ -1712,9 +1731,9 @@ impl WriteTransaction {
             }
         };
 
-        // 6. Advance HLC
-        let hlc = HybridLogicalClock::from_raw(blob_state.hlc_state).advance();
-        blob_state.hlc_state = hlc.to_raw();
+        // 5. Advance HLC
+        let hlc_raw = self.advance_blob_hlc()?;
+        let hlc = HybridLogicalClock::from_raw(hlc_raw);
 
         // as_nanos() returns u128, but u64 nanoseconds covers ~584 years from epoch.
         // Truncation is intentional and safe for any realistic timestamp.
@@ -1722,8 +1741,6 @@ impl WriteTransaction {
         let wall_clock_ns = {
             #[cfg(feature = "std")]
             {
-                // If the system clock is before UNIX epoch, fall back to zero;
-                // HLC still provides causal ordering in that degenerate case.
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -1731,16 +1748,15 @@ impl WriteTransaction {
             }
             #[cfg(not(feature = "std"))]
             {
-                // no_std: wall clock unavailable; HLC provides causal ordering
                 0u64
             }
         };
 
-        // 7. Build BlobMeta
+        // 6. Build BlobMeta
         let causal_parent = opts.causal_link.as_ref().map(|l| l.parent);
         let meta = BlobMeta::new(blob_ref, wall_clock_ns, hlc.to_raw(), causal_parent, label);
 
-        // 8. Index in system tables
+        // 7. Index in system tables
         {
             let mut system_tables = self.system_tables.lock();
 
@@ -1769,10 +1785,9 @@ impl WriteTransaction {
                 opts.namespace.as_deref(),
             )?;
 
-            // 8b. Update dedup index
+            // 7b. Update dedup index
             if let Some(sha_key) = sha_key {
                 if let Some(existing) = dedup_hit {
-                    // Increment ref_count on existing dedup entry
                     let mut dedup_table =
                         system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
                     let updated = DedupVal {
@@ -1782,11 +1797,11 @@ impl WriteTransaction {
                     dedup_table.insert(&sha_key, &updated)?;
                     drop(dedup_table);
                 } else {
-                    // New dedup entry
+                    // New dedup entry: store source sequence in offset field
                     let mut dedup_table =
                         system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
                     let entry = DedupVal {
-                        offset: blob_ref.offset,
+                        offset: sequence, // source_sequence for chunk reads
                         length: blob_ref.length,
                         checksum: blob_ref.checksum,
                         ref_count: 1,
@@ -1795,18 +1810,15 @@ impl WriteTransaction {
                     drop(dedup_table);
                 }
 
-                // Reverse map: BlobId -> Sha256Key
                 let mut dedup_map = system_tables.open_system_table(self, BLOB_DEDUP_MAP)?;
                 dedup_map.insert(&blob_id, &sha_key)?;
                 drop(dedup_map);
             }
         }
 
-        // 9. Update pending blob state for commit
-        self.mem.set_pending_blob_state(blob_state);
         self.dirty.store(true, Ordering::Release);
 
-        // 10. Observer / metrics
+        // 8. Observer / metrics
         if dedup_saved > 0 {
             self.observer.on_blob_dedup(blob_id.sequence, dedup_saved);
             #[cfg(feature = "metrics")]
@@ -1845,22 +1857,7 @@ impl WriteTransaction {
             return Err(StorageError::BlobWriterActive);
         }
 
-        let mut blob_state = self.mem.get_blob_state();
-
-        if blob_state.region_offset == 0 {
-            let file_len = self.mem.file_len()?;
-            blob_state.region_offset = file_len;
-        }
-
-        let sequence = blob_state.next_sequence;
-        blob_state.next_sequence = sequence + 1;
-
-        let blob_region_start = blob_state.region_length;
-        let blob_file_offset = blob_state.region_offset + blob_region_start;
-
-        // Persist the incremented sequence immediately so that a concurrent
-        // store_blob (after this writer finishes) picks up the right counter.
-        self.mem.set_pending_blob_state(blob_state);
+        let sequence = self.next_blob_sequence()?;
 
         Ok(BlobWriter::new(
             self,
@@ -1868,39 +1865,33 @@ impl WriteTransaction {
             content_type,
             label,
             opts,
-            blob_file_offset,
-            blob_region_start,
             self.blob_dedup_config.enabled,
         ))
     }
 
-    /// Low-level: write bytes directly to the blob region (bypasses page cache).
-    /// Used by `BlobWriter`.
-    pub(crate) fn blob_write_raw(&self, file_offset: u64, data: &[u8]) -> Result {
-        self.mem.blob_write(file_offset, data)
+    /// Write a single chunk of blob data to the `BLOB_CHUNKS` table.
+    /// Called by `BlobWriter` when a chunk buffer is full or at finalization.
+    pub(crate) fn blob_write_chunk(&self, sequence: u64, chunk_index: u32, data: &[u8]) -> Result {
+        let mut system_tables = self.system_tables.lock();
+        let mut chunks_table = system_tables.open_system_table(self, BLOB_CHUNKS)?;
+        let key = BlobChunkKey::new(sequence, chunk_index);
+        chunks_table.insert(&key, data)?;
+        Ok(())
     }
 
-    /// Low-level: called by `BlobWriter::finish()` to index the completed blob
-    /// in system tables and update pending blob state.
+    /// Called by `BlobWriter::finish()` to index the completed blob
+    /// in system tables.
     pub(crate) fn finalize_blob_writer(
         &self,
         blob_id: BlobId,
         mut meta: BlobMeta,
-        bytes_written: u64,
+        _bytes_written: u64,
         opts: StoreOptions,
         sha_key: Option<Sha256Key>,
     ) -> Result {
-        let mut blob_state = self.mem.get_blob_state();
-
         // Advance HLC
-        let hlc = HybridLogicalClock::from_raw(blob_state.hlc_state).advance();
-        blob_state.hlc_state = hlc.to_raw();
-
-        // Update the HLC in the meta
-        meta.hlc = hlc.to_raw();
-
-        // Update region length to account for the written data
-        blob_state.region_length = meta.blob_ref.offset + bytes_written;
+        let hlc_raw = self.advance_blob_hlc()?;
+        meta.hlc = hlc_raw;
 
         // Index in system tables
         {
@@ -1910,7 +1901,11 @@ impl WriteTransaction {
             blob_table.insert(&blob_id, &meta)?;
             drop(blob_table);
 
-            let temporal_key = TemporalKey::new(meta.wall_clock_ns, hlc, blob_id);
+            let temporal_key = TemporalKey::new(
+                meta.wall_clock_ns,
+                HybridLogicalClock::from_raw(hlc_raw),
+                blob_id,
+            );
             let mut temporal_table = system_tables.open_system_table(self, BLOB_TEMPORAL_INDEX)?;
             temporal_table.insert(&temporal_key, &())?;
             drop(temporal_table);
@@ -1939,7 +1934,6 @@ impl WriteTransaction {
                 };
 
                 if let Some(existing) = existing {
-                    // Another blob with same content already exists -- increment ref_count
                     let mut dedup_table =
                         system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
                     let updated = DedupVal {
@@ -1949,11 +1943,10 @@ impl WriteTransaction {
                     dedup_table.insert(&sha_key, &updated)?;
                     drop(dedup_table);
                 } else {
-                    // First occurrence -- create new dedup entry
                     let mut dedup_table =
                         system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
                     let entry = DedupVal {
-                        offset: meta.blob_ref.offset,
+                        offset: blob_id.sequence, // source_sequence for chunk reads
                         length: meta.blob_ref.length,
                         checksum: meta.blob_ref.checksum,
                         ref_count: 1,
@@ -1968,7 +1961,6 @@ impl WriteTransaction {
             }
         }
 
-        self.mem.set_pending_blob_state(blob_state);
         self.dirty.store(true, Ordering::Release);
 
         Ok(())
@@ -1977,6 +1969,149 @@ impl WriteTransaction {
     /// Access the blob-writer-active flag. Used by `BlobWriter::drop`.
     pub(crate) fn blob_writer_active(&self) -> &AtomicBool {
         &self.blob_writer_active
+    }
+
+    /// Allocate the next blob sequence number and persist it in `BLOB_COUNTERS`.
+    fn next_blob_sequence(&self) -> Result<u64> {
+        let mut system_tables = self.system_tables.lock();
+        let mut counters = system_tables.open_system_table(self, BLOB_COUNTERS)?;
+        let current = counters
+            .get(&BLOB_COUNTER_NEXT_SEQ)?
+            .map_or(0, |g| g.value());
+        counters.insert(&BLOB_COUNTER_NEXT_SEQ, &(current + 1))?;
+        Ok(current)
+    }
+
+    /// Advance the blob HLC counter and persist it in `BLOB_COUNTERS`.
+    /// Returns the new HLC raw value.
+    fn advance_blob_hlc(&self) -> Result<u64> {
+        let mut system_tables = self.system_tables.lock();
+        let mut counters = system_tables.open_system_table(self, BLOB_COUNTERS)?;
+        let current = counters.get(&BLOB_COUNTER_HLC)?.map_or(0, |g| g.value());
+        let hlc = HybridLogicalClock::from_raw(current).advance();
+        let raw = hlc.to_raw();
+        counters.insert(&BLOB_COUNTER_HLC, &raw)?;
+        Ok(raw)
+    }
+
+    /// Write blob data as `BLOB_CHUNK_SIZE`-byte chunks into the `BLOB_CHUNKS` table.
+    fn write_blob_chunks(&self, sequence: u64, data: &[u8]) -> Result {
+        let mut system_tables = self.system_tables.lock();
+        let mut chunks_table = system_tables.open_system_table(self, BLOB_CHUNKS)?;
+        let mut chunk_index = 0u32;
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + BLOB_CHUNK_SIZE).min(data.len());
+            let chunk_key = BlobChunkKey::new(sequence, chunk_index);
+            chunks_table.insert(&chunk_key, &data[offset..end])?;
+            offset = end;
+            chunk_index += 1;
+        }
+        // For zero-length blobs, no chunks are written (length=0 in BlobRef).
+        Ok(())
+    }
+
+    /// Read all chunks for a blob sequence from `BLOB_CHUNKS` and concatenate.
+    fn read_blob_chunks_from_system_table(
+        &self,
+        source_sequence: u64,
+        expected_length: u64,
+    ) -> Result<Vec<u8>> {
+        let mut system_tables = self.system_tables.lock();
+        let chunks_table = system_tables.open_system_table(self, BLOB_CHUNKS)?;
+
+        let start_key = BlobChunkKey::new(source_sequence, 0);
+        let end_key = BlobChunkKey::new(source_sequence, u32::MAX);
+        let range = chunks_table.range(start_key..=end_key)?;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let mut buf = Vec::with_capacity(expected_length as usize);
+        for entry in range {
+            let (_, value_guard) = entry?;
+            buf.extend_from_slice(value_guard.value());
+        }
+        if buf.len() as u64 != expected_length {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "blob seq {}: expected {} bytes, assembled {}",
+                source_sequence,
+                expected_length,
+                buf.len()
+            )));
+        }
+        Ok(buf)
+    }
+
+    /// Delete all chunks for a blob sequence from `BLOB_CHUNKS`.
+    fn delete_blob_chunks(&self, sequence: u64) -> Result {
+        let mut system_tables = self.system_tables.lock();
+        let chunks_table = system_tables.open_system_table(self, BLOB_CHUNKS)?;
+        let start_key = BlobChunkKey::new(sequence, 0);
+        let end_key = BlobChunkKey::new(sequence, u32::MAX);
+        let range = chunks_table.range(start_key..=end_key)?;
+        let keys: Vec<BlobChunkKey> = range
+            .map(|entry| entry.map(|(k, _)| k.value()))
+            .collect::<Result<Vec<_>>>()?;
+        drop(chunks_table);
+
+        if !keys.is_empty() {
+            let mut chunks_table_mut = system_tables.open_system_table(self, BLOB_CHUNKS)?;
+            for key in keys {
+                chunks_table_mut.remove(&key)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the source sequence for reading a blob's chunks.
+    /// Non-deduped blobs (`offset == u64::MAX`) use their own sequence.
+    /// Deduped blobs store the source sequence in `BlobRef.offset`.
+    /// Resolve which sequence number holds the actual chunk data.
+    /// `blob_ref.offset == u64::MAX` means own chunks (non-deduped).
+    /// Otherwise, `blob_ref.offset` is the source sequence for dedup reads.
+    fn resolve_chunk_source(blob_id: &BlobId, blob_ref: &BlobRef) -> u64 {
+        if blob_ref.offset == u64::MAX {
+            blob_id.sequence
+        } else {
+            blob_ref.offset
+        }
+    }
+
+    /// Read a byte range from blob chunks without assembling the entire blob.
+    #[allow(clippy::cast_possible_truncation)]
+    fn read_blob_chunk_range(
+        &self,
+        source_sequence: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>> {
+        let chunk_size = BLOB_CHUNK_SIZE as u64;
+        let start_chunk = (offset / chunk_size) as u32;
+        let end_chunk = ((offset + length).saturating_sub(1) / chunk_size) as u32;
+
+        let mut system_tables = self.system_tables.lock();
+        let chunks_table = system_tables.open_system_table(self, BLOB_CHUNKS)?;
+
+        let start_key = BlobChunkKey::new(source_sequence, start_chunk);
+        let end_key = BlobChunkKey::new(source_sequence, end_chunk);
+        let range = chunks_table.range(start_key..=end_key)?;
+
+        let mut buf = Vec::with_capacity(length as usize);
+        let mut global_pos = u64::from(start_chunk) * chunk_size;
+        for entry in range {
+            let (_, value_guard) = entry?;
+            let chunk_data: &[u8] = value_guard.value();
+            let chunk_end = global_pos + chunk_data.len() as u64;
+
+            let read_start = offset.max(global_pos);
+            let read_end = (offset + length).min(chunk_end);
+            if read_start < read_end {
+                let local_start = (read_start - global_pos) as usize;
+                let local_end = (read_end - global_pos) as usize;
+                buf.extend_from_slice(&chunk_data[local_start..local_end]);
+            }
+            global_pos = chunk_end;
+        }
+        Ok(buf)
     }
 
     /// Index tags and namespace for a blob. Called from both `store_blob` and
@@ -2056,12 +2191,12 @@ impl WriteTransaction {
             }
         };
 
-        let blob_state = self.mem.get_blob_state();
-        let file_offset = blob_state.region_offset + meta.blob_ref.offset;
-        #[allow(clippy::cast_possible_truncation)]
-        let data = self
-            .mem
-            .blob_read(file_offset, meta.blob_ref.length as usize)?;
+        if meta.blob_ref.length == 0 {
+            return Ok(Some((Vec::new(), meta)));
+        }
+
+        let source_seq = Self::resolve_chunk_source(blob_id, &meta.blob_ref);
+        let data = self.read_blob_chunks_from_system_table(source_seq, meta.blob_ref.length)?;
 
         let actual = xxh3_hash128(&data);
         if actual != meta.blob_ref.checksum {
@@ -2117,10 +2252,8 @@ impl WriteTransaction {
             });
         }
 
-        let blob_state = self.mem.get_blob_state();
-        let file_offset = blob_state.region_offset + meta.blob_ref.offset + offset;
-        #[allow(clippy::cast_possible_truncation)]
-        let data = self.mem.blob_read(file_offset, length as usize)?;
+        let source_seq = Self::resolve_chunk_source(blob_id, &meta.blob_ref);
+        let data = self.read_blob_chunk_range(source_seq, offset, length)?;
 
         Ok(Some(data))
     }
@@ -2128,10 +2261,7 @@ impl WriteTransaction {
     /// Get a seekable reader for a blob's data.
     ///
     /// Returns `None` if the blob does not exist. The returned [`BlobReader`]
-    /// implements [`std::io::Read`] and [`std::io::Seek`] for streaming access.
-    ///
-    /// Range reads bypass checksum verification since the stored checksum
-    /// covers the entire blob.
+    /// holds the assembled blob data in memory.
     pub fn blob_reader(&self, blob_id: &BlobId) -> Result<Option<BlobReader>> {
         let meta = {
             let mut system_tables = self.system_tables.lock();
@@ -2142,14 +2272,13 @@ impl WriteTransaction {
             }
         };
 
-        let blob_state = self.mem.get_blob_state();
-        let file_offset = blob_state.region_offset + meta.blob_ref.offset;
+        if meta.blob_ref.length == 0 {
+            return Ok(Some(BlobReader::new(Vec::new())));
+        }
 
-        Ok(Some(BlobReader::new(
-            Arc::clone(&self.mem),
-            file_offset,
-            meta.blob_ref.length,
-        )))
+        let source_seq = Self::resolve_chunk_source(blob_id, &meta.blob_ref);
+        let data = self.read_blob_chunks_from_system_table(source_seq, meta.blob_ref.length)?;
+        Ok(Some(BlobReader::new(data)))
     }
 
     /// Delete a blob and remove it from all indexes.
@@ -2268,8 +2397,10 @@ impl WriteTransaction {
             result
         };
 
+        let mut delete_source_chunks = false;
+        let source_seq = Self::resolve_chunk_source(blob_id, &meta.blob_ref);
+
         if let Some(sha_key) = sha_key {
-            // Read current dedup entry to decide whether to decrement or remove
             let dedup_val = {
                 let dedup_idx = system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
                 let result = dedup_idx.get(&sha_key)?.map(|g| g.value());
@@ -2289,6 +2420,8 @@ impl WriteTransaction {
                     dedup_idx.insert(&sha_key, &updated)?;
                 } else {
                     dedup_idx.remove(&sha_key)?;
+                    // Last reference to shared chunks -- delete them
+                    delete_source_chunks = true;
                 }
                 drop(dedup_idx);
             }
@@ -2296,40 +2429,37 @@ impl WriteTransaction {
             let mut dedup_map = system_tables.open_system_table(self, BLOB_DEDUP_MAP)?;
             dedup_map.remove(blob_id)?;
             drop(dedup_map);
+        } else {
+            // Non-deduped blob -- always delete its chunks
+            delete_source_chunks = true;
         }
 
         // Remove from primary table
         let mut blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
         blob_table.remove(blob_id)?;
         drop(blob_table);
+        drop(system_tables);
+
+        // Delete chunks outside the system_tables lock (delete_blob_chunks
+        // acquires it internally)
+        if delete_source_chunks && meta.blob_ref.length > 0 {
+            self.delete_blob_chunks(source_seq)?;
+        }
 
         self.dirty.store(true, Ordering::Release);
         Ok(true)
     }
 
-    /// Returns statistics about blob region space usage.
+    /// Returns statistics about blob store usage.
     ///
-    /// Scans the primary blob table to compute live bytes, then compares with
-    /// the total region length to determine dead space and fragmentation.
+    /// With chunked B-tree storage, there is no separate blob region and no
+    /// fragmentation -- dead chunks are freed by normal B-tree GC. The
+    /// `region_bytes` field equals `live_bytes` and `dead_bytes` is always 0.
     pub fn blob_stats(&self) -> Result<BlobStats> {
-        let blob_state = self.mem.get_blob_state();
-        let region_bytes = blob_state.region_length;
-
-        if region_bytes == 0 {
-            return Ok(BlobStats {
-                blob_count: 0,
-                live_bytes: 0,
-                region_bytes: 0,
-                dead_bytes: 0,
-                fragmentation_ratio: 0.0,
-            });
-        }
-
         let mut system_tables = self.system_tables.lock();
         let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
 
         let mut blob_count: u64 = 0;
-        let mut unique_offsets = crate::compat::HashSet::new();
         let mut live_bytes: u64 = 0;
 
         let range = blob_table.range::<BlobId>(..)?;
@@ -2337,163 +2467,30 @@ impl WriteTransaction {
             let (_, value_guard) = entry?;
             let meta = value_guard.value();
             blob_count += 1;
-            // Dedup: multiple BlobIds may share the same physical offset.
-            // Only count each physical region once.
-            if unique_offsets.insert(meta.blob_ref.offset) {
+            // Only count physical storage: blobs with offset == u64::MAX own their
+            // chunks. Dedup references (offset == source_sequence) share chunks with
+            // the original blob and don't occupy additional space.
+            if meta.blob_ref.offset == u64::MAX {
                 live_bytes += meta.blob_ref.length;
             }
         }
         drop(blob_table);
 
-        let dead_bytes = region_bytes.saturating_sub(live_bytes);
-        #[allow(clippy::cast_precision_loss)]
-        let fragmentation_ratio = if region_bytes > 0 {
-            dead_bytes as f64 / region_bytes as f64
-        } else {
-            0.0
-        };
-
         Ok(BlobStats {
             blob_count,
             live_bytes,
-            region_bytes,
-            dead_bytes,
-            fragmentation_ratio,
+            region_bytes: live_bytes, // No separate region -- data is in B-tree
+            dead_bytes: 0,
+            fragmentation_ratio: 0.0,
         })
     }
 
-    /// Single pass of blob compaction: reads all live blobs, copies them
-    /// contiguously to a destination offset, updates all offsets in
-    /// `BLOB_TABLE` and `BLOB_DEDUP_INDEX`, and updates the pending blob state.
-    ///
-    /// When `write_from_zero` is false (Pass 1), data is appended after the
-    /// current region end -- safe even on crash since old data is untouched.
-    /// When `write_from_zero` is true (Pass 2), data is written from offset 0 --
-    /// safe because committed offsets point to the appended area from Pass 1.
-    ///
-    /// Returns `(unique_blobs_relocated, total_live_bytes)`.
-    pub(crate) fn compact_blobs_pass(&self, write_from_zero: bool) -> Result<(u64, u64)> {
-        let mut blob_state = self.mem.get_blob_state();
-        let region_offset = blob_state.region_offset;
-        let old_region_length = blob_state.region_length;
-
-        if old_region_length == 0 {
-            return Ok((0, 0));
-        }
-
-        // Step 1: Collect all live blobs from BLOB_TABLE
-        let mut live_blobs: Vec<(BlobId, BlobMeta)> = Vec::new();
-        {
-            let mut system_tables = self.system_tables.lock();
-            let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
-            let range = blob_table.range::<BlobId>(..)?;
-            for entry in range {
-                let (key_guard, value_guard) = entry?;
-                live_blobs.push((key_guard.value(), value_guard.value()));
-            }
-            drop(blob_table);
-        }
-
-        if live_blobs.is_empty() {
-            // All blobs deleted -- reset region
-            blob_state.region_length = 0;
-            self.mem.set_pending_blob_state(blob_state);
-            self.dirty.store(true, Ordering::Release);
-            return Ok((0, 0));
-        }
-
-        // Step 2: Deduplicate physical locations and sort by offset
-        let mut unique_physical: Vec<(u64, u64)> = Vec::new(); // (offset, length)
-        {
-            let mut seen = crate::compat::HashSet::new();
-            for (_, meta) in &live_blobs {
-                if seen.insert(meta.blob_ref.offset) {
-                    unique_physical.push((meta.blob_ref.offset, meta.blob_ref.length));
-                }
-            }
-        }
-        unique_physical.sort_by_key(|&(offset, _)| offset);
-
-        // Step 3: Copy each unique physical blob to new contiguous position
-        let write_base = if write_from_zero {
-            0
-        } else {
-            old_region_length
-        };
-        let mut offset_map = crate::compat::HashMap::new();
-        let mut write_cursor: u64 = 0;
-
-        for &(old_offset, length) in &unique_physical {
-            let src_file_offset = region_offset + old_offset;
-            let new_offset = write_base + write_cursor;
-            let dst_file_offset = region_offset + new_offset;
-
-            #[allow(clippy::cast_possible_truncation)]
-            let data = self.mem.blob_read(src_file_offset, length as usize)?;
-            self.mem.blob_write(dst_file_offset, &data)?;
-
-            offset_map.insert(old_offset, new_offset);
-            write_cursor += length;
-        }
-
-        let total_live_size = write_cursor;
-        let blobs_relocated = unique_physical.len() as u64;
-
-        // Step 4: Update all BlobRef offsets in BLOB_TABLE
-        {
-            let mut system_tables = self.system_tables.lock();
-            let mut blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
-            for (blob_id, meta) in &live_blobs {
-                if let Some(&new_offset) = offset_map.get(&meta.blob_ref.offset)
-                    && new_offset != meta.blob_ref.offset
-                {
-                    let mut updated_meta = meta.clone();
-                    updated_meta.blob_ref.offset = new_offset;
-                    blob_table.insert(blob_id, &updated_meta)?;
-                }
-            }
-            drop(blob_table);
-
-            // Step 5: Update BLOB_DEDUP_INDEX offsets
-            let dedup_table = system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
-            let mut dedup_entries: Vec<(Sha256Key, DedupVal)> = Vec::new();
-            let range = dedup_table.range::<Sha256Key>(..)?;
-            for entry in range {
-                let (key_guard, value_guard) = entry?;
-                dedup_entries.push((key_guard.value(), value_guard.value()));
-            }
-            drop(dedup_table);
-
-            if !dedup_entries.is_empty() {
-                let mut dedup_table_mut =
-                    system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
-                for (sha_key, val) in &dedup_entries {
-                    if let Some(&new_offset) = offset_map.get(&val.offset)
-                        && new_offset != val.offset
-                    {
-                        let updated = DedupVal {
-                            offset: new_offset,
-                            length: val.length,
-                            checksum: val.checksum,
-                            ref_count: val.ref_count,
-                        };
-                        dedup_table_mut.insert(sha_key, &updated)?;
-                    }
-                }
-                drop(dedup_table_mut);
-            }
-        }
-
-        // Step 6: Update blob state
-        if write_from_zero {
-            blob_state.region_length = total_live_size;
-        } else {
-            blob_state.region_length = old_region_length + total_live_size;
-        }
-        self.mem.set_pending_blob_state(blob_state);
-        self.dirty.store(true, Ordering::Release);
-
-        Ok((blobs_relocated, total_live_size))
+    /// Blob compaction pass. With chunked B-tree storage, blob data is managed
+    /// by the normal B-tree page allocator -- there is no separate region to
+    /// compact. This method is retained for API compatibility and returns (0, 0).
+    #[allow(clippy::unused_self)]
+    pub(crate) fn compact_blobs_pass(&self, _write_from_zero: bool) -> Result<(u64, u64)> {
+        Ok((0, 0))
     }
 
     /// Commit the transaction
@@ -2522,6 +2519,7 @@ impl WriteTransaction {
         //
         // Only done for durable commits. Non-durable commits have complex savepoint
         // interactions that require freed page processing to stay in the commit path.
+        //
         if matches!(self.durability, InternalDurability::Immediate) {
             let free_until_transaction = self
                 .transaction_tracker
@@ -2558,14 +2556,22 @@ impl WriteTransaction {
                 .deallocate_savepoint(*savepoint, *transaction)?;
         }
 
-        debug_assert!(
-            self.system_tables
-                .lock()
-                .system_freed_pages()
-                .lock()
-                .is_empty()
-        );
-        debug_assert!(self.tables.lock().freed_pages.lock().is_empty());
+        // system_freed_pages may be non-empty after a non-durable commit if system-tree
+        // page frees were deferred due to active readers. They will be processed by a
+        // future durable commit. Only assert empty for durable commits.
+        #[cfg(not(fuzzing))]
+        {
+            debug_assert!(
+                matches!(self.durability, InternalDurability::None)
+                    || self
+                        .system_tables
+                        .lock()
+                        .system_freed_pages()
+                        .lock()
+                        .is_empty()
+            );
+            debug_assert!(self.tables.lock().freed_pages.lock().is_empty());
+        }
 
         #[cfg(feature = "logging")]
         debug!(
@@ -2606,12 +2612,15 @@ impl WriteTransaction {
             access_guard.as_mut().clear();
             for page in freed_pages.drain(len - min(len, chunk_size)..) {
                 // Make sure that the page is currently allocated
-                debug_assert!(
-                    self.mem.is_allocated(page),
-                    "Page is not allocated: {page:?}"
-                );
-                debug_assert!(!self.mem.uncommitted(page), "Page is uncommitted: {page:?}");
-                access_guard.as_mut().push_back(page);
+                #[cfg(not(fuzzing))]
+                {
+                    debug_assert!(
+                        self.mem.is_allocated(page),
+                        "Page is not allocated: {page:?}"
+                    );
+                    debug_assert!(!self.mem.uncommitted(page), "Page is uncommitted: {page:?}");
+                }
+                access_guard.as_mut().push_back(page)?;
             }
 
             pagination_counter += 1;
@@ -2639,12 +2648,15 @@ impl WriteTransaction {
                 // Make sure that the page is currently allocated. This is to catch scenarios like
                 // a page getting allocated, and then deallocated within the same transaction,
                 // but errantly being left in the allocated pages list
-                debug_assert!(
-                    self.mem.is_allocated(page),
-                    "Page is not allocated: {page:?}"
-                );
-                debug_assert!(self.mem.uncommitted(page), "Page is committed: {page:?}");
-                access_guard.as_mut().push_back(page);
+                #[cfg(not(fuzzing))]
+                {
+                    debug_assert!(
+                        self.mem.is_allocated(page),
+                        "Page is not allocated: {page:?}"
+                    );
+                    debug_assert!(self.mem.uncommitted(page), "Page is committed: {page:?}");
+                }
+                access_guard.as_mut().push_back(page)?;
             }
 
             pagination_counter += 1;
@@ -2829,14 +2841,25 @@ impl WriteTransaction {
             #[cfg(not(feature = "std"))]
             let timestamp_ms = 0u64;
 
-            let blob_state = self.mem.get_blob_state();
+            // With chunked blob storage, blob state is in BLOB_COUNTERS B-tree.
+            // Read counters for history snapshot.
+            let (blob_next_seq, blob_hlc) = {
+                let counters_table = system_tables.open_system_table(self, BLOB_COUNTERS)?;
+                let next_seq = counters_table
+                    .get(&BLOB_COUNTER_NEXT_SEQ)?
+                    .map_or(0, |g| g.value());
+                let hlc = counters_table
+                    .get(&BLOB_COUNTER_HLC)?
+                    .map_or(0, |g| g.value());
+                (next_seq, hlc)
+            };
             let snapshot = HistorySnapshot::new(
                 user_root,
                 timestamp_ms,
-                blob_state.region_offset,
-                blob_state.region_length,
-                blob_state.next_sequence,
-                blob_state.hlc_state,
+                0, // blob_region_offset: no longer used (chunked storage)
+                0, // blob_region_length: no longer used
+                blob_next_seq,
+                blob_hlc,
             );
             let mut history_table = system_tables.open_system_table(self, HISTORY_TABLE)?;
             history_table.insert(&self.transaction_id.raw_id(), &snapshot)?;
@@ -2861,6 +2884,23 @@ impl WriteTransaction {
         }
 
         let system_freed_pages = system_tables.system_freed_pages();
+
+        // Drain deferred system-tree frees from a previous commit that was
+        // blocked by concurrent readers. Merge them into this commit's
+        // system_freed_pages so the pre-commit reader check (below) and
+        // SYSTEM_FREED_TABLE lifecycle handle them correctly.
+        {
+            let deferred: Vec<_> = self
+                .mem
+                .deferred_system_tree_frees
+                .lock()
+                .drain(..)
+                .collect();
+            if !deferred.is_empty() {
+                system_freed_pages.lock().extend(deferred);
+            }
+        }
+
         let system_tree = system_tables.table_tree.flush_table_root_updates()?;
         system_tree
             .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
@@ -2940,11 +2980,32 @@ impl WriteTransaction {
         self.transaction_tracker
             .clear_pending_non_durable_commits()?;
 
-        // Free any remaining system-tree pages that were not deferred. This only
-        // happens when no live read transactions existed at commit time, making
-        // immediate freeing safe since no reader can reference these pages.
-        for page in system_freed_pages.lock().drain(..) {
-            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+        // Post-commit: re-check for live readers before freeing system-tree pages.
+        // A reader may have registered between the pre-commit check and
+        // mem.commit(), holding a reference to the old system tree. If so,
+        // defer freeing until the next durable commit when those readers close.
+        let remaining: Vec<_> = system_freed_pages.lock().drain(..).collect();
+        if !remaining.is_empty() {
+            let has_old_readers = self
+                .transaction_tracker
+                .oldest_live_read_transaction()?
+                .is_some_and(|oldest| oldest < self.transaction_id);
+            if has_old_readers {
+                self.mem.deferred_system_tree_frees.lock().extend(remaining);
+            } else {
+                for page in remaining {
+                    self.mem.free(page, &mut PageTrackerPolicy::Ignore)?;
+                }
+            }
+        }
+
+        // Drain deferred non-durable frees. After a durable commit, all old
+        // non-durable snapshots are superseded and no reader can reference
+        // those pages.
+        for page in self.mem.deferred_nondurable_frees.lock().drain(..) {
+            if self.mem.unpersisted(page) {
+                self.mem.free(page, &mut PageTrackerPolicy::Ignore)?;
+            }
         }
 
         Ok(())
@@ -2952,9 +3013,14 @@ impl WriteTransaction {
 
     // Commit without a durability guarantee
     pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
+        // Use oldest_live_read_transaction_excluding_nondurable to find real
+        // external readers (from begin_read / savepoints), ignoring the synthetic
+        // durable-ancestor holds added by register_non_durable_commit. This
+        // prevents freeing pages that real concurrent readers might traverse,
+        // while still allowing eager reclamation when no external readers exist.
         let mut free_until_transaction = self
             .transaction_tracker
-            .oldest_live_read_nondurable_transaction()?
+            .oldest_live_read_transaction_excluding_nondurable()?
             .map(|x| x.next())
             .transpose()?
             .unwrap_or(self.transaction_id);
@@ -2962,6 +3028,56 @@ impl WriteTransaction {
             free_until_transaction = TransactionId::min(free_until_transaction, oldest_savepoint);
         }
         self.process_freed_pages_nondurable(free_until_transaction)?;
+
+        // Also drain any deferred system-tree frees from a previous commit that
+        // was blocked by concurrent readers. Re-check: if those readers have
+        // since closed, free now; otherwise re-defer.
+        let mut still_deferred = vec![];
+        {
+            let mut deferred = self.mem.deferred_nondurable_frees.lock();
+            if !deferred.is_empty() {
+                let pages = mem::take(&mut *deferred);
+                drop(deferred);
+                let has_old_readers = self
+                    .transaction_tracker
+                    .oldest_live_read_transaction_excluding_nondurable()?
+                    .is_some();
+                if has_old_readers {
+                    still_deferred = pages;
+                } else {
+                    for page in pages {
+                        if self.mem.unpersisted(page) {
+                            self.mem.free(page, &mut PageTrackerPolicy::Ignore)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Drain deferred system-tree frees from a previous durable commit.
+        // These are persisted pages. If no readers reference the old snapshot,
+        // free immediately; otherwise re-defer for the next durable commit.
+        {
+            let pages: Vec<_> = self
+                .mem
+                .deferred_system_tree_frees
+                .lock()
+                .drain(..)
+                .collect();
+            if !pages.is_empty() {
+                let has_old_readers = self
+                    .transaction_tracker
+                    .oldest_live_read_transaction_excluding_nondurable()?
+                    .is_some();
+                if has_old_readers {
+                    self.mem.deferred_system_tree_frees.lock().extend(pages);
+                } else {
+                    for page in pages {
+                        self.mem.free(page, &mut PageTrackerPolicy::Ignore)?;
+                    }
+                }
+            }
+        }
 
         let mut post_commit_frees = vec![];
 
@@ -2999,8 +3115,28 @@ impl WriteTransaction {
             self.mem.get_last_durable_transaction_id()?,
         )?;
 
-        for page in post_commit_frees {
-            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+        // Post-commit safety check: the secondary slot now holds our transaction
+        // ID, so any new begin_read() opens at self.transaction_id and uses the
+        // NEW system tree. Only readers registered BEFORE our non_durable_commit()
+        // could be traversing the old system-tree pages in post_commit_frees.
+        // This check is race-free: after the secondary slot update, no new reader
+        // can register at the old snapshot.
+        if !post_commit_frees.is_empty() || !still_deferred.is_empty() {
+            post_commit_frees.extend(still_deferred);
+            let has_old_readers = self
+                .transaction_tracker
+                .oldest_live_read_transaction_excluding_nondurable()?
+                .is_some_and(|oldest| oldest < self.transaction_id);
+            if has_old_readers {
+                self.mem
+                    .deferred_nondurable_frees
+                    .lock()
+                    .extend(post_commit_frees);
+            } else {
+                for page in post_commit_frees {
+                    self.mem.free(page, &mut PageTrackerPolicy::Ignore)?;
+                }
+            }
         }
 
         Ok(())
@@ -3051,7 +3187,7 @@ impl WriteTransaction {
                 }
             } else {
                 self.mem
-                    .free(new_page_number, &mut PageTrackerPolicy::Ignore);
+                    .free(new_page_number, &mut PageTrackerPolicy::Ignore)?;
                 break;
             }
         }
@@ -3072,8 +3208,9 @@ impl WriteTransaction {
         // We assume below that PageNumber is length 8
         assert_eq!(PageNumber::serialized_size(), 8);
 
-        // Handle the data freed tree
         let mut system_tables = self.system_tables.lock();
+
+        // Handle the data freed tree
         {
             let mut data_freed = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
             let key = TransactionIdWithPagination {
@@ -3084,7 +3221,7 @@ impl WriteTransaction {
                 let (_, page_list) = entry?;
                 for i in 0..page_list.value().len() {
                     self.mem
-                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore);
+                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore)?;
                 }
             }
         }
@@ -3100,7 +3237,7 @@ impl WriteTransaction {
                 let (_, page_list) = entry?;
                 for i in 0..page_list.value().len() {
                     self.mem
-                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore);
+                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore)?;
                 }
             }
         }
@@ -3156,7 +3293,7 @@ impl WriteTransaction {
                     let page = pages.get(i);
                     if !self
                         .mem
-                        .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore)
+                        .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore)?
                     {
                         new_pages.push(page);
                     }
@@ -3169,7 +3306,7 @@ impl WriteTransaction {
                         let required = PageList::required_bytes(new_pages.len());
                         let mut page_list_mut = data_freed.insert_reserve(&key, required)?;
                         for page in new_pages {
-                            page_list_mut.as_mut().push_back(page);
+                            page_list_mut.as_mut().push_back(page)?;
                         }
                     }
                 }
@@ -3237,7 +3374,7 @@ impl WriteTransaction {
                         {
                             unpersisted_pages.push(page);
                         } else {
-                            access_guard.as_mut().push_back(page);
+                            access_guard.as_mut().push_back(page)?;
                         }
                     }
                     drop(access_guard);
@@ -3353,6 +3490,11 @@ impl Drop for WriteTransaction {
 pub struct ReadTransaction {
     mem: Arc<TransactionalMemory>,
     tree: TableTree,
+    /// System root captured at transaction creation time. Readers must use this
+    /// instead of `mem.get_system_root()` to ensure MVCC consistency -- the live
+    /// system root advances with each writer commit, and reading it at call time
+    /// would give a root whose pages may have been freed and reallocated.
+    system_root: Option<BtreeHeader>,
     transaction_id: Option<u64>,
     observer: Arc<dyn crate::observer::DatabaseObserver>,
     #[cfg(feature = "metrics")]
@@ -3367,12 +3509,14 @@ impl ReadTransaction {
         #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self, TransactionError> {
         let root_page = mem.get_data_root();
+        let system_root = mem.get_system_root();
         let txn_id = guard.id().ok().map(|id| id.raw_id());
         let guard = Arc::new(guard);
         Ok(Self {
             mem: mem.clone(),
             tree: TableTree::new(root_page, PageHint::Clean, guard, mem)
                 .map_err(TransactionError::Storage)?,
+            system_root,
             transaction_id: txn_id,
             observer,
             #[cfg(feature = "metrics")]
@@ -3388,12 +3532,14 @@ impl ReadTransaction {
         observer: Arc<dyn crate::observer::DatabaseObserver>,
         #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self, TransactionError> {
+        let system_root = mem.get_system_root();
         let txn_id = guard.id().ok().map(|id| id.raw_id());
         let guard = Arc::new(guard);
         Ok(Self {
             mem: mem.clone(),
             tree: TableTree::new(user_root, PageHint::Clean, guard, mem)
                 .map_err(TransactionError::Storage)?,
+            system_root,
             transaction_id: txn_id,
             observer,
             #[cfg(feature = "metrics")]
@@ -3573,7 +3719,7 @@ impl ReadTransaction {
         &self,
         definition: SystemTableDefinition<K, V>,
     ) -> Result<Option<Btree<K, V>>> {
-        let system_root = self.mem.get_system_root();
+        let system_root = self.system_root;
         let system_tree = TableTree::new(
             system_root,
             PageHint::Clean,
@@ -3600,6 +3746,81 @@ impl ReadTransaction {
                 Err(e.into_storage_error_or_internal("Internal error: blob system table corrupted"))
             }
         }
+    }
+
+    /// Read all chunks for a blob sequence from the read-only `BLOB_CHUNKS` btree.
+    fn read_blob_chunks(&self, source_sequence: u64, expected_length: u64) -> Result<Vec<u8>> {
+        let Some(chunks_btree) = self.open_system_btree(BLOB_CHUNKS)? else {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "blob seq {source_sequence}: BLOB_CHUNKS table missing"
+            )));
+        };
+
+        let start = BlobChunkKey::new(source_sequence, 0);
+        let end = BlobChunkKey::new(source_sequence, u32::MAX);
+        let range = chunks_btree
+            .range::<core::ops::RangeInclusive<BlobChunkKey>, BlobChunkKey>(&(start..=end))?;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let mut buf = Vec::with_capacity(expected_length as usize);
+        for entry in range {
+            let entry = entry?;
+            buf.extend_from_slice(entry.value());
+        }
+        if buf.len() as u64 != expected_length {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "blob seq {}: expected {} bytes, assembled {}",
+                source_sequence,
+                expected_length,
+                buf.len()
+            )));
+        }
+        Ok(buf)
+    }
+
+    /// Read a byte range from blob chunks (read-only path).
+    #[allow(clippy::cast_possible_truncation)]
+    fn read_blob_chunk_range_ro(
+        &self,
+        source_sequence: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>> {
+        let Some(chunks_btree) = self.open_system_btree(BLOB_CHUNKS)? else {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "blob seq {source_sequence}: BLOB_CHUNKS table missing"
+            )));
+        };
+
+        let chunk_size = BLOB_CHUNK_SIZE as u64;
+        #[allow(clippy::cast_possible_truncation)]
+        let start_chunk = (offset / chunk_size) as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let end_chunk = ((offset + length).saturating_sub(1) / chunk_size) as u32;
+
+        let start_key = BlobChunkKey::new(source_sequence, start_chunk);
+        let end_key = BlobChunkKey::new(source_sequence, end_chunk);
+        let range = chunks_btree.range::<core::ops::RangeInclusive<BlobChunkKey>, BlobChunkKey>(
+            &(start_key..=end_key),
+        )?;
+
+        let mut buf = Vec::with_capacity(length as usize);
+        let mut global_pos = u64::from(start_chunk) * chunk_size;
+        for entry in range {
+            let entry = entry?;
+            let chunk_data = entry.value();
+            let chunk_end = global_pos + chunk_data.len() as u64;
+
+            let read_start = offset.max(global_pos);
+            let read_end = (offset + length).min(chunk_end);
+            if read_start < read_end {
+                let local_start = (read_start - global_pos) as usize;
+                let local_end = (read_end - global_pos) as usize;
+                buf.extend_from_slice(&chunk_data[local_start..local_end]);
+            }
+            global_pos = chunk_end;
+        }
+        Ok(buf)
     }
 
     /// Look up a single history snapshot by transaction ID (read-only).
@@ -3639,12 +3860,16 @@ impl ReadTransaction {
         };
         let meta = guard.value();
 
-        let blob_state = self.mem.get_committed_blob_state();
-        let file_offset = blob_state.region_offset + meta.blob_ref.offset;
-        #[allow(clippy::cast_possible_truncation)]
-        let data = self
-            .mem
-            .blob_read(file_offset, meta.blob_ref.length as usize)?;
+        if meta.blob_ref.length == 0 {
+            return Ok(Some((Vec::new(), meta)));
+        }
+
+        let source_seq = if meta.blob_ref.offset == u64::MAX {
+            blob_id.sequence
+        } else {
+            meta.blob_ref.offset
+        };
+        let data = self.read_blob_chunks(source_seq, meta.blob_ref.length)?;
 
         let actual = xxh3_hash128(&data);
         if actual != meta.blob_ref.checksum {
@@ -3734,10 +3959,12 @@ impl ReadTransaction {
             });
         }
 
-        let blob_state = self.mem.get_committed_blob_state();
-        let file_offset = blob_state.region_offset + meta.blob_ref.offset + offset;
-        #[allow(clippy::cast_possible_truncation)]
-        let data = self.mem.blob_read(file_offset, length as usize)?;
+        let source_seq = if meta.blob_ref.offset == u64::MAX {
+            blob_id.sequence
+        } else {
+            meta.blob_ref.offset
+        };
+        let data = self.read_blob_chunk_range_ro(source_seq, offset, length)?;
 
         Ok(Some(data))
     }
@@ -3745,10 +3972,7 @@ impl ReadTransaction {
     /// Get a seekable reader for a blob's data.
     ///
     /// Returns `None` if the blob does not exist. The returned [`BlobReader`]
-    /// implements [`std::io::Read`] and [`std::io::Seek`] for streaming access.
-    ///
-    /// Range reads bypass checksum verification since the stored checksum
-    /// covers the entire blob.
+    /// holds the assembled blob data in memory.
     pub fn blob_reader(&self, blob_id: &BlobId) -> Result<Option<BlobReader>> {
         let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
             return Ok(None);
@@ -3759,14 +3983,17 @@ impl ReadTransaction {
         };
         let meta = guard.value();
 
-        let blob_state = self.mem.get_committed_blob_state();
-        let file_offset = blob_state.region_offset + meta.blob_ref.offset;
+        if meta.blob_ref.length == 0 {
+            return Ok(Some(BlobReader::new(Vec::new())));
+        }
 
-        Ok(Some(BlobReader::new(
-            Arc::clone(&self.mem),
-            file_offset,
-            meta.blob_ref.length,
-        )))
+        let source_seq = if meta.blob_ref.offset == u64::MAX {
+            blob_id.sequence
+        } else {
+            meta.blob_ref.offset
+        };
+        let data = self.read_blob_chunks(source_seq, meta.blob_ref.length)?;
+        Ok(Some(BlobReader::new(data)))
     }
 
     /// Query deduplication statistics.
@@ -3806,15 +4033,12 @@ impl ReadTransaction {
         })
     }
 
-    /// Returns statistics about blob region space usage (committed state).
+    /// Returns statistics about blob store usage.
     ///
-    /// Scans the primary blob table to compute live bytes, then compares with
-    /// the committed region length to determine dead space and fragmentation.
+    /// With chunked B-tree storage, there is no separate blob region and no
+    /// fragmentation. `region_bytes` equals `live_bytes`, `dead_bytes` is 0.
     pub fn blob_stats(&self) -> Result<BlobStats> {
-        let blob_state = self.mem.get_committed_blob_state();
-        let region_bytes = blob_state.region_length;
-
-        if region_bytes == 0 {
+        let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
             return Ok(BlobStats {
                 blob_count: 0,
                 live_bytes: 0,
@@ -3822,20 +4046,9 @@ impl ReadTransaction {
                 dead_bytes: 0,
                 fragmentation_ratio: 0.0,
             });
-        }
-
-        let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
-            return Ok(BlobStats {
-                blob_count: 0,
-                live_bytes: 0,
-                region_bytes,
-                dead_bytes: region_bytes,
-                fragmentation_ratio: 1.0,
-            });
         };
 
         let mut blob_count: u64 = 0;
-        let mut unique_offsets = crate::compat::HashSet::new();
         let mut live_bytes: u64 = 0;
 
         let range = btree.range::<RangeFull, BlobId>(&(..))?;
@@ -3843,25 +4056,19 @@ impl ReadTransaction {
             let entry = entry?;
             let meta = entry.value();
             blob_count += 1;
-            if unique_offsets.insert(meta.blob_ref.offset) {
+            // Only count physical storage: blobs with offset == u64::MAX own their
+            // chunks. Dedup references share chunks and don't add physical bytes.
+            if meta.blob_ref.offset == u64::MAX {
                 live_bytes += meta.blob_ref.length;
             }
         }
 
-        let dead_bytes = region_bytes.saturating_sub(live_bytes);
-        #[allow(clippy::cast_precision_loss)]
-        let fragmentation_ratio = if region_bytes > 0 {
-            dead_bytes as f64 / region_bytes as f64
-        } else {
-            0.0
-        };
-
         Ok(BlobStats {
             blob_count,
             live_bytes,
-            region_bytes,
-            dead_bytes,
-            fragmentation_ratio,
+            region_bytes: live_bytes,
+            dead_bytes: 0,
+            fragmentation_ratio: 0.0,
         })
     }
 
@@ -4382,7 +4589,7 @@ impl crate::storage_traits::StorageRead for ReadTransaction {
 
 #[cfg(test)]
 mod test {
-    use crate::{Database, TableDefinition};
+    use crate::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
 
@@ -4402,5 +4609,54 @@ mod test {
         let db2 = Database::create(tmpfile.path()).unwrap();
         let write_txn = db2.begin_write().unwrap();
         assert!(write_txn.transaction_id > first_txn_id);
+    }
+
+    const Y: TableDefinition<u64, &[u8]> = TableDefinition::new("y");
+
+    #[test]
+    fn savepoint_restore_then_commit() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+
+        // Seed the table with enough data to force multiple page allocations
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(Y).unwrap();
+            let value = vec![0xABu8; 512];
+            for i in 0..200u64 {
+                table.insert(&i, value.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        // Repeated savepoint-restore cycles to stress page allocator
+        for round in 0..10u64 {
+            let mut txn = db.begin_write().unwrap();
+            let savepoint = txn.ephemeral_savepoint().unwrap();
+            {
+                let mut table = txn.open_table(Y).unwrap();
+                let big_value = vec![0xCDu8; 2048];
+                for i in 0..100u64 {
+                    let key = 10_000 + round * 100 + i;
+                    table.insert(&key, big_value.as_slice()).unwrap();
+                }
+            }
+            txn.restore_savepoint(&savepoint).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Verify none of the throwaway keys were persisted
+        let rtxn = db.begin_read().unwrap();
+        let table = rtxn.open_table(Y).unwrap();
+        assert_eq!(table.len().unwrap(), 200);
+        for i in 0..10u64 {
+            for j in 0..100u64 {
+                let key = 10_000 + i * 100 + j;
+                assert!(
+                    table.get(&key).unwrap().is_none(),
+                    "key {key} should not exist"
+                );
+            }
+        }
     }
 }

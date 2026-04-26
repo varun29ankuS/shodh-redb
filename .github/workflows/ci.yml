@@ -226,6 +226,10 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
 
+      - name: Clear stale fuzz corpus
+        if: matrix.fuzz
+        run: rm -rf fuzz/corpus/ fuzz/artifacts/
+
       - name: Fuzzer (60s core + 30s each new target)
         if: matrix.fuzz
         run: |

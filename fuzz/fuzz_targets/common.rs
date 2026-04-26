@@ -12,7 +12,7 @@ const MAX_VALUE_SIZE: usize = 100_000;
 const KEY_SPACE: u64 = 1_000_000;
 pub const MAX_SAVEPOINTS: usize = 6;
 // Cap transaction/operation counts to keep per-input runtime under the fuzzer
-// timeout. Each transaction involves DB open/commit/crash-recovery — expensive.
+// timeout. Each transaction involves DB open/commit/crash-recovery -- expensive.
 const MAX_TRANSACTIONS: usize = 8;
 const MAX_OPS_PER_TXN: usize = 20;
 

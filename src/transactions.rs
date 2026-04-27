@@ -2694,6 +2694,10 @@ impl WriteTransaction {
         let mut system_tables = self.system_tables.lock();
         let mut cdc_table = system_tables.open_system_table(self, CDC_LOG_TABLE)?;
 
+        // CDC events are inserted into system tables before the commit point (slot swap).
+        // If any insert fails, commit_inner() returns Err and abort_inner() is called,
+        // which frees all pages in allocated_since_commit -- including these system table
+        // pages. No orphaned CDC entries survive a failed commit.
         for (seq, event) in events.iter().enumerate() {
             let key = CdcKey::new(txn_id, u32::try_from(seq).unwrap_or(u32::MAX));
             let record = CdcRecord::from_event(event)?;

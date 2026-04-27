@@ -404,7 +404,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         K::fixed_width(),
                         self.value_width(),
                     );
-                    mutator.insert(position, found, key, value);
+                    mutator.insert(position, found, key, value)?;
                     let new_page_accessor =
                         LeafAccessor::new(page_mut.memory(), K::fixed_width(), self.value_width())?;
                     let offset = new_page_accessor.offset_of_value(position).unwrap();
@@ -666,7 +666,9 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         value: &V::SelfType<'_>,
     ) -> Result<()> {
         assert!(self.modify_uncommitted);
-        let header = self.root.expect("Key not found (tree is empty)");
+        let header = self
+            .root
+            .ok_or_else(|| StorageError::corrupted("insert_inplace on empty tree"))?;
         let raw_value = V::as_bytes(value);
         let stored_value = compress_value(raw_value.as_ref(), self.compression);
         self.insert_inplace_helper(
@@ -687,12 +689,26 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 let accessor =
                     LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())?;
                 let (position, found) = accessor.position::<K>(key);
-                assert!(found);
-                let old_len = accessor.entry(position).unwrap().value().len();
-                assert!(value.len() <= old_len);
+                if !found {
+                    return Err(StorageError::corrupted(
+                        "insert_inplace: key not found in leaf",
+                    ));
+                }
+                let old_len = accessor
+                    .entry(position)
+                    .ok_or_else(|| {
+                        StorageError::corrupted("insert_inplace: missing entry at position")
+                    })?
+                    .value()
+                    .len();
+                if value.len() > old_len {
+                    return Err(StorageError::corrupted(
+                        "insert_inplace: new value larger than old",
+                    ));
+                }
                 let mut mutator =
                     LeafMutator::new(page.memory_mut()?, K::fixed_width(), self.value_width());
-                mutator.insert(position, true, key, value);
+                mutator.insert(position, true, key, value)?;
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width())?;

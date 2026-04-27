@@ -1285,7 +1285,7 @@ impl Database {
         let mut compacted = false;
         // Iteratively compact until no progress is made.
         // Cap iterations to prevent unbounded loops on corrupted metadata.
-        let max_compact_iterations = 100u32;
+        let max_compact_iterations = 20u32;
         let mut iteration = 0u32;
         loop {
             if iteration >= max_compact_iterations {

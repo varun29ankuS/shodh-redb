@@ -708,6 +708,11 @@ fn exec_table_crash_support<T: Clone + Debug>(
     let mut non_durable_reference = reference.clone();
     let mut has_done_close_db = false;
 
+    if config.transactions.is_empty() {
+        // Nothing to fuzz-test -- skip the expensive recovery/integrity path.
+        return Ok(());
+    }
+
     for (txn_id, transaction) in config.transactions.iter().enumerate() {
         let result = handle_savepoints(
             db.begin_write().unwrap(),

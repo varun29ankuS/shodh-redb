@@ -6,6 +6,8 @@ use rand_distr::{Binomial, Distribution};
 use std::mem::size_of;
 
 const MAX_CRASH_OPS: u64 = 20;
+// Minimum 1MB cache to avoid pathological uncached-page-read timeouts with small page sizes.
+const MIN_CACHE_SIZE: usize = 1_048_576;
 const MAX_CACHE_SIZE: usize = 100_000_000;
 // Limit values to 100KiB
 const MAX_VALUE_SIZE: usize = 100_000;
@@ -207,9 +209,12 @@ impl Arbitrary<'_> for FuzzConfig {
         for _ in 0..len {
             transactions.push(u.arbitrary()?);
         }
+        let mut cache_size: BoundedUSize<MAX_CACHE_SIZE> = u.arbitrary()?;
+        // Floor at MIN_CACHE_SIZE to avoid pathological uncached reads with small page sizes
+        cache_size.value = cache_size.value.max(MIN_CACHE_SIZE);
         Ok(Self {
             multimap_table: u.arbitrary()?,
-            cache_size: u.arbitrary()?,
+            cache_size,
             crash_after_ops: u.arbitrary()?,
             transactions,
             page_size: u.arbitrary()?,

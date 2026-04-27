@@ -6,6 +6,8 @@ use rand_distr::{Binomial, Distribution};
 use std::mem::size_of;
 
 const MAX_CRASH_OPS: u64 = 20;
+// Minimum crash_after_ops to avoid instant-crash inputs that produce slow recovery
+const MIN_CRASH_OPS: u64 = 2;
 // Minimum 1MB cache to avoid pathological uncached-page-read timeouts with small page sizes.
 const MIN_CACHE_SIZE: usize = 1_048_576;
 const MAX_CACHE_SIZE: usize = 100_000_000;
@@ -197,7 +199,8 @@ pub(crate) struct FuzzConfig {
     pub cache_size: BoundedUSize<MAX_CACHE_SIZE>,
     pub crash_after_ops: BoundedU64<MAX_CRASH_OPS>,
     pub transactions: Vec<FuzzTransaction>,
-    pub page_size: PowerOfTwoBetween<9, 14>,
+    // Minimum 1024 (2^10) to avoid pathologically deep B-trees with 512-byte pages
+    pub page_size: PowerOfTwoBetween<10, 14>,
     // Must not be too small, otherwise persistent savepoints won't fit into a region
     pub region_size: PowerOfTwoBetween<20, 30>,
 }
@@ -212,10 +215,13 @@ impl Arbitrary<'_> for FuzzConfig {
         let mut cache_size: BoundedUSize<MAX_CACHE_SIZE> = u.arbitrary()?;
         // Floor at MIN_CACHE_SIZE to avoid pathological uncached reads with small page sizes
         cache_size.value = cache_size.value.max(MIN_CACHE_SIZE);
+        let mut crash_after_ops: BoundedU64<MAX_CRASH_OPS> = u.arbitrary()?;
+        // Floor at MIN_CRASH_OPS so the crash doesn't fire during setup/before any real work
+        crash_after_ops.value = crash_after_ops.value.max(MIN_CRASH_OPS);
         Ok(Self {
             multimap_table: u.arbitrary()?,
             cache_size,
-            crash_after_ops: u.arbitrary()?,
+            crash_after_ops,
             transactions,
             page_size: u.arbitrary()?,
             region_size: u.arbitrary()?,

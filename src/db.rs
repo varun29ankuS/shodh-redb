@@ -322,8 +322,10 @@ pub struct SalvageReport {
     pub tables_found: u64,
     /// Number of tables from which at least one row was recovered
     pub tables_recovered: u64,
-    /// Total number of key/value rows successfully recovered
+    /// Total number of key/value rows successfully inserted into the output database
     pub rows_recovered: u64,
+    /// Rows extracted from corrupted tree but failed to insert (e.g. `ValueTooLarge`)
+    pub rows_insert_failed: u64,
     /// Estimated number of rows lost due to corruption
     pub rows_lost: u64,
     /// Detailed corruption info for each corrupt page encountered
@@ -956,6 +958,7 @@ impl Database {
         let mut corrupt_details: Vec<CorruptPageInfo> = Vec::new();
         let mut tables_recovered = 0u64;
         let mut rows_recovered = 0u64;
+        let mut rows_insert_failed = 0u64;
         let mut rows_lost = 0u64;
 
         // 1. Open corrupted file read-only
@@ -1033,23 +1036,31 @@ impl Database {
                 let write_txn = output_db
                     .begin_write()
                     .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+                let table_insert_failed;
                 {
                     let mut table = write_txn.open_table(raw_def).map_err(|e| {
                         DatabaseError::Storage(
                             e.into_storage_error_or_internal("salvage: open_table"),
                         )
                     })?;
+                    let mut failed = 0u64;
                     for (key, value) in &pairs {
-                        let _ = table.insert(key.as_slice(), value.as_slice());
+                        // Best-effort: skip rows that fail (e.g. ValueTooLarge from corrupted source)
+                        if table.insert(key.as_slice(), value.as_slice()).is_err() {
+                            failed += 1;
+                        }
                     }
+                    table_insert_failed = failed;
                 }
                 write_txn
                     .commit()
                     .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
                 tables_recovered += 1;
+                rows_insert_failed += table_insert_failed;
+                rows_recovered += table_rows.saturating_sub(table_insert_failed);
+            } else {
+                rows_recovered += table_rows;
             }
-
-            rows_recovered += table_rows;
             // Estimate lost rows from corruption count (each corrupt page likely held some rows)
             rows_lost += table_corruptions.len() as u64;
             corrupt_details.extend(table_corruptions);
@@ -1059,6 +1070,7 @@ impl Database {
             tables_found,
             tables_recovered,
             rows_recovered,
+            rows_insert_failed,
             rows_lost,
             corrupt_details,
             duration: start.elapsed(),

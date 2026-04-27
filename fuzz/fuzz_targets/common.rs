@@ -11,6 +11,10 @@ const MAX_CACHE_SIZE: usize = 100_000_000;
 const MAX_VALUE_SIZE: usize = 100_000;
 const KEY_SPACE: u64 = 1_000_000;
 pub const MAX_SAVEPOINTS: usize = 6;
+// Cap transaction/operation counts to keep per-input runtime under the fuzzer
+// timeout. Each transaction involves DB open/commit/crash-recovery -- expensive.
+const MAX_TRANSACTIONS: usize = 8;
+const MAX_OPS_PER_TXN: usize = 20;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundedU64<const N: u64> {
@@ -153,7 +157,7 @@ pub(crate) enum FuzzOperation {
     },
 }
 
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct FuzzTransaction {
     pub ops: Vec<FuzzOperation>,
     pub durable: bool,
@@ -165,7 +169,27 @@ pub(crate) struct FuzzTransaction {
     pub restore_savepoint: Option<BoundedUSize<MAX_SAVEPOINTS>>,
 }
 
-#[derive(Arbitrary, Debug, Clone)]
+impl Arbitrary<'_> for FuzzTransaction {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let len = u.int_in_range(0..=MAX_OPS_PER_TXN)?;
+        let mut ops = Vec::with_capacity(len);
+        for _ in 0..len {
+            ops.push(u.arbitrary()?);
+        }
+        Ok(Self {
+            ops,
+            durable: u.arbitrary()?,
+            quick_repair: u.arbitrary()?,
+            commit: u.arbitrary()?,
+            close_db: u.arbitrary()?,
+            create_ephemeral_savepoint: u.arbitrary()?,
+            create_persistent_savepoint: u.arbitrary()?,
+            restore_savepoint: u.arbitrary()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct FuzzConfig {
     pub multimap_table: bool,
     pub cache_size: BoundedUSize<MAX_CACHE_SIZE>,
@@ -174,4 +198,22 @@ pub(crate) struct FuzzConfig {
     pub page_size: PowerOfTwoBetween<9, 14>,
     // Must not be too small, otherwise persistent savepoints won't fit into a region
     pub region_size: PowerOfTwoBetween<20, 30>,
+}
+
+impl Arbitrary<'_> for FuzzConfig {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let len = u.int_in_range(0..=MAX_TRANSACTIONS)?;
+        let mut transactions = Vec::with_capacity(len);
+        for _ in 0..len {
+            transactions.push(u.arbitrary()?);
+        }
+        Ok(Self {
+            multimap_table: u.arbitrary()?,
+            cache_size: u.arbitrary()?,
+            crash_after_ops: u.arbitrary()?,
+            transactions,
+            page_size: u.arbitrary()?,
+            region_size: u.arbitrary()?,
+        })
+    }
 }

@@ -326,7 +326,7 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
                 if let EitherPage::Mutable(ref mut mut_page) = self.page {
                     if let Ok(mem) = mut_page.memory_mut() {
                         let mut mutator = LeafMutator::new(mem, fixed_key_size, fixed_value_size);
-                        mutator.remove(position);
+                        let _ = mutator.remove(position);
                     }
                 } else {
                     let is_panicking = {
@@ -459,7 +459,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
                 self.key_width,
                 self.fixed_value_size,
             );
-            mutator.insert(self.entry_index, true, &key_bytes, &stored_value);
+            mutator.insert(self.entry_index, true, &key_bytes, &stored_value)?;
         } else {
             let accessor =
                 LeafAccessor::new(self.page.memory(), self.key_width, self.fixed_value_size)?;
@@ -1193,9 +1193,14 @@ impl<'b> LeafMutator<'b> {
     }
 
     // Insert the given key, value pair at index i and shift all following pairs to the right
-    pub(crate) fn insert(&mut self, i: usize, overwrite: bool, key: &[u8], value: &[u8]) {
-        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size)
-            .unwrap_or_else(|_| panic!("internal: LeafMutator::insert on invalid page"));
+    pub(crate) fn insert(
+        &mut self,
+        i: usize,
+        overwrite: bool,
+        key: &[u8],
+        value: &[u8],
+    ) -> crate::Result<()> {
+        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size)?;
         let required_delta = if overwrite {
             isize::try_from(key.len() + value.len()).unwrap_or(0)
                 - isize::try_from(accessor.length_of_pairs(i, i + 1)).unwrap_or(0)
@@ -1324,19 +1329,38 @@ impl<'b> LeafMutator<'b> {
             }
             debug_assert_eq!(dest, 4 + key_ptr_size * i);
         }
+        Ok(())
     }
 
-    pub(super) fn remove(&mut self, i: usize) {
-        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size)
-            .expect("internal: constructed page is valid");
+    pub(super) fn remove(&mut self, i: usize) -> crate::Result<()> {
+        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size)?;
         let num_pairs = accessor.num_pairs();
-        assert!(i < num_pairs);
-        assert!(num_pairs > 1);
-        let key_start = accessor.key_start(i).unwrap();
-        let key_end = accessor.key_end(i).unwrap();
-        let value_start = accessor.value_start(i).unwrap();
-        let value_end = accessor.value_end(i).unwrap();
-        let last_value_end = accessor.value_end(accessor.num_pairs() - 1).unwrap();
+        if i >= num_pairs {
+            return Err(StorageError::corrupted(format!(
+                "LeafMutator::remove index {i} out of range (num_pairs={num_pairs})"
+            )));
+        }
+        if num_pairs <= 1 {
+            return Err(StorageError::corrupted(format!(
+                "LeafMutator::remove on leaf with only {num_pairs} pair(s)"
+            )));
+        }
+        let corrupt = |msg: &str| StorageError::corrupted(format!("LeafMutator::remove: {msg}"));
+        let key_start = accessor
+            .key_start(i)
+            .ok_or_else(|| corrupt("missing key_start"))?;
+        let key_end = accessor
+            .key_end(i)
+            .ok_or_else(|| corrupt("missing key_end"))?;
+        let value_start = accessor
+            .value_start(i)
+            .ok_or_else(|| corrupt("missing value_start"))?;
+        let value_end = accessor
+            .value_end(i)
+            .ok_or_else(|| corrupt("missing value_end"))?;
+        let last_value_end = accessor
+            .value_end(num_pairs - 1)
+            .ok_or_else(|| corrupt("missing last value_end"))?;
 
         // Update all the pointers
         let key_ptr_size = if self.fixed_key_size.is_none() {
@@ -1405,6 +1429,7 @@ impl<'b> LeafMutator<'b> {
         let start = value_end;
         let end = last_value_end;
         self.page.copy_within(start..end, dest);
+        Ok(())
     }
 
     fn update_key_end(&mut self, i: usize, delta: isize) {

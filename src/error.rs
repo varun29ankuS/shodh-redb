@@ -576,6 +576,10 @@ impl StorageError {
             detail: detail.into(),
         }
     }
+
+    pub(crate) fn corrupted(detail: impl Into<String>) -> Self {
+        StorageError::Corrupted(detail.into())
+    }
 }
 
 /// Errors related to opening tables

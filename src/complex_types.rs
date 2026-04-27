@@ -3,17 +3,20 @@ use alloc::format;
 use alloc::vec::Vec;
 
 // Encode len as a varint and store it at the end of output
+#[allow(clippy::cast_possible_truncation)]
 pub(super) fn encode_varint_len(len: usize, output: &mut Vec<u8>) {
     if len < 254 {
-        output.push(len.try_into().unwrap());
-    } else if len <= u16::MAX.into() {
-        let u16_len: u16 = len.try_into().unwrap();
+        // Safe: len < 254 fits in u8
+        output.push(len as u8);
+    } else if u16::try_from(len).is_ok() {
         output.push(254);
-        output.extend_from_slice(&u16_len.to_le_bytes());
+        // Safe: checked by try_from above
+        output.extend_from_slice(&(len as u16).to_le_bytes());
     } else {
-        let u32_len: u32 = len.try_into().unwrap();
+        // Saturate at u32::MAX; values larger than 4GB cannot be varint-encoded.
+        let clamped = u32::try_from(len).unwrap_or(u32::MAX);
         output.push(255);
-        output.extend_from_slice(&u32_len.to_le_bytes());
+        output.extend_from_slice(&clamped.to_le_bytes());
     }
 }
 

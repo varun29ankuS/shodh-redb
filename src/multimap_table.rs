@@ -360,7 +360,7 @@ pub(crate) fn relocate_subtrees(
                     })?;
                     if sub_root != new_root {
                         let new_collection = UntypedDynamicCollection::make_subtree_data(new_root);
-                        mutator.insert(i, true, entry.key(), &new_collection);
+                        mutator.insert(i, true, entry.key(), &new_collection)?;
                     }
                 }
             }
@@ -453,7 +453,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
         );
         for (i, key, sub_root) in sub_root_updates {
             let collection = DynamicCollection::<()>::make_subtree_data(sub_root);
-            mutator.insert(i, true, &key, &collection);
+            mutator.insert(i, true, &key, &collection)?;
         }
 
         Ok(())

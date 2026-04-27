@@ -708,8 +708,11 @@ fn exec_table_crash_support<T: Clone + Debug>(
     let mut non_durable_reference = reference.clone();
     let mut has_done_close_db = false;
 
-    if config.transactions.is_empty() {
-        // Nothing to fuzz-test -- skip the expensive recovery/integrity path.
+    let total_ops: usize = config.transactions.iter().map(|t| t.ops.len()).sum();
+    if total_ops == 0 {
+        // No actual operations -- skip the expensive recovery/integrity path.
+        // Transactions with zero ops + crash simulation produce heavyweight
+        // recovery work with no fuzzing value.
         return Ok(());
     }
 

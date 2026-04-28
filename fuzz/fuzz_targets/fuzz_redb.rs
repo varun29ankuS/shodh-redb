@@ -667,6 +667,14 @@ fn exec_table_crash_support<T: Clone + Debug>(
         &mut SavepointManager<T>,
     ) -> Result<(), redb::Error>,
 ) -> Result<(), redb::Error> {
+    // Early exit before any DB work -- zero-ops inputs are expensive to set up
+    // (DB create + savepoint + commit) with no fuzzing value, and can exceed
+    // the per-input timeout on slow runners (ARM64 QEMU).
+    let total_ops: usize = config.transactions.iter().map(|t| t.ops.len()).sum();
+    if total_ops == 0 {
+        return Ok(());
+    }
+
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file))?);
     let mut countdown = backend.countdown.clone();

@@ -9,8 +9,9 @@ use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BRANCH, BranchAccessor, BranchMutator, Btree, BtreeHeader, BtreeMut,
     BtreeRangeIter, BtreeStats, Checksum, DEFERRED, LEAF, LeafAccessor, LeafMutator,
-    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PagePath, PageTrackerPolicy,
-    RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtree, UntypedBtreeMut, btree_stats,
+    MAX_PAIR_LENGTH, MAX_TREE_DEPTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PagePath,
+    PageTrackerPolicy, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtree,
+    UntypedBtreeMut, btree_stats,
 };
 use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
@@ -34,7 +35,7 @@ pub(crate) fn multimap_btree_stats(
     fixed_value_size: Option<usize>,
 ) -> Result<BtreeStats> {
     if let Some(root) = root {
-        multimap_stats_helper(root, mem, fixed_key_size, fixed_value_size)
+        multimap_stats_helper(root, mem, fixed_key_size, fixed_value_size, 0)
     } else {
         Ok(BtreeStats {
             tree_height: 0,
@@ -52,7 +53,13 @@ fn multimap_stats_helper(
     mem: &TransactionalMemory,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
+    depth: u32,
 ) -> Result<BtreeStats> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(StorageError::Corrupted(format!(
+            "B-tree depth {depth} exceeds maximum {MAX_TREE_DEPTH}"
+        )));
+    }
     let page = mem.get_page(page_number)?;
     let node_mem = page.memory();
     match node_mem[0] {
@@ -139,8 +146,13 @@ fn multimap_stats_helper(
                 page.memory().len().saturating_sub(accessor.total_length()) as u64;
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
-                    let stats =
-                        multimap_stats_helper(child, mem, fixed_key_size, fixed_value_size)?;
+                    let stats = multimap_stats_helper(
+                        child,
+                        mem,
+                        fixed_key_size,
+                        fixed_value_size,
+                        depth + 1,
+                    )?;
                     max_child_height = max(max_child_height, stats.tree_height);
                     leaf_pages += stats.leaf_pages;
                     branch_pages += stats.branch_pages;

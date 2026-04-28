@@ -570,9 +570,11 @@ fn run_soak(durability: Durability) {
             let rtxn = db.begin_read().unwrap();
             let blob_st = rtxn.blob_stats().unwrap();
             let stored_count = blob_ids.lock().unwrap().len() as u64;
+            // Tolerance of 4: multiple concurrent blob workers may have pushed to
+            // blob_ids but the read snapshot predates those commits (or vice versa).
             assert!(
-                blob_st.blob_count + 1 >= stored_count,
-                "blob_stats count {} < stored count {stored_count} (tolerance 1)",
+                blob_st.blob_count + 4 >= stored_count,
+                "blob_stats count {} < stored count {stored_count} (tolerance 4)",
                 blob_st.blob_count
             );
         }

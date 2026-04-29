@@ -20,7 +20,7 @@
 
 ## TTL
 
-- **Lazy eviction**: Expired entries are not removed automatically. Call `purge_expired()` on each TTL table to reclaim space from expired entries.
+- **Lazy eviction**: Expired entries are not removed automatically. Call `purge_expired()` on each TTL table to reclaim space from expired entries. Purge frequency should be proportional to write rate — high-throughput tables may need purging every few seconds, low-write tables every few minutes. The cost of `purge_expired()` is O(expired entries), not O(total entries). File size grows monotonically until expired entries are purged and `compact()` is called.
 
 - **`no_std`**: TTL is not available without the `std` feature (requires system clock).
 
@@ -48,4 +48,4 @@
 
 ## Error Handling
 
-- **`Value` trait**: The `Value::from_bytes` trait method returns `Self`, not `Result<Self>`. If on-disk table definition metadata is corrupted, `InternalTableDefinition::from_bytes` will panic with a diagnostic message rather than returning an error. All other deserialization paths return `StorageError::Corrupted`.
+- **`Value` trait**: The `Value::from_bytes` trait method returns `Self`, not `Result<Self>`. If on-disk table definition metadata is corrupted, `InternalTableDefinition::from_bytes` will panic with a diagnostic message rather than returning an error. On `std` builds, all internal call sites wrap this in `catch_unwind` and convert panics to `StorageError::Corrupted`. On `no_std` builds, corrupt metadata causes an unrecoverable panic. All other deserialization paths return `StorageError::Corrupted`.

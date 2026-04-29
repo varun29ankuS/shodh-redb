@@ -30,6 +30,10 @@ Every edge vector database (sqlite-vec, LanceDB, Qdrant) bolts vector search ont
 
 One binary. One file. ACID crash-safe.
 
+> **Single-process only.** shodh-redb does not implement file locking. Opening the same database
+> file from multiple processes simultaneously **will corrupt your data**. Use a single server
+> process or filesystem-level locking if multi-process access is needed.
+
 ---
 
 ## Benchmarks (SIFT1M)

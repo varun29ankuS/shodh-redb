@@ -77,7 +77,11 @@ impl Iterator for TableNameIter {
         for entry in self.inner.by_ref() {
             match entry {
                 Ok(entry) => {
-                    if entry.value().get_type() == self.table_type {
+                    let definition = match entry.value_checked() {
+                        Ok(d) => d,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    if definition.get_type() == self.table_type {
                         return Some(Ok(entry.key().to_string()));
                     }
                 }
@@ -119,7 +123,7 @@ impl TableTree {
 
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
-            let definition = entry.value();
+            let definition = entry.value_checked()?;
             match definition {
                 InternalTableDefinition::Normal {
                     table_root,
@@ -186,7 +190,7 @@ impl TableTree {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let table_name = entry.key().to_string();
-            let definition = entry.value();
+            let definition = entry.value_checked()?;
             match definition {
                 InternalTableDefinition::Normal {
                     table_root,
@@ -254,7 +258,7 @@ impl TableTree {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let table_name = entry.key().to_string();
-            let definition = entry.value();
+            let definition = entry.value_checked()?;
             match definition {
                 InternalTableDefinition::Normal {
                     table_root,
@@ -329,7 +333,7 @@ impl TableTree {
         table_type: TableType,
     ) -> Result<Option<InternalTableDefinition>, TableError> {
         if let Some(guard) = self.tree.get(&name)? {
-            let definition = guard.value();
+            let definition = guard.value_checked()?;
             definition.check_match_untyped(table_type, name)?;
             Ok(Some(definition))
         } else {
@@ -520,7 +524,7 @@ impl TableTreeMut<'_> {
                         "pending table '{name}' not found in table tree"
                     ))
                 })?
-                .value();
+                .value_checked()?;
             // No-op if the root has not changed
             match definition {
                 InternalTableDefinition::Normal { table_root, .. }
@@ -604,7 +608,8 @@ impl TableTreeMut<'_> {
                 &name,
                 &InternalTableDefinition::new::<K, V>(TableType::Normal, None, 0),
             )?
-            .map(|x| x.value());
+            .map(|x| x.value_checked())
+            .transpose()?;
         if let Some(existing) = existing {
             self.tree.insert(&name, &existing)?;
         }
@@ -615,7 +620,7 @@ impl TableTreeMut<'_> {
             .ok_or_else(|| {
                 StorageError::Internal(alloc::format!("table '{name}' missing after insert"))
             })?
-            .value()
+            .value_checked()?
         {
             InternalTableDefinition::Normal { table_root, .. } => table_root,
             InternalTableDefinition::Multimap { .. } => {
@@ -851,7 +856,7 @@ impl TableTreeMut<'_> {
     ) -> Result {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
-            let mut definition = entry.value();
+            let mut definition = entry.value_checked()?;
             if let Some((updated_root, updated_length)) =
                 self.pending_table_updates.get(entry.key())
             {
@@ -884,7 +889,7 @@ impl TableTreeMut<'_> {
     ) -> Result {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
-            let mut definition = entry.value();
+            let mut definition = entry.value_checked()?;
             if let Some((updated_root, updated_length)) =
                 self.pending_table_updates.get(entry.key())
             {
@@ -922,7 +927,7 @@ impl TableTreeMut<'_> {
 
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
-            let mut definition = entry.value();
+            let mut definition = entry.value_checked()?;
             if let Some((updated_root, length)) = self.pending_table_updates.get(entry.key()) {
                 definition.set_header(*updated_root, *length);
             }

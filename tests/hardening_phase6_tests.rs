@@ -771,3 +771,58 @@ fn flash_space_exhaustion_returns_error() {
         "at least one commit should succeed before exhaustion"
     );
 }
+
+/// When all blocks hit max_erase_cycles, the FTL should return an error
+/// rather than silently corrupting data or panicking.
+#[test]
+fn flash_wear_out_returns_error() {
+    let geometry = FlashGeometry {
+        erase_block_size: 4096,
+        write_page_size: 4096,
+        total_blocks: 32,
+        max_erase_cycles: 8, // Very low limit to trigger wear-out quickly
+    };
+
+    let (hw, _storage) = CountdownFlashHardware::new(geometry, u64::MAX, u64::MAX);
+    let backend = FlashBackend::mount(hw).unwrap();
+    let db = Builder::new().create_with_backend(backend).unwrap();
+
+    let mut hit_error = false;
+    let mut last_successful = 0u64;
+
+    // Keep writing until all blocks exceed max_erase_cycles.
+    // With 32 blocks and max_erase_cycles=8, this should exhaust within a few
+    // hundred transactions (each commit erases at least one block).
+    for i in 0..2000u64 {
+        let txn = db.begin_write().unwrap();
+        {
+            let result = txn.open_table(CRASH_TABLE);
+            let mut t = match result {
+                Ok(t) => t,
+                Err(_) => {
+                    hit_error = true;
+                    break;
+                }
+            };
+            // Write varying-size values to exercise different page allocations
+            if t.insert(&i, &(i * 13)).is_err() {
+                hit_error = true;
+                break;
+            }
+        }
+        if txn.commit().is_err() {
+            hit_error = true;
+            break;
+        }
+        last_successful = i;
+    }
+
+    assert!(
+        hit_error,
+        "should have hit wear-out within 2000 commits with max_erase_cycles=8"
+    );
+    assert!(
+        last_successful > 0,
+        "at least one commit should succeed before wear-out"
+    );
+}

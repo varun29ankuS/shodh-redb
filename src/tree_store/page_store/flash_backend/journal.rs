@@ -179,13 +179,17 @@ impl FtlJournal {
             header[11],
         ]);
 
-        let payload_len =
-            u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as usize;
-        let total_len = JOURNAL_HEADER_SIZE + payload_len + JOURNAL_CHECKSUM_SIZE;
-
-        if total_len as u64 > slot_capacity {
+        let payload_len_raw = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
+        let payload_len_u64 = u64::from(payload_len_raw);
+        // Validate payload_len before usize conversion to prevent overflow on 32-bit targets.
+        // Max valid payload = slot_capacity - header - checksum.
+        let overhead = (JOURNAL_HEADER_SIZE + JOURNAL_CHECKSUM_SIZE) as u64;
+        if payload_len_u64 > slot_capacity.saturating_sub(overhead) {
             return Ok((None, None));
         }
+        // Safe: u32 always fits in usize (minimum 32-bit).
+        let payload_len = payload_len_raw as usize;
+        let total_len = JOURNAL_HEADER_SIZE + payload_len + JOURNAL_CHECKSUM_SIZE;
 
         // Read full entry
         let mut entry = vec![0u8; total_len];

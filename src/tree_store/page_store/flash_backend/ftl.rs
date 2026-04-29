@@ -948,11 +948,13 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         if cursor + erase_len > data.len() {
             return Err(err());
         }
-        let erase_counts = EraseCountTable::from_bytes(&data[cursor..cursor + erase_len]);
-        cursor += erase_len;
-        if erase_counts.len() != total_blocks {
+        // Each erase count is a packed u32 (4 bytes). Reject unaligned lengths
+        // and mismatched counts before deserialization.
+        if erase_len % 4 != 0 || erase_len / 4 != total_blocks as usize {
             return Err(err());
         }
+        let erase_counts = EraseCountTable::from_bytes(&data[cursor..cursor + erase_len]);
+        cursor += erase_len;
 
         // bad block table
         if cursor + 4 > data.len() {

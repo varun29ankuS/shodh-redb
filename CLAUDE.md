@@ -25,5 +25,11 @@ Embedded multi-modal database engine in Rust. B-tree page store with vector inde
 - Branch: `fix/`, `feat/`, `refactor/` prefixes
 - Message format: `<type>: <description>`
 
+# Quality Standards
+- NEVER lower thresholds, weaken assertions, or relax test criteria to make CI pass. Fix the root cause.
+- If a test is flaky, fix the measurement or the code -- do not widen tolerances or skip the test.
+- If a benchmark gate fails, improve measurement reliability (CPU pinning, more samples, better statistics) -- do not raise noise thresholds to hide real signals.
+- The bar stays high. Always.
+
 # Context Preservation
 When compacting, preserve: modified file list, test results, open issue numbers, current branch name.

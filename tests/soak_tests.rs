@@ -9,16 +9,17 @@
 //! For local extended soak runs:
 //!   SOAK_DURATION_SECS=300 cargo test --all-features -p shodh-redb soak -- --nocapture --test-threads=1
 
+use std::fmt::{self, Debug, Formatter};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use rand::RngExt;
 use shodh_redb::{
-    BlobId, ContentType, Database, DistanceMetric, Durability, IvfPqIndexDefinition,
-    ReadableDatabase, ReadableTableMetadata, SearchParams, StoreOptions, TableDefinition,
-    TtlTableDefinition, VerifyLevel,
+    BackendError, BlobId, ContentType, Database, DistanceMetric, Durability, FlashBackend,
+    FlashGeometry, FlashHardware, IvfPqIndexDefinition, ReadableDatabase, ReadableTableMetadata,
+    SearchParams, StoreOptions, TableDefinition, TtlTableDefinition, VerifyLevel,
 };
 use tempfile::NamedTempFile;
 
@@ -552,11 +553,10 @@ fn run_soak(durability: Durability) {
     while start.elapsed() < duration {
         thread::sleep(Duration::from_secs(2));
 
-        // Header-level only during concurrent non-durable writes. Full/Pages
-        // verification is unsafe here because non-durable page freeing bypasses
-        // MVCC -- pages from the durable tree can be freed mid-traversal.
-        // A Full verification is done after quiescing writers (below).
-        let report = db.verify_integrity(VerifyLevel::Header).unwrap();
+        // Full verification is safe during concurrent writes: read_page_ref_counts
+        // prevents freeing pages with active readers, and PageImpl holds an Arc<[u8]>
+        // copy so freed page numbers don't invalidate in-flight reads.
+        let report = db.verify_integrity(VerifyLevel::Full).unwrap();
         assert!(
             report.valid,
             "verify_integrity failed at {:.1}s: {report:?}",
@@ -989,7 +989,7 @@ fn soak_mixed_with_compaction() {
     let start = Instant::now();
     while start.elapsed() < duration {
         thread::sleep(Duration::from_secs(2));
-        let report = db.verify_integrity(VerifyLevel::Header).unwrap();
+        let report = db.verify_integrity(VerifyLevel::Full).unwrap();
         assert!(
             report.valid,
             "verify_integrity failed at {:.1}s: {report:?}",
@@ -1123,4 +1123,246 @@ fn soak_kv_ttl() {
         h.join().expect("kv+ttl worker panicked");
     }
     eprintln!("KV+TTL soak passed.");
+}
+
+// ---------------------------------------------------------------------------
+// Flash backend soak test
+// ---------------------------------------------------------------------------
+
+/// In-memory flash hardware for soak testing. No countdown -- unlimited writes/erases.
+struct InMemoryFlash {
+    storage: RwLock<Vec<u8>>,
+    geometry: FlashGeometry,
+}
+
+impl Debug for InMemoryFlash {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InMemoryFlash").finish()
+    }
+}
+
+impl InMemoryFlash {
+    fn new(geometry: FlashGeometry) -> Self {
+        let capacity = geometry.total_capacity() as usize;
+        Self {
+            storage: RwLock::new(vec![0xFFu8; capacity]),
+            geometry,
+        }
+    }
+}
+
+impl FlashHardware for InMemoryFlash {
+    fn geometry(&self) -> FlashGeometry {
+        self.geometry
+    }
+
+    fn read(&self, offset: u64, buf: &mut [u8]) -> Result<(), BackendError> {
+        let s = self.storage.read().unwrap();
+        let start = offset as usize;
+        let end = start + buf.len();
+        if end > s.len() {
+            return Err(BackendError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "read past end",
+            )));
+        }
+        buf.copy_from_slice(&s[start..end]);
+        Ok(())
+    }
+
+    fn write_page(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
+        let mut s = self.storage.write().unwrap();
+        let start = offset as usize;
+        let end = start + data.len();
+        if end > s.len() {
+            return Err(BackendError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "write past end",
+            )));
+        }
+        for (i, &byte) in data.iter().enumerate() {
+            s[start + i] &= byte; // flash semantics: 1->0 only
+        }
+        Ok(())
+    }
+
+    fn erase_block(&self, block_index: u32) -> Result<(), BackendError> {
+        let mut s = self.storage.write().unwrap();
+        let ebs = self.geometry.erase_block_size as usize;
+        let start = block_index as usize * ebs;
+        let end = start + ebs;
+        if end <= s.len() {
+            s[start..end].fill(0xFF);
+        }
+        Ok(())
+    }
+
+    fn is_bad_block(&self, _block_index: u32) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    fn mark_bad_block(&self, _block_index: u32) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn sync(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
+const FLASH_KV_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("flash_soak_kv");
+
+/// Soak test exercising the flash backend with continuous writes, reads, and
+/// periodic integrity verification. Uses a generous in-memory flash device
+/// (256 blocks x 4KB = 1 MB) so the FTL has room for wear leveling and
+/// garbage collection under sustained load.
+#[test]
+fn soak_flash_backend() {
+    let duration = soak_duration();
+    eprintln!(
+        "Starting flash backend soak test for {:.0}s...",
+        duration.as_secs_f64()
+    );
+
+    let geometry = FlashGeometry {
+        erase_block_size: 4096,
+        write_page_size: 4096,
+        total_blocks: 256,
+        max_erase_cycles: 100_000,
+    };
+
+    let hw = InMemoryFlash::new(geometry);
+    let backend = FlashBackend::mount(hw).unwrap();
+    let db = Arc::new(
+        Database::builder()
+            .set_cache_size(1024 * 1024)
+            .create_with_backend(backend)
+            .unwrap(),
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let next_key = Arc::new(AtomicU64::new(0));
+    let stats = Arc::new(SoakStats::new());
+
+    // Writer thread: sequential inserts with durable commits
+    let handles: Vec<_> = vec![
+        {
+            let db = db.clone();
+            let stop = stop.clone();
+            let next_key = next_key.clone();
+            let stats = stats.clone();
+            thread::Builder::new()
+                .name("flash-writer".into())
+                .spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let key = next_key.fetch_add(1, Ordering::Relaxed);
+                        let val = make_value(key);
+                        let txn = match db.begin_write() {
+                            Ok(t) => t,
+                            Err(_) => break,
+                        };
+                        {
+                            let mut table = match txn.open_table(FLASH_KV_TABLE) {
+                                Ok(t) => t,
+                                Err(_) => break,
+                            };
+                            if table.insert(&key, val.as_slice()).is_err() {
+                                break;
+                            }
+                        }
+                        if txn.commit().is_err() {
+                            break;
+                        }
+                        stats.kv_writes.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .unwrap()
+        },
+        {
+            let db = db.clone();
+            let stop = stop.clone();
+            let next_key = next_key.clone();
+            let stats = stats.clone();
+            thread::Builder::new()
+                .name("flash-reader".into())
+                .spawn(move || {
+                    let mut rng = rand::rng();
+                    while !stop.load(Ordering::Relaxed) {
+                        let max = next_key.load(Ordering::Relaxed);
+                        if max == 0 {
+                            thread::yield_now();
+                            continue;
+                        }
+                        let key = rng.random_range(0..max);
+                        let rtxn = match db.begin_read() {
+                            Ok(r) => r,
+                            Err(_) => break,
+                        };
+                        let table = match rtxn.open_table(FLASH_KV_TABLE) {
+                            Ok(t) => t,
+                            Err(_) => continue,
+                        };
+                        if let Ok(Some(val)) = table.get(&key) {
+                            let expected = make_value(key);
+                            assert_eq!(
+                                val.value(),
+                                expected.as_slice(),
+                                "data corruption for key {key}"
+                            );
+                        }
+                        stats.kv_reads.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .unwrap()
+        },
+    ];
+
+    // Main thread: periodic integrity checks
+    let start = Instant::now();
+    while start.elapsed() < duration {
+        thread::sleep(Duration::from_secs(2));
+
+        let report = db.verify_integrity(VerifyLevel::Full).unwrap();
+        assert!(
+            report.valid,
+            "flash verify_integrity failed at {:.1}s: {report:?}",
+            start.elapsed().as_secs_f64()
+        );
+        stats.integrity_checks.fetch_add(1, Ordering::Relaxed);
+
+        eprintln!(
+            "  [{:.1}s] flash integrity OK, keys={}",
+            start.elapsed().as_secs_f64(),
+            next_key.load(Ordering::Relaxed),
+        );
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for h in handles {
+        h.join().expect("flash workload thread panicked");
+    }
+
+    // Final full integrity check
+    let report = db.verify_integrity(VerifyLevel::Full).unwrap();
+    assert!(
+        report.valid,
+        "final flash verify_integrity failed: {report:?}"
+    );
+
+    // Verify all committed keys are readable and correct
+    {
+        let rtxn = db.begin_read().unwrap();
+        let table = rtxn.open_table(FLASH_KV_TABLE).unwrap();
+        let committed_keys = next_key.load(Ordering::Relaxed);
+        let table_len = table.len().unwrap();
+        // Writer may have incremented next_key but not yet committed, so allow
+        // table_len to be at most 1 less than committed_keys.
+        assert!(
+            table_len >= committed_keys.saturating_sub(1),
+            "flash KV table len {table_len} < expected {committed_keys} - 1"
+        );
+    }
+
+    stats.print_summary(start.elapsed());
+    eprintln!("Flash backend soak passed.");
 }

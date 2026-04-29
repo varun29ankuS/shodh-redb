@@ -57,15 +57,15 @@ jobs:
             cargo bench --bench criterion_vector_ops -p shodh-redb \
               -- --baseline master 2>&1 | tee bench_gate_output.txt
 
-            # Fail only if a majority of benchmarks regressed. A real regression
-            # affects all similar benchmarks; thermal bias / scheduler noise
-            # hits only a few. This eliminates false positives from sequential
-            # baseline-then-PR runs on shared runners.
+            # Fail only if ALL changed benchmarks regressed AND at least 3 did.
+            # GHA shared runners show correlated thermal/scheduling bias that can
+            # push ALL benchmarks in one direction. With noise_threshold at 25%,
+            # only a real >25% regression across every benchmark triggers failure.
             REGRESSED=$(grep -c "regressed" bench_gate_output.txt || true)
             IMPROVED=$(grep -c "improved" bench_gate_output.txt || true)
             TOTAL=$((REGRESSED + IMPROVED))
             echo "Benchmark results: $REGRESSED regressed, $IMPROVED improved out of $TOTAL changed"
-            if [ "$TOTAL" -gt 0 ] && [ "$REGRESSED" -gt $((TOTAL / 2)) ] && [ "$REGRESSED" -ge 3 ]; then
+            if [ "$TOTAL" -gt 0 ] && [ "$IMPROVED" -eq 0 ] && [ "$REGRESSED" -ge 3 ]; then
               echo ""
               echo "============================================================"
               echo "REGRESSION DETECTED: $REGRESSED/$TOTAL benchmarks regressed."

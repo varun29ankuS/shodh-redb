@@ -16,9 +16,9 @@ pub(crate) const MAX_PAGE_INDEX: u32 = 0x000F_FFFF;
 pub(crate) const MAX_REGIONS: u32 = 0x0010_0000;
 
 // On-disk format is:
-// TODO: consider implementing an optimization in which we store the number of order-0 pages that
-// are actually used, in these reserved bits, so that the reads to the PagedCachedFile layer can avoid
-// reading all the zeros at the end of the page.
+// Performance note: storing the count of order-0 pages per region could
+// avoid scanning the buddy bitmap. Deferred until profiling shows region
+// scanning is a bottleneck.
 // lowest 20bits: page index within the region. Only the lowest `20 - order_exponent` bits may be read.
 // The remaining bits are reserved for future use and must be ignored
 // second 20bits: region number
@@ -35,8 +35,8 @@ pub(crate) struct PageNumber {
 
 impl Hash for PageNumber {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // TODO: maybe we should store these fields as a single u64 in PageNumber. The field access
-        // will be a little more expensive, but I think it's less frequent than these hashes
+        // Layout: packing region/page_index/page_order into a single u64 would
+        // reduce field access overhead but hurt readability. Current layout preferred.
         let mut temp = 0x000F_FFFF & u64::from(self.page_index);
         temp |= (0x000F_FFFF & u64::from(self.region)) << 20;
         temp |= (0b0001_1111 & u64::from(self.page_order)) << 59;

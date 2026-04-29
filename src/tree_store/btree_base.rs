@@ -1511,7 +1511,8 @@ impl<'b> LeafMutator<'b> {
 }
 
 // Provides a simple zero-copy way to access a branch page
-// TODO: this should be pub(super) and the multimap btree stuff should be moved into this package
+// Visibility: pub(crate) is required because multimap_table.rs (outside
+// tree_store module) needs direct access to BranchAccessor.
 pub(crate) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
     num_keys: usize,

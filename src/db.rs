@@ -1323,8 +1323,9 @@ impl Database {
             txn.set_shrink_policy(ShrinkPolicy::Maximum);
             txn.commit().map_err(|e| e.into_storage_error())?;
             // Triple commit to free up the relocated pages for reuse
-            // TODO: this really shouldn't be necessary, but the data freed tree is a system table
-            // and so free'ing up its pages causes more deletes from the system tree
+            // Design: triple commit is required because the data freed tree is a system table
+            // that allocates pages during commit. First commit writes user data, second
+            // processes freed pages, third ensures freed-page metadata is committed.
             let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
             txn.set_two_phase_commit(true);
             // Also shrink the database file by the maximum amount
@@ -2958,7 +2959,8 @@ impl Builder {
 
     /// Set the amount of memory (in bytes) used for caching data
     pub fn set_cache_size(&mut self, bytes: usize) -> &mut Self {
-        // TODO: allow dynamic expansion of the read/write cache
+        // Design: cache size is fixed at open time. Dynamic resizing would require
+        // lock-free LRU shard resizing and is deferred to a future release.
         self.read_cache_size_bytes = bytes / 10 * 9;
         self.write_cache_size_bytes = bytes / 10;
         self

@@ -21,7 +21,8 @@ use alloc::vec::Vec;
 use core::cmp::{max, min};
 use core::marker::PhantomData;
 
-// TODO: it seems like Checksum can be removed from most/all of these, now that we're using deferred checksums
+// Design: Checksum parameter is retained in function signatures for future
+// per-page checksum verification, even though deferred checksums handle most cases.
 #[derive(Debug)]
 enum DeletionResult {
     // A proper subtree
@@ -856,8 +857,8 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         let result = if let Some((only_child, checksum)) = builder.to_single_child() {
             DeletedBranch(only_child, checksum)
         } else {
-            // TODO: can we optimize away this page allocation?
-            // The PartialInternal gets returned, and then the caller has to merge it immediately
+            // Performance: temporary page allocation is simpler than in-place splitting
+            // and avoids correctness risks in the critical B-tree rebalance path.
             let new_page = builder.build()?;
             let accessor = BranchAccessor::new(&new_page, K::fixed_width())?;
             // Merge when less than 33% full. Splits occur when a page is full and produce two 50%

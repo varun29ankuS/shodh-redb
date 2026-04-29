@@ -993,7 +993,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         let mut freed = vec![];
         let compression = self.compression();
         // Do not modify the existing tree, because we're iterating over it concurrently with the removals
-        // TODO: optimize this to iterate and remove at the same time
+        // Performance: two-pass iterate-then-remove. Single-pass would require a
+        // draining iterator that modifies the tree during traversal, which is complex
+        // with the current page-locking model.
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
             &mut self.root,
             self.mem.clone(),

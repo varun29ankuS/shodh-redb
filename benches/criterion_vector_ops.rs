@@ -258,7 +258,7 @@ fn bench_nearest_k(c: &mut Criterion) {
 
 fn criterion_config() -> Criterion {
     Criterion::default()
-        // 99% confidence interval — tighter than default 95% to reduce
+        // 99% confidence interval -- tighter than default 95% to reduce
         // false positive regressions from shared runner noise.
         .confidence_level(0.99)
         // 10% noise floor: residual variance after CPU pinning + turbo disable.

@@ -315,9 +315,10 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
 
     /// Access the stored value, catching panics from corrupt data.
     ///
-    /// Wraps `Value::from_bytes` in `catch_unwind` so that deserialization
-    /// panics (e.g. from corrupted on-disk metadata) are converted to
-    /// `StorageError::Corrupted` instead of aborting the process.
+    /// On `std` builds, wraps `Value::from_bytes` in `catch_unwind` so that
+    /// deserialization panics (e.g. from corrupted on-disk metadata) are
+    /// converted to `StorageError::Corrupted` instead of aborting the process.
+    /// On `no_std` builds, calls `from_bytes` directly (panics on corrupt data).
     #[cfg(feature = "std")]
     pub(crate) fn value_checked(
         &self,
@@ -345,6 +346,14 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
                 "panic in Value::from_bytes (corrupted metadata)",
             ))
         })
+    }
+
+    /// `no_std` fallback: calls `from_bytes` directly (no panic protection).
+    #[cfg(not(feature = "std"))]
+    pub(crate) fn value_checked(
+        &self,
+    ) -> core::result::Result<V::SelfType<'_>, crate::StorageError> {
+        Ok(self.value())
     }
 }
 

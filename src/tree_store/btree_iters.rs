@@ -264,6 +264,9 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
     }
 
     /// Access the stored value, catching panics from corrupt data.
+    ///
+    /// On `std` builds, wraps `from_bytes` in `catch_unwind`. On `no_std`,
+    /// calls `from_bytes` directly (panics on corrupt data).
     #[cfg(feature = "std")]
     pub(crate) fn value_checked(
         &self,
@@ -286,6 +289,14 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
                 "panic in Value::from_bytes (corrupted metadata)",
             ))
         })
+    }
+
+    /// `no_std` fallback: calls `from_bytes` directly (no panic protection).
+    #[cfg(not(feature = "std"))]
+    pub(crate) fn value_checked(
+        &self,
+    ) -> core::result::Result<V::SelfType<'_>, crate::StorageError> {
+        Ok(self.value())
     }
 
     pub(crate) fn into_raw(self) -> (PageImpl, Range<usize>, Range<usize>, Option<Vec<u8>>) {

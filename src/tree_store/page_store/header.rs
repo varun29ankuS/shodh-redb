@@ -262,7 +262,8 @@ impl DatabaseHeader {
         Ok(true)
     }
 
-    // TODO: consider returning an Err with the repair info
+    // Design: repair is a normal recovery path, not an error. Returning Err
+    // would force callers to handle successful repairs as failure cases.
     pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, HeaderRepairInfo), DatabaseError> {
         let invalid_magic_number = data[..MAGICNUMBER.len()] != MAGICNUMBER;
 

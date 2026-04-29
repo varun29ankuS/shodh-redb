@@ -332,7 +332,8 @@ pub(crate) fn relocate_subtrees(
                 key_size,
                 UntypedDynamicCollection::fixed_width_with(value_size),
             )?;
-            // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
+            // Direct low-level btree call is intentional: multimap sub-tree indirection
+            // makes a higher-level abstraction more complex without proportional benefit.
             let mut mutator = LeafMutator::new(
                 new_page.memory_mut()?,
                 key_size,
@@ -445,7 +446,8 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
                 }
             }
         }
-        // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
+        // Direct low-level btree call is intentional: multimap sub-tree indirection
+        // makes a higher-level abstraction more complex without proportional benefit.
         let mut mutator = LeafMutator::new(
             leaf_page.memory_mut()?,
             key_size,

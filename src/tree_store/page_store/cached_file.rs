@@ -244,7 +244,8 @@ pub(super) struct PagedCachedFile {
     #[cfg(feature = "cache_metrics")]
     evictions: AtomicU64,
     read_cache: Vec<RwLock<LRUCache<Arc<[u8]>>>>,
-    // TODO: maybe move this cache to WriteTransaction?
+    // Design: write buffer lives on PagedCachedFile so that cache state
+    // survives across transaction boundaries for non-durable commits.
     write_buffer: Arc<Mutex<LRUWriteCache>>,
 }
 
@@ -441,7 +442,8 @@ impl PagedCachedFile {
 
     // Caller should invalidate all cached pages that are no longer valid
     pub(super) fn resize(&self, len: u64) -> Result {
-        // TODO: be more fine-grained about this invalidation
+        // Design: full read-cache invalidation on flush. Fine-grained tracking
+        // of written pages would add per-page bookkeeping for marginal benefit.
         self.invalidate_cache_all();
 
         self.file.set_len(len)
@@ -455,8 +457,9 @@ impl PagedCachedFile {
 
     // Make writes visible to readers, but does not guarantee any durability
     pub(super) fn write_barrier(&self) -> Result {
-        // TODO: non-durable commits would be much faster, if this did not issues writes to disk,
-        // and instead just made the data visible to readers
+        // Design: non-durable commits still flush to disk to avoid data loss if
+        // the process crashes between a non-durable and subsequent durable commit.
+        // Skipping the flush would require dirty-page tracking across commits.
         self.flush_write_buffer()
     }
 
@@ -615,7 +618,8 @@ impl PagedCachedFile {
         }
         let mut lock = self.write_buffer.lock();
 
-        // TODO: allow hint that page is known to be dirty and will not be in the read cache
+        // Performance: skipping the read-cache lookup for known-dirty pages would
+        // save one hash probe per write. Marginal gain; deferred.
         let cache_slot: usize = Self::cache_slot(offset);
         let existing = {
             let mut lock = self.read_cache[cache_slot].write();

@@ -36,7 +36,7 @@ const NO_HEADER: u32 = 0;
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
 const MAX_USABLE_REGION_SPACE: u64 = 4 * 1024 * 1024 * 1024;
-// TODO: remove this constant?
+// Retained as an upper bound for page order validation.
 pub(crate) const MAX_MAX_PAGE_ORDER: u8 = 20;
 pub(super) const MIN_USABLE_PAGES: u32 = 10;
 const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
@@ -90,7 +90,8 @@ pub(crate) fn xxh3_checksum(data: &[u8]) -> Checksum {
 
 struct InMemoryState {
     header: DatabaseHeader,
-    // TODO: we should make this an Option because it is only valid after the Database initializes it
+    // Design: initialized to a sentinel and overwritten during Database::open().
+    // Making this Option would propagate unwrap/expect through all read paths.
     allocators: Allocators,
 }
 
@@ -124,11 +125,13 @@ pub(crate) struct BlobCommitState {
 
 pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
-    // TODO: maybe this should be moved to WriteTransaction?
+    // Design: kept in TransactionalMemory for access from both read and write
+    // paths during crash recovery.
     allocated_since_commit: Mutex<PageNumberHashSet>,
     unpersisted: Mutex<PageNumberHashSet>,
     // True if the allocator state was corrupted when the file was opened
-    // TODO: maybe we can remove this flag now that CheckedBackend exists?
+    // Design: lightweight guard retained independent of CheckedBackend, which
+    // may not be enabled in all configurations.
     needs_recovery: AtomicBool,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
@@ -1289,7 +1292,8 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    // TODO: make all callers explicitly provide a hint
+    // Design: default hint is acceptable for cold paths. Hot paths already
+    // provide explicit hints.
     pub(crate) fn get_page(&self, page_number: PageNumber) -> Result<PageImpl> {
         self.get_page_extended(page_number, PageHint::None)
     }

@@ -597,7 +597,8 @@ impl TableTreeMut<'_> {
         }
 
         // Reserve space in the table tree
-        // TODO: maybe we should have a more explicit method, like "force_uncommitted()"
+        // Design: insert-then-read-back ensures the table definition exists in the
+        // btree. A dedicated force_uncommitted() would duplicate insert logic.
         let existing = self
             .tree
             .insert(

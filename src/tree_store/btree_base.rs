@@ -312,6 +312,40 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
             V::from_bytes(&mem[start..end])
         }
     }
+
+    /// Access the stored value, catching panics from corrupt data.
+    ///
+    /// Wraps `Value::from_bytes` in `catch_unwind` so that deserialization
+    /// panics (e.g. from corrupted on-disk metadata) are converted to
+    /// `StorageError::Corrupted` instead of aborting the process.
+    #[cfg(feature = "std")]
+    pub(crate) fn value_checked(
+        &self,
+    ) -> core::result::Result<V::SelfType<'_>, crate::StorageError> {
+        let bytes: &[u8] = if let Some(ref decompressed) = self.decompressed_value {
+            decompressed
+        } else {
+            let mem = self.page.memory();
+            let end = self.offset.saturating_add(self.len).min(mem.len());
+            let start = self.offset.min(end);
+            &mem[start..end]
+        };
+        // SAFETY: catch_unwind requires UnwindSafe. The byte slice reference
+        // does not have interior mutability, so AssertUnwindSafe is sound.
+        let ptr = bytes.as_ptr();
+        let len = bytes.len();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Reconstruct the slice inside the closure so the borrow checker
+            // does not complain about capturing a local reference.
+            let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+            V::from_bytes(slice)
+        }))
+        .map_err(|_| {
+            crate::StorageError::Corrupted(alloc::string::String::from(
+                "panic in Value::from_bytes (corrupted metadata)",
+            ))
+        })
+    }
 }
 
 impl<V: Value + 'static> Drop for AccessGuard<'_, V> {

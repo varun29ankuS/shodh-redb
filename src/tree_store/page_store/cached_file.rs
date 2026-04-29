@@ -7,7 +7,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ops::{Index, IndexMut};
+use core::ops::Index;
 use core::slice::SliceIndex;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(feature = "cache_metrics")]
@@ -44,22 +44,6 @@ impl<I: SliceIndex<[u8]>> Index<I> for WritablePage {
 
     fn index(&self, index: I) -> &Self::Output {
         self.mem().index(index)
-    }
-}
-
-impl<I: SliceIndex<[u8]>> IndexMut<I> for WritablePage {
-    fn index_mut(&mut self, index: I) -> &mut Self::Output {
-        // IndexMut cannot return Result. In correct code WritablePage holds the
-        // sole Arc reference, making get_mut infallible. We keep the panic as a
-        // last-resort guard because the trait signature offers no alternative.
-        debug_assert!(
-            Arc::strong_count(&self.data) == 1,
-            "WritablePage::index_mut() requires exclusive Arc ownership"
-        );
-        match Arc::get_mut(&mut self.data) {
-            Some(data) => data.index_mut(index),
-            None => panic!("WritablePage::index_mut() called while other Arc references exist"),
-        }
     }
 }
 

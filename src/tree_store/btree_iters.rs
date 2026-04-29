@@ -263,6 +263,31 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
         }
     }
 
+    /// Access the stored value, catching panics from corrupt data.
+    #[cfg(feature = "std")]
+    pub(crate) fn value_checked(
+        &self,
+    ) -> core::result::Result<V::SelfType<'_>, crate::StorageError> {
+        let bytes: &[u8] = if let Some(ref decompressed) = self.decompressed_value {
+            decompressed
+        } else {
+            &self.page.memory()[self.value_range.clone()]
+        };
+        let ptr = bytes.as_ptr();
+        let len = bytes.len();
+        // SAFETY: catch_unwind requires UnwindSafe. The byte slice has no
+        // interior mutability, so AssertUnwindSafe is sound.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+            V::from_bytes(slice)
+        }))
+        .map_err(|_| {
+            crate::StorageError::Corrupted(alloc::string::String::from(
+                "panic in Value::from_bytes (corrupted metadata)",
+            ))
+        })
+    }
+
     pub(crate) fn into_raw(self) -> (PageImpl, Range<usize>, Range<usize>, Option<Vec<u8>>) {
         (
             self.page,

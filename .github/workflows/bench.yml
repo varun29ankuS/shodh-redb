@@ -44,6 +44,20 @@ jobs:
       - name: Install Rust
         run: rustup component add rustfmt
 
+      - name: Stabilize CPU for benchmarking
+        run: |
+          # Pin CPU governor to performance mode (constant frequency, no scaling)
+          if command -v cpupower &>/dev/null; then
+            sudo cpupower frequency-set -g performance || true
+          fi
+          # Disable turbo boost to prevent thermal throttling variance
+          if [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+            echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo || true
+          fi
+          if [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
+            echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost || true
+          fi
+
       - name: Run vector_ops benchmarks
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -51,6 +65,9 @@ jobs:
             git checkout ${{ github.event.pull_request.base.sha }}
             cargo bench --bench criterion_vector_ops -p shodh-redb \
               -- --save-baseline master 2>&1
+
+            # Cooldown: let CPU thermal state settle between runs
+            sleep 10
 
             # Step 2: Switch back to PR branch and compare.
             git checkout ${{ github.sha }}

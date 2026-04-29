@@ -258,15 +258,17 @@ fn bench_nearest_k(c: &mut Criterion) {
 
 fn criterion_config() -> Criterion {
     Criterion::default()
-        // 95% confidence interval for Welch's t-test
-        .confidence_level(0.95)
-        // Ignore differences below 10% (shared runner noise floor on GitHub Actions)
+        // 99% confidence interval -- tighter than default 95% to reduce
+        // false positive regressions from shared runner noise.
+        .confidence_level(0.99)
+        // 10% noise floor: residual variance after CPU pinning + turbo disable.
         .noise_threshold(0.10)
-        // 5s per benchmark for reliable sample distribution
-        .measurement_time(Duration::from_secs(5))
-        .sample_size(100)
-        // 5s warmup: shared runners need longer to reach thermal equilibrium
-        // so sequential baseline/PR runs see consistent CPU frequency.
+        // 10s measurement: more iterations = tighter confidence intervals.
+        // With CPU governor pinned to performance, variance drops significantly
+        // so the extra time buys real statistical power.
+        .measurement_time(Duration::from_secs(10))
+        .sample_size(200)
+        // 5s warmup: fill instruction/data caches before measurement.
         .warm_up_time(Duration::from_secs(5))
 }
 

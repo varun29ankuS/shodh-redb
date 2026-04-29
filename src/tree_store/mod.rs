@@ -10,7 +10,8 @@ mod table_tree_base;
 #[cfg(feature = "std")]
 pub(crate) use btree::salvage_tree_leaves;
 pub(crate) use btree::{
-    Btree, BtreeMut, BtreeStats, PagePath, RawBtree, UntypedBtree, UntypedBtreeMut, btree_stats,
+    Btree, BtreeMut, BtreeStats, MAX_TREE_DEPTH, PagePath, RawBtree, UntypedBtree, UntypedBtreeMut,
+    btree_stats,
 };
 pub use btree_base::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace};
 pub(crate) use btree_base::{

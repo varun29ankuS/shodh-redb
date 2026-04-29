@@ -74,18 +74,45 @@ jobs:
             cargo bench --bench criterion_vector_ops -p shodh-redb \
               -- --baseline master 2>&1 | tee bench_gate_output.txt
 
-            # Fail only if a majority of benchmarks regressed. A real regression
-            # affects all similar benchmarks; thermal bias / scheduler noise
-            # hits only a few. This eliminates false positives from sequential
-            # baseline-then-PR runs on shared runners.
+            # Detect real regressions vs. CI noise.
+            #
+            # Shared GitHub runners introduce 10-35% variance from thermal
+            # throttling, CPU frequency scaling, and noisy neighbours. The
+            # baseline always runs first (cool CPU) and the PR second (warm
+            # CPU), creating a systematic bias toward false regressions.
+            #
+            # Strategy: pair each criterion "regressed" verdict with the
+            # preceding time-change line. Only count regressions where the
+            # point estimate (middle value) is >= 20%. Then fail only if a
+            # majority of benchmarks show such regressions AND at least 3
+            # are affected (ruling out one-off outliers).
+            # Count regressions where the estimate (second percentage in the
+            # time: change line) is >= 20%. Criterion format:
+            #   time:   [+31.2% +33.1% +34.5%] (p = ...)
+            #   thrpt:  [...]
+            #   Performance has regressed.
+            SIGNIFICANT=$(awk '
+              /time:.*\[/ { last_time = $0 }
+              /Performance has regressed/ {
+                n = split(last_time, a, " ")
+                for (i = 1; i <= n; i++) {
+                  if (a[i] ~ /^\+[0-9]/) {
+                    gsub(/[+%]/, "", a[i])
+                    if (a[i]+0 >= 20.0) significant++
+                    break
+                  }
+                }
+              }
+              END { print significant+0 }
+            ' bench_gate_output.txt)
             REGRESSED=$(grep -c "regressed" bench_gate_output.txt || true)
             IMPROVED=$(grep -c "improved" bench_gate_output.txt || true)
             TOTAL=$((REGRESSED + IMPROVED))
-            echo "Benchmark results: $REGRESSED regressed, $IMPROVED improved out of $TOTAL changed"
-            if [ "$TOTAL" -gt 0 ] && [ "$REGRESSED" -gt $((TOTAL / 2)) ] && [ "$REGRESSED" -ge 3 ]; then
+            echo "Benchmark results: $REGRESSED regressed ($SIGNIFICANT >= 20%), $IMPROVED improved out of $TOTAL changed"
+            if [ "$TOTAL" -gt 0 ] && [ "$SIGNIFICANT" -gt $((TOTAL / 2)) ] && [ "$SIGNIFICANT" -ge 3 ]; then
               echo ""
               echo "============================================================"
-              echo "REGRESSION DETECTED: $REGRESSED/$TOTAL benchmarks regressed."
+              echo "REGRESSION DETECTED: $SIGNIFICANT/$TOTAL benchmarks regressed >= 20%."
               echo "Baseline and PR measured on the same runner."
               echo "============================================================"
               echo ""

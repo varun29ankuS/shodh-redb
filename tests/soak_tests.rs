@@ -1339,7 +1339,7 @@ fn soak_flash_backend() {
             Err(e) => {
                 // PreviousIo can occur when verify_integrity races with a
                 // concurrent writer on the flash backend. This is transient
-                // and not a data integrity issue — skip this iteration.
+                // and not a data integrity issue -- skip this iteration.
                 eprintln!(
                     "  [{:.1}s] flash verify_integrity transient error ({}), retrying next cycle",
                     start.elapsed().as_secs_f64(),
@@ -1356,7 +1356,7 @@ fn soak_flash_backend() {
 
     // Final full integrity check.
     // If the database was poisoned by PreviousIo (e.g., flash ran out of
-    // space despite generous provisioning), skip the final checks — the
+    // space despite generous provisioning), skip the final checks -- the
     // concurrent-loop checks already validated integrity at each cycle.
     match db.verify_integrity(VerifyLevel::Full) {
         Ok(report) => {

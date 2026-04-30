@@ -2,7 +2,7 @@
 
 ## Concurrency
 
-- **Single-writer, multiple-reader**: Only one write transaction can be active at a time. Multiple read transactions can run concurrently with a single writer. There is no multi-process support or file locking — opening the same database file from multiple processes causes corruption.
+- **Single-writer, multiple-reader**: Only one write transaction can be active at a time. Multiple read transactions can run concurrently with a single writer. File locking (`try_lock`/`try_lock_shared`) prevents the same process from opening a database twice and returns `DatabaseAlreadyOpen` on conflict. On platforms where file locks are unsupported (e.g., some network filesystems), the lock is silently skipped -- do not rely on file locking alone for multi-process safety.
 
 ## Durability
 
@@ -36,7 +36,7 @@
 
 - **System-aware default**: Default cache size is 25% of physical RAM, clamped to [16 MiB, 1 GiB]. Override with `Builder::set_cache_size()`.
 
-- **Fixed 90/10 read/write split**: The cache is split 90% read / 10% write. This ratio is not configurable at runtime.
+- **Dynamic 90/10 initial split**: The cache starts with a 90% read / 10% write partition. Total usage is enforced by a memory budget with cross-stripe eviction: when the write buffer grows under pressure, read-cache entries are evicted to stay within the configured size. Use `Builder::set_memory_budget()` for explicit 70/20/10 (read/write/overhead) partitioning.
 
 ## `no_std`
 

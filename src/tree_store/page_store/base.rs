@@ -191,6 +191,7 @@ pub(crate) trait Page {
 pub struct PageImpl {
     pub(super) mem: Arc<[u8]>,
     pub(super) page_number: PageNumber,
+    #[cfg(debug_assertions)]
     pub(super) open_pages: Arc<Mutex<HashMap<PageNumber, u64>>>,
 }
 
@@ -206,6 +207,7 @@ impl Debug for PageImpl {
     }
 }
 
+#[cfg(debug_assertions)]
 impl Drop for PageImpl {
     fn drop(&mut self) {
         let mut open_pages = self.open_pages.lock();

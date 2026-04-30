@@ -299,13 +299,11 @@ fn budget_none_default() {
     drop(table);
     drop(read_txn);
 
-    // Without a budget, used_bytes can be anything -- just verify it doesn't crash
-    // and that the database works correctly
+    // set_cache_size() now sets memory_budget, so the default builder always has a budget.
+    // Verify it is present and equals the default cache size.
     let stats = db.cache_stats();
-    // Default cache is 1 GiB, so 100 * 4096 bytes should fit easily
     let _ = stats.used_bytes();
-    // No budget set, so budget_bytes should be None
-    assert!(stats.budget_bytes().is_none());
+    assert!(stats.budget_bytes().is_some());
 }
 
 #[test]

@@ -6,9 +6,23 @@
 [![CI](https://github.com/varun29ankuS/shodh-redb/actions/workflows/ci.yml/badge.svg)](https://github.com/varun29ankuS/shodh-redb/actions)
 [![no_std](https://img.shields.io/badge/no__std-compatible-green)](https://doc.rust-lang.org/reference/names/preludes.html#the-no_std-attribute)
 
-**Embedded vector database for edge AI.** IVF-PQ search, blob storage, TTL, causal tracking, CDC -- ACID transactions, single file, `no_std` core, zero dependencies.
+**Embedded multi-modal database engine for edge AI.** Key-value, vector search (IVF-PQ), blob storage, TTL, merge operators, CDC, composite queries -- all in one ACID-transactional file with a `no_std` core.
 
 95% recall@1 at 1,000+ QPS on SIFT1M. 1.6--3x faster writes than LMDB, 2--3x faster reads than RocksDB. Single-threaded. 8 GB RAM. No GPU.
+
+### vs. alternatives
+
+| | shodh-redb | SQLite + sqlite-vec | LMDB | RocksDB | Qdrant |
+|---|:---:|:---:|:---:|:---:|:---:|
+| KV transactions | ACID | ACID | ACID | -- | -- |
+| Vector search | IVF-PQ | flat scan | -- | -- | HNSW |
+| Blob storage | built-in | external | -- | -- | -- |
+| TTL / expiration | per-key | manual | -- | TTL CF | -- |
+| CDC | built-in | triggers | -- | -- | -- |
+| Merge operators | built-in | -- | -- | built-in | -- |
+| `no_std` / wasm | core lib | -- | -- | -- | -- |
+| Deployment | embed | embed | embed | embed | server |
+| File format | single file | single file | single file | LSM dir | server |
 
 ```toml
 [dependencies]
@@ -30,9 +44,10 @@ Every edge vector database (sqlite-vec, LanceDB, Qdrant) bolts vector search ont
 
 One binary. One file. ACID crash-safe.
 
-> **Single-process only.** shodh-redb does not implement file locking. Opening the same database
-> file from multiple processes simultaneously **will corrupt your data**. Use a single server
-> process or filesystem-level locking if multi-process access is needed.
+> **Single-process recommended.** shodh-redb uses `try_lock`/`try_lock_shared` to prevent the
+> same process from opening a database twice (returns `DatabaseAlreadyOpen`). However, on
+> platforms where file locks are unsupported (e.g., some network filesystems), the lock is
+> silently skipped. Multi-process access to the same file is not supported and will corrupt data.
 
 ---
 
@@ -207,7 +222,7 @@ On little-endian targets (x86, ARM LE, RISC-V LE), `FixedVec` and `DynVec` use b
 
 The core library compiles with `#![no_std]` (disable the `std` feature). Vector types, distance functions, quantization, IVF-PQ indexing, and the B-tree engine all work without the standard library. Targets: wasm32, ARM Cortex-M, RISC-V bare metal.
 
-The `std` feature adds file backends, TTL tables, group commit, and runtime SIMD dispatch.
+The `std` feature adds file backends, TTL tables, group commit, and runtime SIMD dispatch. A flash translation layer (FTL) backend supports raw NOR/NAND flash on embedded targets without a filesystem.
 
 ---
 

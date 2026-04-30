@@ -2,7 +2,7 @@
 
 ## Concurrency
 
-- **Single-writer, multiple-reader**: Only one write transaction can be active at a time. Multiple read transactions can run concurrently with a single writer. There is no multi-process support or file locking — opening the same database file from multiple processes causes corruption.
+- **Single-writer, multiple-reader**: Only one write transaction can be active at a time. Multiple read transactions can run concurrently with a single writer. File locking (`try_lock`/`try_lock_shared`) prevents the same process from opening a database twice and returns `DatabaseAlreadyOpen` on conflict. On platforms where file locks are unsupported (e.g., some network filesystems), the lock is silently skipped -- do not rely on file locking alone for multi-process safety.
 
 ## Durability
 

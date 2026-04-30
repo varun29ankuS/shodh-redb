@@ -39,3 +39,7 @@ crates/*/target/
 
 # Local audit docs (not for GitHub)
 AUDIT_PLAYBOOK.md
+
+# Benchmark datasets (SIFT1M and similar). Cargo.toml already excludes
+# these from publication; this prevents accidental git commits too.
+/data/

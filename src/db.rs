@@ -2958,11 +2958,15 @@ impl Builder {
     }
 
     /// Set the amount of memory (in bytes) used for caching data
+    ///
+    /// The budget is enforced dynamically: when total cache usage exceeds `bytes`,
+    /// cross-stripe eviction reclaims read-cache entries. The initial partition is
+    /// 90% read / 10% write, but the write buffer can temporarily borrow from the
+    /// read partition under pressure.
     pub fn set_cache_size(&mut self, bytes: usize) -> &mut Self {
-        // Design: cache size is fixed at open time. Dynamic resizing would require
-        // lock-free LRU shard resizing and is deferred to a future release.
         self.read_cache_size_bytes = bytes / 10 * 9;
         self.write_cache_size_bytes = bytes / 10;
+        self.memory_budget = Some(bytes);
         self
     }
 

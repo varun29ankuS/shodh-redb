@@ -139,7 +139,9 @@ pub(crate) struct TransactionalMemory {
     #[cfg(debug_assertions)]
     open_dirty_pages: Arc<Mutex<HashSet<PageNumber>>>,
     // Reference counts of PageImpls that are outstanding.
-    // Used by try_free_if_unpersisted to prevent freeing pages with active readers.
+    // Debug-only: used to catch use-after-free in development. In release builds,
+    // freeing a page with active readers is safe because PageImpl holds Arc<[u8]>.
+    #[cfg(debug_assertions)]
     read_page_ref_counts: Arc<Mutex<HashMap<PageNumber, u64>>>,
     // Set of all allocated pages for debugging assertions
     #[cfg(debug_assertions)]
@@ -398,6 +400,7 @@ impl TransactionalMemory {
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
             open_dirty_pages: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(debug_assertions)]
             read_page_ref_counts: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(debug_assertions)]
             allocated_pages: Arc::new(Mutex::new(Default::default())),
@@ -509,6 +512,7 @@ impl TransactionalMemory {
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
             open_dirty_pages: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(debug_assertions)]
             read_page_ref_counts: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(debug_assertions)]
             allocated_pages: Arc::new(Mutex::new(Default::default())),
@@ -1325,17 +1329,19 @@ impl TransactionalMemory {
             }
         }
 
-        // Increment ref count unconditionally -- used by try_free_if_unpersisted
-        // to prevent freeing pages with active readers.
-        *(self
-            .read_page_ref_counts
-            .lock()
-            .entry(page_number)
-            .or_default()) += 1;
+        #[cfg(debug_assertions)]
+        {
+            *(self
+                .read_page_ref_counts
+                .lock()
+                .entry(page_number)
+                .or_default()) += 1;
+        }
 
         Ok(PageImpl {
             mem,
             page_number,
+            #[cfg(debug_assertions)]
             open_pages: self.read_page_ref_counts.clone(),
         })
     }
@@ -1439,7 +1445,8 @@ impl TransactionalMemory {
     /// references (concurrent readers hold `PageImpl` handles), in which case
     /// the page is NOT freed and the caller should defer the free to a later
     /// commit.
-    #[allow(dead_code)] // Will be removed in MVCC cleanup phase
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
     pub(crate) fn try_free(
         &self,
         page: PageNumber,

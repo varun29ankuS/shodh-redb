@@ -83,6 +83,16 @@ jobs:
             args: "--all --all-targets --all-features"
           - name: no-features
             args: "--all --all-targets --no-default-features"
+          # Release-mode variants catch bugs that debug-only assertions or
+          # cfg(debug_assertions)-gated fields hide. Without these, code that
+          # references a debug-only field outside a cfg gate compiles cleanly
+          # in debug CI but breaks at the user's release build.
+          - name: release-default
+            args: "--release --all --all-targets"
+          - name: release-all-features
+            args: "--release --all --all-targets --all-features"
+          - name: release-no-features
+            args: "--release --all --all-targets --no-default-features"
           - name: wasm32
             args: ""
             wasm: true
@@ -332,6 +342,14 @@ jobs:
             args: "--features compression_lz4"
           - name: compression_zstd
             args: "--features compression_zstd"
+          # Run the full test suite in release mode at least once to catch
+          # runtime divergence between debug and release builds (e.g. removed
+          # debug_assert!s exposing latent off-by-one logic, or release-only
+          # codegen issues in unsafe blocks).
+          - name: release
+            args: "--release"
+          - name: release-all-features
+            args: "--release --all-features"
     steps:
       - uses: actions/checkout@v4
 

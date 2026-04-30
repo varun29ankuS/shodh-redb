@@ -1973,6 +1973,8 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
     }
 }
 
+impl<K: Key, V: Key> Sealed for ReadOnlyMultimapTable<K, V> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2020,7 +2022,7 @@ mod tests {
         ));
     }
 
-    /// A correctly-sized SubtreeV2 payload still validates and decodes.
+    /// A correctly-sized `SubtreeV2` payload still validates and decodes.
     #[test]
     fn collection_type_valid_subtree_ok() {
         let bytes = UntypedDynamicCollection::make_subtree_data(BtreeHeader::new(
@@ -2034,5 +2036,3 @@ mod tests {
         let _ = coll.as_subtree();
     }
 }
-
-impl<K: Key, V: Key> Sealed for ReadOnlyMultimapTable<K, V> {}

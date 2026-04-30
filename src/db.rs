@@ -1338,11 +1338,11 @@ impl Database {
             txn.commit().map_err(|e| e.into_storage_error())?;
             let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
             if txn.pending_free_pages()? {
-            return Err(StorageError::Internal(
-                "compaction: pending free pages remain after exclusive durable commit".into(),
-            )
-            .into());
-        }
+                return Err(StorageError::Internal(
+                    "compaction: pending free pages remain after exclusive durable commit".into(),
+                )
+                .into());
+            }
             txn.abort()?;
 
             if !progress {

@@ -32,9 +32,7 @@ impl RegionTracker {
     pub(super) fn to_vec(&self) -> crate::Result<Vec<u8>> {
         let mut result = vec![];
         let orders: u32 = u32::try_from(self.order_trackers.len()).map_err(|_| {
-            crate::StorageError::Internal(
-                "RegionTracker: order count exceeds u32 range".into(),
-            )
+            crate::StorageError::Internal("RegionTracker: order count exceeds u32 range".into())
         })?;
         let vecs: Vec<Vec<u8>> = self
             .order_trackers
@@ -144,9 +142,7 @@ impl RegionTracker {
     }
 
     fn len(&self) -> u32 {
-        self.order_trackers
-            .first()
-            .map_or(0, |t| t.len())
+        self.order_trackers.first().map_or(0, |t| t.len())
     }
 }
 
@@ -250,12 +246,11 @@ impl Allocators {
                     }
                     if new_region.num_pages() != allocator.len() {
                         allocator.resize(new_region.num_pages())?;
-                        let highest_free =
-                            allocator.highest_free_order().ok_or_else(|| {
-                                crate::StorageError::Corrupted(
-                                    "Allocators::resize_to: no free order after resize".into(),
-                                )
-                            })?;
+                        let highest_free = allocator.highest_free_order().ok_or_else(|| {
+                            crate::StorageError::Corrupted(
+                                "Allocators::resize_to: no free order after resize".into(),
+                            )
+                        })?;
                         self.region_tracker.mark_free(highest_free, i)?;
                     }
                 } else {

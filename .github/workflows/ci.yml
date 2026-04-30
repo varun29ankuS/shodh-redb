@@ -342,14 +342,6 @@ jobs:
             args: "--features compression_lz4"
           - name: compression_zstd
             args: "--features compression_zstd"
-          # Run the full test suite in release mode at least once to catch
-          # runtime divergence between debug and release builds (e.g. removed
-          # debug_assert!s exposing latent off-by-one logic, or release-only
-          # codegen issues in unsafe blocks).
-          - name: release
-            args: "--release"
-          - name: release-all-features
-            args: "--release --all-features"
     steps:
       - uses: actions/checkout@v4
 

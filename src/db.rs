@@ -1291,7 +1291,12 @@ impl Database {
         // There can't be any outstanding transactions because we have a `&mut self`, so all pending free pages
         // should have been cleared out by the above commit()
         let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-        assert!(!txn.pending_free_pages()?);
+        if txn.pending_free_pages()? {
+            return Err(StorageError::Internal(
+                "compaction: pending free pages remain after exclusive durable commit".into(),
+            )
+            .into());
+        }
         txn.abort()?;
 
         let mut compacted = false;
@@ -1332,7 +1337,12 @@ impl Database {
             txn.set_shrink_policy(ShrinkPolicy::Maximum);
             txn.commit().map_err(|e| e.into_storage_error())?;
             let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-            assert!(!txn.pending_free_pages()?);
+            if txn.pending_free_pages()? {
+                return Err(StorageError::Internal(
+                    "compaction: pending free pages remain after exclusive durable commit".into(),
+                )
+                .into());
+            }
             txn.abort()?;
 
             if !progress {

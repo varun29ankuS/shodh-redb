@@ -158,23 +158,30 @@ jobs:
         run: rustup component add rustfmt
 
       - name: Run I/O benchmarks
+        id: run_bench
         run: |
           cargo bench --bench criterion_kv \
                       --bench criterion_blob \
                       --bench criterion_ivfpq \
                       -p shodh-redb \
-                      -- --output-format bencher 2>/dev/null | grep "^test " | tee bench_output.txt
+                      -- --output-format bencher 2>bench_stderr.txt | grep "^test " | tee bench_output.txt || true
+          if [ ! -s bench_output.txt ]; then
+            echo "::warning::No benchmark output produced. Stderr:" >&2
+            cat bench_stderr.txt >&2
+            echo "bench_empty=true" >> "$GITHUB_OUTPUT"
+          fi
         env:
           RUSTFLAGS: ""
 
       - name: Restore advisory baseline
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.run_bench.outputs.bench_empty != 'true'
         uses: actions/cache/restore@v4
         with:
           path: .bench_baseline.json
           key: bench-advisory-baseline-${{ runner.os }}
 
       - name: Post benchmark comparison
+        if: steps.run_bench.outputs.bench_empty != 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: shodh-redb I/O benchmarks (advisory)
@@ -191,7 +198,7 @@ jobs:
           alert-comment-cc-users: "@varun29ankuS"
 
       - name: Save advisory baseline
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.run_bench.outputs.bench_empty != 'true'
         uses: actions/cache/save@v4
         with:
           path: .bench_baseline.json

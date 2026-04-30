@@ -81,11 +81,22 @@ impl Codebooks {
     /// Decode PQ codes back to an approximate vector.
     ///
     /// Reconstructs the vector by concatenating the codebook centroids
-    /// indicated by each code byte.
+    /// indicated by each code byte. Returns an empty `Vec` if `codes.len()`
+    /// does not exactly match `num_subvectors`, which would otherwise produce
+    /// a silently truncated reconstruction.
     pub fn decode(&self, codes: &[u8]) -> Vec<f32> {
+        if codes.len() != self.num_subvectors {
+            return Vec::new();
+        }
         let mut vector = Vec::with_capacity(self.num_subvectors * self.sub_dim);
         for (m, &code) in codes.iter().enumerate() {
-            vector.extend_from_slice(self.centroid(m, code as usize));
+            let centroid = self.centroid(m, code as usize);
+            if centroid.len() != self.sub_dim {
+                // Codebook data is short -- bail out rather than emit a
+                // truncated vector.
+                return Vec::new();
+            }
+            vector.extend_from_slice(centroid);
         }
         vector
     }
@@ -95,12 +106,27 @@ impl Codebooks {
         self.num_subvectors * 256 * self.sub_dim
     }
 
-    /// Serialize all codebooks to bytes (f32 little-endian).
+    /// Serialize a single codebook to bytes (f32 little-endian).
     ///
     /// Each codebook `m` is serialized as `256 * sub_dim * 4` bytes.
+    /// Returns an empty `Vec` if `m >= num_subvectors` or if the underlying
+    /// codebook data is short, instead of panicking on out-of-bounds access.
     pub fn serialize_codebook(&self, m: usize) -> Vec<u8> {
-        let start = m * 256 * self.sub_dim;
-        let end = start + 256 * self.sub_dim;
+        if m >= self.num_subvectors {
+            return Vec::new();
+        }
+        let Some(start) = m.checked_mul(256).and_then(|v| v.checked_mul(self.sub_dim)) else {
+            return Vec::new();
+        };
+        let Some(end) = (256usize)
+            .checked_mul(self.sub_dim)
+            .and_then(|len| start.checked_add(len))
+        else {
+            return Vec::new();
+        };
+        if end > self.data.len() {
+            return Vec::new();
+        }
         let floats = &self.data[start..end];
         let mut bytes = Vec::with_capacity(floats.len() * 4);
         for &f in floats {
@@ -311,5 +337,66 @@ mod tests {
         let floats = Codebooks::deserialize_codebook(&bytes, 4);
         assert_eq!(floats.len(), 256 * 4);
         assert!((floats[0] - 1.0).abs() < 1e-6);
+    }
+
+    /// Regression: `serialize_codebook(m)` must not panic when `m` is out of
+    /// range. Previously did unchecked slicing on `self.data`.
+    #[test]
+    fn serialize_codebook_out_of_range_returns_empty() {
+        let codebooks = Codebooks {
+            data: [1.0_f32; 256 * 4].to_vec(),
+            num_subvectors: 1,
+            sub_dim: 4,
+        };
+        // m == num_subvectors is out of range
+        assert!(codebooks.serialize_codebook(1).is_empty());
+        // far out of range
+        assert!(codebooks.serialize_codebook(usize::MAX).is_empty());
+    }
+
+    /// Regression: `serialize_codebook` must not panic when the codebook data
+    /// is shorter than the declared `num_subvectors * 256 * sub_dim`.
+    #[test]
+    fn serialize_codebook_short_data_returns_empty() {
+        let codebooks = Codebooks {
+            data: vec![1.0_f32; 10], // way too short for declared dims
+            num_subvectors: 2,
+            sub_dim: 4,
+        };
+        assert!(codebooks.serialize_codebook(0).is_empty());
+        assert!(codebooks.serialize_codebook(1).is_empty());
+    }
+
+    /// Regression: `decode` must not silently truncate when the code length
+    /// disagrees with `num_subvectors`. Previously, longer-than-expected codes
+    /// produced a truncated reconstruction; shorter ones produced a partial
+    /// vector with no error indication.
+    #[test]
+    fn decode_wrong_length_returns_empty() {
+        let codebooks = Codebooks {
+            data: [1.0_f32; 256 * 4 * 2].to_vec(), // 2 subvecs, sub_dim=4
+            num_subvectors: 2,
+            sub_dim: 4,
+        };
+        // Too short
+        assert!(codebooks.decode(&[0]).is_empty());
+        // Too long
+        assert!(codebooks.decode(&[0, 0, 0]).is_empty());
+        // Exactly right -- non-empty
+        let v = codebooks.decode(&[0, 0]);
+        assert_eq!(v.len(), 8);
+    }
+
+    /// Regression: `decode` must not produce a truncated vector when codebook
+    /// data is short relative to the declared shape.
+    #[test]
+    fn decode_short_codebook_data_returns_empty() {
+        let codebooks = Codebooks {
+            data: vec![1.0_f32; 10], // too short
+            num_subvectors: 2,
+            sub_dim: 4,
+        };
+        // codes match num_subvectors, but centroid lookup will fail
+        assert!(codebooks.decode(&[0, 0]).is_empty());
     }
 }

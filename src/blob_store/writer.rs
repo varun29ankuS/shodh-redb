@@ -3,6 +3,7 @@ use crate::blob_store::types::{
     BLOB_CHUNK_SIZE, BlobId, BlobMeta, BlobRef, ContentType, Sha256Key, StoreOptions,
 };
 use crate::tree_store::{Xxh3StreamHasher, hash64_with_seed};
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
@@ -126,7 +127,15 @@ impl<'txn> BlobWriter<'txn> {
         }
         self.txn
             .blob_write_chunk(self.sequence, self.next_chunk_index, &self.chunk_buf)?;
-        self.next_chunk_index += 1;
+        // Guard against u32 wrap-around at extreme blob sizes
+        // (u32::MAX * BLOB_CHUNK_SIZE ~ 256 TiB). Wrapping silently would
+        // corrupt chunk ordering, so reject the write instead.
+        self.next_chunk_index = self.next_chunk_index.checked_add(1).ok_or_else(|| {
+            crate::StorageError::Internal(format!(
+                "blob chunk index overflow at sequence {}: exceeded u32::MAX chunks",
+                self.sequence
+            ))
+        })?;
         self.chunk_buf.clear();
         Ok(())
     }

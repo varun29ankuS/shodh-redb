@@ -31,13 +31,24 @@ impl RegionTracker {
     // data: BtreeBitmap data for each order
     pub(super) fn to_vec(&self) -> crate::Result<Vec<u8>> {
         let mut result = vec![];
-        let orders: u32 = self.order_trackers.len().try_into().unwrap();
+        let orders: u32 = u32::try_from(self.order_trackers.len()).map_err(|_| {
+            crate::StorageError::Internal(
+                "RegionTracker: order count exceeds u32 range".into(),
+            )
+        })?;
         let vecs: Vec<Vec<u8>> = self
             .order_trackers
             .iter()
             .map(|x| x.to_vec())
             .collect::<crate::Result<Vec<_>>>()?;
-        let allocator_lens: Vec<u32> = vecs.iter().map(|v| v.len().try_into().unwrap()).collect();
+        let mut allocator_lens = Vec::with_capacity(vecs.len());
+        for v in &vecs {
+            allocator_lens.push(u32::try_from(v.len()).map_err(|_| {
+                crate::StorageError::Internal(
+                    "RegionTracker: allocator length exceeds u32 range".into(),
+                )
+            })?);
+        }
         result.extend(orders.to_le_bytes());
         for allocator_len in allocator_lens {
             result.extend(allocator_len.to_le_bytes());
@@ -95,24 +106,35 @@ impl RegionTracker {
     }
 
     pub(crate) fn find_free(&self, order: u8) -> Option<u32> {
-        self.order_trackers[order as usize].find_first_unset()
+        self.order_trackers
+            .get(order as usize)
+            .and_then(|tracker| tracker.find_first_unset())
     }
 
-    pub(crate) fn mark_free(&mut self, order: u8, region: u32) {
+    pub(crate) fn mark_free(&mut self, order: u8, region: u32) -> crate::Result<()> {
         let order: usize = order.into();
+        if order >= self.order_trackers.len() {
+            return Err(crate::StorageError::Corrupted(
+                "RegionTracker::mark_free: order exceeds tracker count".into(),
+            ));
+        }
         for i in 0..=order {
-            // Region tracker is always sized to fit all regions; indices are valid.
-            self.order_trackers[i].clear(region).unwrap();
+            self.order_trackers[i].clear(region)?;
         }
+        Ok(())
     }
 
-    pub(crate) fn mark_full(&mut self, order: u8, region: u32) {
+    pub(crate) fn mark_full(&mut self, order: u8, region: u32) -> crate::Result<()> {
         let order: usize = order.into();
-        assert!(order < self.order_trackers.len());
-        for i in order..self.order_trackers.len() {
-            // Region tracker is always sized to fit all regions; indices are valid.
-            self.order_trackers[i].set(region).unwrap();
+        if order >= self.order_trackers.len() {
+            return Err(crate::StorageError::Corrupted(
+                "RegionTracker::mark_full: order exceeds tracker count".into(),
+            ));
         }
+        for i in order..self.order_trackers.len() {
+            self.order_trackers[i].set(region)?;
+        }
+        Ok(())
     }
 
     fn resize(&mut self, new_capacity: u32) {
@@ -122,7 +144,9 @@ impl RegionTracker {
     }
 
     fn len(&self) -> u32 {
-        self.order_trackers[0].len()
+        self.order_trackers
+            .first()
+            .map_or(0, |t| t.len())
     }
 }
 
@@ -132,7 +156,7 @@ pub(super) struct Allocators {
 }
 
 impl Allocators {
-    pub(super) fn new(layout: DatabaseLayout) -> Self {
+    pub(super) fn new(layout: DatabaseLayout) -> crate::Result<Self> {
         let mut region_allocators = vec![];
         let initial_regions = max(INITIAL_REGIONS, layout.num_regions());
         let mut region_tracker = RegionTracker::new(initial_regions, MAX_MAX_PAGE_ORDER + 1);
@@ -143,14 +167,14 @@ impl Allocators {
                 layout.full_region_layout().num_pages(),
             );
             let max_order = allocator.get_max_order();
-            region_tracker.mark_free(max_order, i);
+            region_tracker.mark_free(max_order, i)?;
             region_allocators.push(allocator);
         }
 
-        Self {
+        Ok(Self {
             region_tracker,
             region_allocators,
-        }
+        })
     }
 
     pub(crate) fn xxh3_hash(&self) -> u128 {
@@ -167,7 +191,11 @@ impl Allocators {
         let shrink = match (new_layout.num_regions() as usize).cmp(&self.region_allocators.len()) {
             cmp::Ordering::Less => true,
             cmp::Ordering::Equal => {
-                let allocator = self.region_allocators.last().unwrap();
+                let allocator = self.region_allocators.last().ok_or_else(|| {
+                    crate::StorageError::Corrupted(
+                        "Allocators::resize_to: no region allocators present".into(),
+                    )
+                })?;
                 let last_region = new_layout
                     .trailing_region_layout()
                     .unwrap_or_else(|| new_layout.full_region_layout());
@@ -185,8 +213,13 @@ impl Allocators {
 
         if shrink {
             // Drop all regions that were removed
-            for i in new_layout.num_regions()..(self.region_allocators.len().try_into().unwrap()) {
-                self.region_tracker.mark_full(0, i);
+            let old_count = u32::try_from(self.region_allocators.len()).map_err(|_| {
+                crate::StorageError::Internal(
+                    "Allocators::resize_to: region count exceeds u32 range".into(),
+                )
+            })?;
+            for i in new_layout.num_regions()..old_count {
+                self.region_tracker.mark_full(0, i)?;
             }
             self.region_allocators
                 .drain((new_layout.num_regions() as usize)..);
@@ -195,7 +228,11 @@ impl Allocators {
             let last_region = new_layout
                 .trailing_region_layout()
                 .unwrap_or_else(|| new_layout.full_region_layout());
-            let allocator = self.region_allocators.last_mut().unwrap();
+            let allocator = self.region_allocators.last_mut().ok_or_else(|| {
+                crate::StorageError::Corrupted(
+                    "Allocators::resize_to: no region allocators after drain".into(),
+                )
+            })?;
             if allocator.len() > last_region.num_pages() {
                 allocator.resize(last_region.num_pages())?;
             }
@@ -205,11 +242,21 @@ impl Allocators {
                 let new_region = new_layout.region_layout(i);
                 if (i as usize) < old_num_regions {
                     let allocator = &mut self.region_allocators[i as usize];
-                    assert!(new_region.num_pages() >= allocator.len());
+                    if new_region.num_pages() < allocator.len() {
+                        return Err(crate::StorageError::Corrupted(
+                            "Allocators::resize_to: new region smaller than existing allocator"
+                                .into(),
+                        ));
+                    }
                     if new_region.num_pages() != allocator.len() {
                         allocator.resize(new_region.num_pages())?;
-                        let highest_free = allocator.highest_free_order().unwrap();
-                        self.region_tracker.mark_free(highest_free, i);
+                        let highest_free =
+                            allocator.highest_free_order().ok_or_else(|| {
+                                crate::StorageError::Corrupted(
+                                    "Allocators::resize_to: no free order after resize".into(),
+                                )
+                            })?;
+                        self.region_tracker.mark_free(highest_free, i)?;
                     }
                 } else {
                     // brand new region
@@ -217,11 +264,15 @@ impl Allocators {
                         new_region.num_pages(),
                         new_layout.full_region_layout().num_pages(),
                     );
-                    let highest_free = allocator.highest_free_order().unwrap();
+                    let highest_free = allocator.highest_free_order().ok_or_else(|| {
+                        crate::StorageError::Corrupted(
+                            "Allocators::resize_to: new region has no free pages".into(),
+                        )
+                    })?;
                     if i >= self.region_tracker.len() {
                         self.region_tracker.resize(i + 1);
                     }
-                    self.region_tracker.mark_free(highest_free, i);
+                    self.region_tracker.mark_free(highest_free, i)?;
                     self.region_allocators.push(allocator);
                 }
             }

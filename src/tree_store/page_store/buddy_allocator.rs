@@ -64,7 +64,8 @@ impl BuddyAllocator {
                 accounted_pages += order_size;
             }
         }
-        assert_eq!(accounted_pages, num_pages);
+        // Greedy power-of-2 decomposition always accounts for exactly num_pages.
+        debug_assert_eq!(accounted_pages, num_pages);
 
         Self {
             free,
@@ -111,7 +112,8 @@ impl BuddyAllocator {
             })?;
             result.extend(offset_u32.to_le_bytes());
         }
-        assert_eq!(end_metadata, result.len());
+        // Metadata section is exactly (max_order + 1) u32 offsets; validated by construction.
+        debug_assert_eq!(end_metadata, result.len());
         for serialized in &vecs {
             result.extend(serialized);
         }

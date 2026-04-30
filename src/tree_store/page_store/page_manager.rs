@@ -96,9 +96,9 @@ struct InMemoryState {
 }
 
 impl InMemoryState {
-    fn new(header: DatabaseHeader) -> Self {
-        let allocators = Allocators::new(header.layout());
-        Self { header, allocators }
+    fn new(header: DatabaseHeader) -> Result<Self> {
+        let allocators = Allocators::new(header.layout())?;
+        Ok(Self { header, allocators })
     }
 
     fn get_region(&self, region: u32) -> &BuddyAllocator {
@@ -386,7 +386,7 @@ impl TransactionalMemory {
             }
         };
 
-        let state = InMemoryState::new(header);
+        let state = InMemoryState::new(header)?;
 
         debug_assert!(page_size >= DB_HEADER_SIZE);
 
@@ -499,7 +499,7 @@ impl TransactionalMemory {
         }
         let actual_region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
-        let state = InMemoryState::new(header);
+        let state = InMemoryState::new(header)?;
 
         let mem = Self {
             allocated_since_commit: Mutex::new(Default::default()),
@@ -771,7 +771,7 @@ impl TransactionalMemory {
 
     pub(crate) fn begin_repair(&self) -> Result<()> {
         let mut state = self.state.lock();
-        state.allocators = Allocators::new(state.header.layout());
+        state.allocators = Allocators::new(state.header.layout())?;
         #[cfg(debug_assertions)]
         self.allocated_pages.lock().clear();
 
@@ -1264,7 +1264,7 @@ impl TransactionalMemory {
             let region_index = page_number.region;
             state
                 .get_region_tracker_mut()
-                .mark_free(page_number.page_order, region_index);
+                .mark_free(page_number.page_order, region_index)?;
             state
                 .get_region_mut(region_index)
                 .free(page_number.page_index, page_number.page_order)?;
@@ -1493,7 +1493,7 @@ impl TransactionalMemory {
         // Ensure that the region is marked as having free space
         state
             .get_region_tracker_mut()
-            .mark_free(page.page_order, region_index);
+            .mark_free(page.page_order, region_index)?;
 
         let address_range = page.address_range(
             self.page_size.into(),
@@ -1630,7 +1630,7 @@ impl TransactionalMemory {
             // Mark the region, if it's full
             state
                 .get_region_tracker_mut()
-                .mark_full(required_order, candidate_region);
+                .mark_full(required_order, candidate_region)?;
         }
     }
 

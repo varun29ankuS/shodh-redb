@@ -1,6 +1,6 @@
+use crate::compat::Mutex;
 #[cfg(debug_assertions)]
-use crate::compat::HashSet;
-use crate::compat::{HashMap, Mutex};
+use crate::compat::{HashMap, HashSet};
 use crate::db::{ReadVerification, ReadVerificationAction, ReadVerificationCallback};
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};

@@ -1,4 +1,6 @@
-use crate::compat::{HashMap, HashSet, Mutex};
+use crate::compat::HashSet;
+#[cfg(debug_assertions)]
+use crate::compat::{HashMap, Mutex};
 use crate::tree_store::page_store::cached_file::WritablePage;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use alloc::sync::Arc;
@@ -233,10 +235,19 @@ impl Page for PageImpl {
 
 impl Clone for PageImpl {
     fn clone(&self) -> Self {
-        *self.open_pages.lock().entry(self.page_number).or_insert(0) += 1;
+        // Debug-only ref-count bookkeeping: the `open_pages` field exists only
+        // under `cfg(debug_assertions)`. The Drop impl above is similarly
+        // gated, so this Clone must match it. In release builds, Arc<[u8]>
+        // already keeps the page memory alive after a free; the bookkeeping
+        // is a debug-time use-after-free detector, not a correctness primitive.
+        #[cfg(debug_assertions)]
+        {
+            *self.open_pages.lock().entry(self.page_number).or_insert(0) += 1;
+        }
         Self {
             mem: self.mem.clone(),
             page_number: self.page_number,
+            #[cfg(debug_assertions)]
             open_pages: self.open_pages.clone(),
         }
     }

@@ -83,6 +83,16 @@ jobs:
             args: "--all --all-targets --all-features"
           - name: no-features
             args: "--all --all-targets --no-default-features"
+          # Release-mode variants catch bugs that debug-only assertions or
+          # cfg(debug_assertions)-gated fields hide. Without these, code that
+          # references a debug-only field outside a cfg gate compiles cleanly
+          # in debug CI but breaks at the user's release build.
+          - name: release-default
+            args: "--release --all --all-targets"
+          - name: release-all-features
+            args: "--release --all --all-targets --all-features"
+          - name: release-no-features
+            args: "--release --all --all-targets --no-default-features"
           - name: wasm32
             args: ""
             wasm: true

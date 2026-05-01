@@ -31,6 +31,28 @@ shodh-redb = "0.4"
 
 ---
 
+## When to choose shodh-redb
+
+shodh-redb occupies a specific niche: **embedded Rust applications that need KV + vector search + blob storage in a single ACID-transactional process**. It is not a drop-in replacement for any single tool above; it replaces *combinations* of them.
+
+**Choose shodh-redb when:**
+- You need vector similarity search and KV in the same process, and you do not want to compose `RocksDB + FAISS` (or `LMDB + hnswlib`) yourself.
+- You ship a single Rust binary and want to avoid a C++ dependency or a separate vector-database service.
+- You target embedded / `no_std` / `wasm32` and need a real B-tree, not a sled-style log.
+- Your workload is read-heavy or read/write balanced at single-host scale (gigabytes to low terabytes).
+- You want a small, auditable codebase (~50K LOC core) instead of a 600K-LOC C++ project.
+
+**Choose something else when:**
+- **You need RocksDB's write-optimized LSM**: shodh-redb is a B-tree. For sustained 100K+ writes/sec at multi-terabyte scale, RocksDB's LSM architecture wins by design.
+- **You need multiple writer processes** or shared-database concurrency. shodh-redb is single-process, single-writer (`try_lock` enforced). Use a server database (Postgres, Qdrant, MongoDB) instead.
+- **You need state-of-the-art ANN recall**. IVF-PQ is a solid baseline; for graph indexes (HNSW, DiskANN) at the recall/latency frontier, use Qdrant, Milvus, or FAISS directly.
+- **You need a query language** (SQL, Cypher). shodh-redb is a programmatic API.
+- **You require Jepsen-grade crash-safety evidence**. The B-tree engine inherits redb's COW + checksum design, but no formal linearizability tests have been published.
+
+The published benchmark numbers (1.6–3× writes vs LMDB, 2–3× reads vs RocksDB) are at single-host, single-thread, 5M-key scale on the workloads in `crates/redb-bench`. They are real, reproducible micro-benchmarks -- not extrapolations to RocksDB's strong regime (large-scale, write-heavy, concurrent).
+
+---
+
 ## Why shodh-redb?
 
 Every edge vector database (sqlite-vec, LanceDB, Qdrant) bolts vector search onto a storage engine that wasn't designed for it. shodh-redb builds both from the same B-tree:
@@ -226,6 +248,32 @@ The `std` feature adds file backends, TTL tables, group commit, and runtime SIMD
 
 ---
 
+## Compression
+
+Value-level compression is built in via two algorithms, off by default and selected per database:
+
+| Algorithm | Cargo feature | Crate | When to use |
+|---|---|---|---|
+| LZ4 | `compression_lz4` | [`lz4_flex`](https://crates.io/crates/lz4_flex) | Latency-sensitive workloads -- LZ4 prioritizes decompression speed over ratio |
+| zstd | `compression_zstd` | [`zstd`](https://crates.io/crates/zstd) | Storage-bound or cold data -- better compression ratio at higher CPU cost (level 1-22, default 3) |
+| Both | `compression` | -- | Build with both available, choose at database open time |
+
+```toml
+[dependencies]
+shodh-redb = { version = "0.4", features = ["compression_lz4"] }
+# or: features = ["compression_zstd"]
+# or: features = ["compression"]    # both
+```
+
+**Why off by default:**
+- `no_std` / embedded targets (Cortex-M, wasm32) often cannot pull in `zstd`
+- Adds CPU on every value insert and read; not always a win
+- Smaller default dependency tree, faster compile, smaller attack surface
+
+Compression operates at the value level: each value is compressed *before* entering the B-tree, with a self-describing 5-byte envelope (1-byte flags + 4-byte original size). Values that don't shrink are stored raw with zero envelope overhead. The chosen algorithm is recorded in the database header and validated on open -- a database written with `compression_zstd` will refuse to open without that feature.
+
+---
+
 ## Feature flags
 
 | Flag | Default | Description |
@@ -233,9 +281,9 @@ The `std` feature adds file backends, TTL tables, group commit, and runtime SIMD
 | `std` | Yes | File backends, group commit, TTL, SIMD dispatch |
 | `logging` | No | `log` crate integration |
 | `cache_metrics` | No | Cache hit/miss counters |
-| `compression_lz4` | No | LZ4 page compression |
-| `compression_zstd` | No | Zstandard page compression |
-| `compression` | No | All compression algorithms |
+| `compression_lz4` | No | LZ4 value compression (see [Compression](#compression)) |
+| `compression_zstd` | No | Zstandard value compression (see [Compression](#compression)) |
+| `compression` | No | Enable both LZ4 and zstd |
 
 ---
 

@@ -736,18 +736,40 @@ impl<V: Key> DynamicCollection<V> {
     }
 
     fn collection_type(&self) -> crate::Result<DynamicCollectionType> {
-        DynamicCollectionType::try_from_byte(self.data[0])
+        let type_byte = *self
+            .data
+            .first()
+            .ok_or_else(|| StorageError::Corrupted("empty DynamicCollection value".to_string()))?;
+        let ct = DynamicCollectionType::try_from_byte(type_byte)?;
+        // Validate that the payload is long enough for the indicated type so
+        // that downstream accessors (`as_subtree`, `get_num_values`) cannot
+        // panic on a truncated/corrupted value.
+        if let SubtreeV2 = ct {
+            let required = 1 + BtreeHeader::serialized_size();
+            if self.data.len() < required {
+                return Err(StorageError::Corrupted(format!(
+                    "DynamicCollection SubtreeV2 truncated: {} bytes, need {}",
+                    self.data.len(),
+                    required
+                )));
+            }
+        }
+        Ok(ct)
     }
 
     fn as_inline(&self) -> &[u8] {
         &self.data[1..]
     }
 
+    /// Decode the `BtreeHeader` portion of a `SubtreeV2` collection.
+    ///
+    /// Precondition: caller has verified `collection_type()? == SubtreeV2`,
+    /// which guarantees `self.data.len() >= 1 + BtreeHeader::serialized_size()`.
     fn as_subtree(&self) -> BtreeHeader {
         BtreeHeader::from_le_bytes(
             self.data[1..=BtreeHeader::serialized_size()]
                 .try_into()
-                .unwrap(),
+                .expect("SubtreeV2 length validated by collection_type()"),
         )
     }
 
@@ -760,11 +782,12 @@ impl<V: Key> DynamicCollection<V> {
                 accessor.num_pairs() as u64
             }
             SubtreeV2 => {
+                // Length validated by `collection_type()` (SubtreeV2 branch).
                 let offset = 1 + PageNumber::serialized_size() + size_of::<Checksum>();
                 u64::from_le_bytes(
                     self.data[offset..(offset + size_of::<u64>())]
                         .try_into()
-                        .unwrap(),
+                        .expect("SubtreeV2 length validated by collection_type()"),
                 )
             }
         })
@@ -894,18 +917,35 @@ impl UntypedDynamicCollection {
     }
 
     fn collection_type(&self) -> crate::Result<DynamicCollectionType> {
-        DynamicCollectionType::try_from_byte(self.data[0])
+        let type_byte = *self.data.first().ok_or_else(|| {
+            StorageError::Corrupted("empty UntypedDynamicCollection value".to_string())
+        })?;
+        let ct = DynamicCollectionType::try_from_byte(type_byte)?;
+        if let SubtreeV2 = ct {
+            let required = 1 + BtreeHeader::serialized_size();
+            if self.data.len() < required {
+                return Err(StorageError::Corrupted(format!(
+                    "UntypedDynamicCollection SubtreeV2 truncated: {} bytes, need {}",
+                    self.data.len(),
+                    required
+                )));
+            }
+        }
+        Ok(ct)
     }
 
     fn as_inline(&self) -> &[u8] {
         &self.data[1..]
     }
 
+    /// Decode the `BtreeHeader` portion of a `SubtreeV2` collection.
+    ///
+    /// Precondition: caller has verified `collection_type()? == SubtreeV2`.
     fn as_subtree(&self) -> BtreeHeader {
         BtreeHeader::from_le_bytes(
             self.data[1..=BtreeHeader::serialized_size()]
                 .try_into()
-                .unwrap(),
+                .expect("SubtreeV2 length validated by collection_type()"),
         )
     }
 }
@@ -1934,3 +1974,65 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
 }
 
 impl<K: Key, V: Key> Sealed for ReadOnlyMultimapTable<K, V> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree_store::BtreeHeader;
+
+    /// Regression: `collection_type()` on an empty value must return a
+    /// `Corrupted` error rather than panic on `self.data[0]`.
+    #[test]
+    fn collection_type_empty_data_is_corrupted() {
+        let coll = DynamicCollection::<u64>::new(&[]);
+        assert!(matches!(
+            coll.collection_type(),
+            Err(StorageError::Corrupted(_))
+        ));
+
+        let untyped = UntypedDynamicCollection::new(&[]);
+        assert!(matches!(
+            untyped.collection_type(),
+            Err(StorageError::Corrupted(_))
+        ));
+    }
+
+    /// Regression: a `SubtreeV2` value whose payload is shorter than
+    /// `1 + BtreeHeader::serialized_size()` must surface as a `Corrupted`
+    /// error rather than panic inside `as_subtree()` /
+    /// `get_num_values()`.
+    #[test]
+    fn collection_type_short_subtree_is_corrupted() {
+        let type_byte: u8 = SubtreeV2.into();
+        // One byte short of the required header
+        let short_len = BtreeHeader::serialized_size(); // (we'd need +1)
+        let mut data = vec![type_byte];
+        data.resize(short_len, 0u8);
+
+        let coll = DynamicCollection::<u64>::new(&data);
+        assert!(matches!(
+            coll.collection_type(),
+            Err(StorageError::Corrupted(_))
+        ));
+
+        let untyped = UntypedDynamicCollection::new(&data);
+        assert!(matches!(
+            untyped.collection_type(),
+            Err(StorageError::Corrupted(_))
+        ));
+    }
+
+    /// A correctly-sized `SubtreeV2` payload still validates and decodes.
+    #[test]
+    fn collection_type_valid_subtree_ok() {
+        let bytes = UntypedDynamicCollection::make_subtree_data(BtreeHeader::new(
+            crate::tree_store::PageNumber::new(0, 0, 0),
+            0u128,
+            0,
+        ));
+        let coll = UntypedDynamicCollection::new(&bytes);
+        assert!(matches!(coll.collection_type(), Ok(SubtreeV2)));
+        // as_subtree should not panic now
+        let _ = coll.as_subtree();
+    }
+}

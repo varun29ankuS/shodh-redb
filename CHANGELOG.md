@@ -1,5 +1,111 @@
 # redb - Changelog
 
+## 0.5.0 - 2026-05-04
+
+Hardening release. 78 commits since 0.4.0. Theme: production-readiness --
+panic elimination, B-tree depth limits, MVCC correctness, fuzz/soak test
+coverage, audit hardening, CI rigor.
+
+Tag namespace: this release is tagged `shodh-v0.5.0` (not `v0.5.0`) to
+preserve upstream redb's existing `v0.5.0` -- `v4.x.x` tag history. The
+crate version on crates.io remains `0.5.0`.
+
+### Breaking changes
+* None. Public API surface unchanged from 0.4.0.
+
+### New features
+* **Chunked B-tree blob storage (#305).** Blobs stored as B-tree-keyed chunks
+  rather than allocator extents. Better space efficiency, online compaction
+  support, improved crash recovery semantics.
+* **Criterion benchmark CI gate (#302).** Pure-compute benchmarks
+  (`vector_ops`) gate PRs; I/O benchmarks (`kv`, `blob`, `ivfpq`) are
+  advisory. Two-tier design with statistical noise rejection (paired
+  regressed-magnitude analysis, 20% threshold, requires 3+ benchmarks
+  regressed simultaneously).
+* **Bench gate stability:** CPU pinning + tighter statistics for
+  reproducibility on shared GitHub runners.
+* **Dynamic cache budget.** `Builder` no longer requires explicit cache
+  size to get sane defaults.
+* **Salvage `rows_recovered` metric.** Accurate per-table recovered-row
+  counts.
+* **Release-mode CI compile coverage (#317).** Three new matrix entries
+  (`Compile (release-default / release-all-features / release-no-features)`)
+  prevent recurrence of `cfg(debug_assertions)`-gated regressions that
+  pass debug-mode CI but break release builds.
+
+### Bug fixes & hardening
+
+#### Production-panic elimination
+* Panic-free metadata deserialization (#309). Corrupted page metadata
+  returns `StorageError::Corrupted` instead of panicking.
+* Panic-free `LeafMutator` operations and varint encoding -- converted
+  unwraps/asserts to typed `Result`.
+* Panic-free page allocator and compaction paths.
+* Eliminated panics in `verify_integrity` LE byte-ordering comparison
+  (#299).
+* Hardened 4 panic / silent-truncation vectors from audit round 2 (#315):
+  `serialize_codebook` / `decode` in `ivfpq::pq`, blob `next_chunk_index`
+  overflow, multimap `SubtreeV2` truncation.
+
+#### B-tree correctness
+* Depth limits on all recursive B-tree traversals plus a hard `compact()`
+  recursion cap (#306). Previously, deeply unbalanced or maliciously
+  crafted trees could exhaust stack.
+* Typed `KeyComparator` in `verify_structure`. Was using raw byte
+  comparison, broke LE-encoded keys.
+* 18 new B-tree invariant tests covering rebalancing, splits, merges, and
+  order preservation.
+
+#### MVCC and transaction lifecycle
+* System-page lifecycle fix (#303): defer `system_freed_pages` when live
+  readers exist; clear after deferral to prevent double-free. Surfaces
+  only under specific reader/writer interleaving -- found via P0
+  hardening tests.
+
+#### Release build (#317)
+* `Clone for PageImpl` referenced the `cfg(debug_assertions)`-gated
+  `open_pages` field unconditionally, breaking every `cargo build
+  --release` against master. Fix: gate the bookkeeping line and field
+  initializer to match the symmetric `Drop` impl. Cfg-gate dead release
+  imports in `base.rs` and `page_manager.rs`.
+
+#### Flash backend
+* Flash-backend validation tightening with wear-out test coverage (#308).
+* Flash soak test added; soak verification upgraded from `Quick` to `Full`
+  integrity check.
+
+#### Assertion hardening (#314)
+* Tightened pre/postconditions, removed `assert!`-based control flow in
+  user-reachable paths, converted `debug_assert!`-only invariants to
+  release-checked `Result` returns where the cost is negligible.
+
+#### `no_std`
+* Gate `xxh3` AVX2 runtime detection behind `std`.
+* `no_std` fallback for `value_checked()`.
+
+#### CDC
+* Documented CDC flush safety semantics.
+
+#### Fuzz infrastructure
+* Multiple `fuzz_redb` corpus and timeout fixes.
+* Floor `crash_after_ops` at 2, min `page_size` 1024, cache 1 MB.
+* Skip zero-ops/empty-transaction inputs (corpus pollution).
+
+#### CI
+* Replaced all non-ASCII characters across test/source files (CI gate).
+* Two-tier benchmark design with statistical rigor.
+* Resource-exhaustion test suite.
+* Concurrent stress + crash recovery tests.
+* 89 P0 hardening tests, 208 smoke tests, 18 B-tree invariant tests.
+* WASI compilation: gate `proptest` behind `cfg(not(wasi))`.
+* Release-mode compile coverage (see "New features" above).
+
+### Documentation
+* README positioning, vs-alternatives comparison table, compression flag
+  matrix (#316).
+* Production guidance: single-process recommendation, multi-process
+  warning, TTL purge guidance, file-locking semantics.
+
 ## 0.4.0 - 2026-04-17
 
 ### Breaking changes

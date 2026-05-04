@@ -342,6 +342,13 @@ jobs:
             args: "--features compression_lz4"
           - name: compression_zstd
             args: "--features compression_zstd"
+          # Release-mode test variants catch bugs that only surface under
+          # optimized builds (e.g. cfg(debug_assertions)-gated fields, UB
+          # masked by debug zero-init, op-rate-sensitive resource bounds).
+          - name: release-default
+            args: "--release"
+          - name: release-all-features
+            args: "--release --all-features"
     steps:
       - uses: actions/checkout@v4
 

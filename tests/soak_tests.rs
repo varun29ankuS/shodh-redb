@@ -579,14 +579,32 @@ fn run_soak(durability: Durability) {
             );
         }
 
-        // Check file size sanity -- scale limit with soak duration.
-        // Base: 256 MB for 60s. Scale linearly for longer runs.
-        let duration_secs = soak_duration().as_secs().max(1);
-        let max_file_bytes = 256u64 * 1024 * 1024 * duration_secs.max(60) / 60;
+        // Check file size sanity -- scale limit with actual write volume,
+        // not wall-clock duration. Release-mode runs perform many more ops in
+        // the same wall time, so a duration-based bound either false-positives
+        // (release) or hides real leaks (debug). Op-count-based bounds scale
+        // with work done in either profile.
+        //
+        // Per-op upper bounds on raw user payload:
+        //   kv_writes   : 8 B key + max 191 B value -> 200 B
+        //   blob_writes : up to 65 KiB              -> 66560 B
+        //   vec_inserts : 64 dim * f32              -> 256 B
+        //   ttl_inserts : 8 B key + max 191 B value -> 200 B
+        // Multiplier 16x absorbs B-tree copy-on-write churn, page-level
+        // fragmentation, and freed-but-not-yet-reclaimed pages mid-test.
+        // Floor 64 MiB covers empty-database overhead (page headers, system
+        // tables, allocator state) on short runs with low op counts.
+        let kv = stats.kv_writes.load(Ordering::Relaxed);
+        let blob = stats.blob_writes.load(Ordering::Relaxed);
+        let vecs = stats.vec_inserts.load(Ordering::Relaxed);
+        let ttl = stats.ttl_inserts.load(Ordering::Relaxed);
+        let payload_bytes = kv * 200 + blob * 66560 + vecs * 256 + ttl * 200;
+        let max_file_bytes = 64u64 * 1024 * 1024 + payload_bytes * 16;
         let file_size = std::fs::metadata(tmpfile.path()).unwrap().len();
         assert!(
             file_size < max_file_bytes,
-            "file size {file_size} bytes exceeds {} MB  -- possible leak",
+            "file size {file_size} bytes exceeds {} MiB \
+             (kv={kv}, blob={blob}, vec={vecs}, ttl={ttl}) -- possible leak",
             max_file_bytes / (1024 * 1024)
         );
 

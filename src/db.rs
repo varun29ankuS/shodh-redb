@@ -1152,19 +1152,30 @@ impl Database {
             });
         }
 
-        // Register a read transaction to ensure MVCC protection during
-        // verification. Without this, process_freed_pages in a concurrent
-        // writer can free pages that the verification traversal is reading,
-        // causing checksum mismatches and debug_assert failures.
+        // Register a read hold pegged to the last **durable** transaction id
+        // so that `oldest_live_read_transaction` matches the persisted (primary)
+        // roots we read below. A plain `allocate_read_transaction` would peg
+        // the hold to `get_last_committed_transaction_id`, which after a
+        // non-durable commit returns the secondary slot's id `N` while the
+        // primary root still corresponds to an older durable id `N-K`. A
+        // concurrent durable commit's `process_freed_pages` would then free
+        // entries in DATA_FREED_TABLE / SYSTEM_FREED_TABLE for txns
+        // `N-K+1 ..= N` -- pages still reachable from the primary root --
+        // and the verification walk would follow pointers into reclaimed
+        // pages (panicking inside EntryGuard::value_checked with a reversed
+        // value_range when the page is reused mid-write).
         //
-        // Capture the root pointers atomically with guard registration so
-        // that concurrent commits cannot change the root between guard
-        // creation and the actual tree walk. This prevents false-positive
-        // structural corruption reports (e.g. "leaf at depth 1, expected 2")
-        // when a root split races with verification.
-        let guard = Arc::new(self.allocate_read_transaction()?);
-        // Use persisted roots (primary slot) to avoid racing with non-durable
-        // writers that may free pages from unreachable tables in the secondary slot.
+        // Pegging the hold to the durable id keeps `oldest_live_read_transaction`
+        // <= primary's id, so freeing only touches entries that are
+        // unreachable from the primary root. Capture the root pointers
+        // immediately after registration so that concurrent commits cannot
+        // change the root between guard creation and the tree walk; this
+        // prevents false-positive structural corruption reports (e.g.
+        // "leaf at depth 1, expected 2") when a root split races with
+        // verification.
+        let guard = Arc::new(self.allocate_durable_read_transaction()?);
+        // Use persisted roots (primary slot) to match the durable id pinned
+        // by the guard above.
         let snapshot_data_root = self.mem.get_persisted_data_root();
         let snapshot_system_root = self.mem.get_persisted_system_root();
 
@@ -2161,6 +2172,25 @@ impl Database {
         let id = self
             .transaction_tracker
             .register_read_transaction(&self.mem)?;
+
+        Ok(TransactionGuard::new_read(
+            id,
+            self.transaction_tracker.clone(),
+        ))
+    }
+
+    /// Allocate a read guard pegged to the last durable (primary slot) txn id.
+    ///
+    /// Use this when the caller intends to read the persisted roots
+    /// (`get_persisted_data_root` / `get_persisted_system_root`). Pegging the
+    /// guard to the durable id keeps `oldest_live_read_transaction` low enough
+    /// that a concurrent durable commit's `process_freed_pages` will not
+    /// reclaim any page reachable from the persisted roots.
+    #[cfg(feature = "std")]
+    fn allocate_durable_read_transaction(&self) -> Result<TransactionGuard> {
+        let id = self
+            .transaction_tracker
+            .register_durable_read_transaction(&self.mem)?;
 
         Ok(TransactionGuard::new_read(
             id,

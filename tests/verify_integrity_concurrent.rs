@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "wasi"))]
 //! Regression test for the verify_integrity / process_freed_pages race.
 //!
 //! Background:

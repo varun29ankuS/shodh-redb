@@ -22,9 +22,7 @@
 //! Without the fix this reproduces the panic in seconds; with the fix it
 //! must run clean and never report corruption.
 
-use shodh_redb::{
-    Database, Durability, ReadableDatabase, ReadableTable, TableDefinition, VerifyLevel,
-};
+use shodh_redb::{Database, Durability, TableDefinition, VerifyLevel};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;

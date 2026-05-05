@@ -346,6 +346,40 @@ impl TransactionTracker {
         Ok(id)
     }
 
+    /// Register a read hold pegged to the last **durable** transaction id
+    /// (the primary slot's id), regardless of whether `read_from_secondary`
+    /// is currently set.
+    ///
+    /// This is the correct registration when the caller intends to read the
+    /// **persisted** roots (`get_persisted_data_root` / `get_persisted_system_root`).
+    /// Using `register_read_transaction` in that case creates an id/root
+    /// mismatch: the registered id may be the secondary (non-durable) txn id
+    /// `N`, but the persisted root being walked corresponds to the older
+    /// primary id `N-K`. A concurrent durable commit's `process_freed_pages`
+    /// then frees pages reachable from the primary root (entries in
+    /// `DATA_FREED_TABLE` / `SYSTEM_FREED_TABLE` for txns in `N-K+1 ..= N`),
+    /// causing the reader to follow pointers into reclaimed pages.
+    ///
+    /// Pegging the registration to the durable id ensures
+    /// `oldest_live_read_transaction <= durable_id`, so `process_freed_pages`
+    /// only frees entries with txn `<= durable_id` -- which by construction
+    /// are not reachable from the durable root being walked.
+    #[cfg(feature = "std")]
+    pub(crate) fn register_durable_read_transaction(
+        &self,
+        mem: &TransactionalMemory,
+    ) -> Result<TransactionId> {
+        let mut state = self.state.lock()?;
+        let id = mem.get_last_durable_transaction_id()?;
+        state
+            .live_read_transactions
+            .entry(id)
+            .and_modify(|x| *x += 1)
+            .or_insert(1);
+
+        Ok(id)
+    }
+
     pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) -> Result {
         #[cfg(feature = "std")]
         let mut state = self.state.lock()?;

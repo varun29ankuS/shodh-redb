@@ -162,8 +162,7 @@ fn run_scanner(
         // not pin `oldest_live_read_transaction` during its sleep interval.
         let scan = match transaction_tracker.register_durable_read_transaction(&mem) {
             Ok(id) => {
-                let guard =
-                    Arc::new(TransactionGuard::new_read(id, transaction_tracker.clone()));
+                let guard = Arc::new(TransactionGuard::new_read(id, transaction_tracker.clone()));
                 Database::verify_primary_checksums_detailed(
                     mem.clone(),
                     mem.get_persisted_data_root(),

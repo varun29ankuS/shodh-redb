@@ -18,9 +18,7 @@
 //! loops. Without the fix the scanner thread panics within seconds; with the
 //! fix it must report no corruption for the entire run.
 
-use shodh_redb::{
-    Database, Durability, IntegrityScannerConfig, TableDefinition,
-};
+use shodh_redb::{Database, Durability, IntegrityScannerConfig, TableDefinition};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
@@ -131,8 +129,7 @@ fn integrity_scanner_races_with_mixed_durability_commits() {
     // cycles to cover the race window many times. The bug reproduces in
     // well under one second of wall time without the fix.
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(15)
-        && cycles_completed.load(Ordering::Relaxed) < 50
+    while start.elapsed() < Duration::from_secs(15) && cycles_completed.load(Ordering::Relaxed) < 50
     {
         thread::sleep(Duration::from_millis(50));
     }

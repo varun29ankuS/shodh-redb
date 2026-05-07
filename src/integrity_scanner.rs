@@ -9,6 +9,7 @@
 //! as [`Database::verify_integrity()`](crate::Database::verify_integrity).
 
 use crate::db::{CorruptPageInfo, Database, TransactionGuard};
+use crate::transaction_tracker::TransactionTracker;
 use crate::tree_store::TransactionalMemory;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -68,6 +69,7 @@ pub struct IntegrityScannerHandle {
 impl IntegrityScannerHandle {
     pub(crate) fn start(
         mem: Arc<TransactionalMemory>,
+        transaction_tracker: Arc<TransactionTracker>,
         config: IntegrityScannerConfig,
     ) -> Result<Self, std::io::Error> {
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -83,7 +85,15 @@ impl IntegrityScannerHandle {
             std::thread::Builder::new()
                 .name("shodh-integrity-scanner".into())
                 .spawn(move || {
-                    run_scanner(mem, config, shutdown, wake, last_result, total_cycles);
+                    run_scanner(
+                        mem,
+                        transaction_tracker,
+                        config,
+                        shutdown,
+                        wake,
+                        last_result,
+                        total_cycles,
+                    );
                 })?
         };
 
@@ -127,6 +137,7 @@ impl Drop for IntegrityScannerHandle {
 
 fn run_scanner(
     mem: Arc<TransactionalMemory>,
+    transaction_tracker: Arc<TransactionTracker>,
     config: IntegrityScannerConfig,
     shutdown: Arc<AtomicBool>,
     wake: Arc<(Mutex<()>, Condvar)>,
@@ -138,12 +149,38 @@ fn run_scanner(
 
     while !shutdown.load(Ordering::Relaxed) {
         let start = Instant::now();
-        let scan = Database::verify_primary_checksums_detailed(
-            mem.clone(),
-            mem.get_persisted_data_root(),
-            mem.get_persisted_system_root(),
-            Arc::new(TransactionGuard::Verification),
-        );
+        // Register a read hold pegged to the last durable transaction id so that
+        // a concurrent durable commit's `process_freed_pages` cannot reclaim
+        // pages reachable from the persisted (primary slot) roots while we walk
+        // them. Without this hold the scanner is exposed to the same id/root
+        // mismatch race fixed for `Database::verify_integrity` -- pages
+        // reachable from the primary tree are freed via DATA_FREED_TABLE /
+        // SYSTEM_FREED_TABLE entries, reused mid-write, and the walk panics in
+        // `EntryGuard::value_checked` with a reversed `value_range`.
+        //
+        // The guard is dropped at the end of each cycle so the scanner does
+        // not pin `oldest_live_read_transaction` during its sleep interval.
+        let scan = match transaction_tracker.register_durable_read_transaction(&mem) {
+            Ok(id) => {
+                let guard =
+                    Arc::new(TransactionGuard::new_read(id, transaction_tracker.clone()));
+                Database::verify_primary_checksums_detailed(
+                    mem.clone(),
+                    mem.get_persisted_data_root(),
+                    mem.get_persisted_system_root(),
+                    guard,
+                )
+            }
+            Err(_) => {
+                // If we can't register the read hold (e.g. tracker mutex
+                // poisoned) skip this cycle rather than walking unprotected.
+                let (lock, cvar) = &*wake;
+                if let Ok(g) = lock.lock() {
+                    let _ = cvar.wait_timeout(g, interval);
+                }
+                continue;
+            }
+        };
 
         if let Ok((pages_checked, corrupt_details)) = scan {
             cycle += 1;

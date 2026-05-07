@@ -160,26 +160,22 @@ fn run_scanner(
         //
         // The guard is dropped at the end of each cycle so the scanner does
         // not pin `oldest_live_read_transaction` during its sleep interval.
-        let scan = match transaction_tracker.register_durable_read_transaction(&mem) {
-            Ok(id) => {
-                let guard = Arc::new(TransactionGuard::new_read(id, transaction_tracker.clone()));
-                Database::verify_primary_checksums_detailed(
-                    mem.clone(),
-                    mem.get_persisted_data_root(),
-                    mem.get_persisted_system_root(),
-                    guard,
-                )
+        let Ok(id) = transaction_tracker.register_durable_read_transaction(&mem) else {
+            // If we can't register the read hold (e.g. tracker mutex
+            // poisoned) skip this cycle rather than walking unprotected.
+            let (lock, cvar) = &*wake;
+            if let Ok(g) = lock.lock() {
+                let _ = cvar.wait_timeout(g, interval);
             }
-            Err(_) => {
-                // If we can't register the read hold (e.g. tracker mutex
-                // poisoned) skip this cycle rather than walking unprotected.
-                let (lock, cvar) = &*wake;
-                if let Ok(g) = lock.lock() {
-                    let _ = cvar.wait_timeout(g, interval);
-                }
-                continue;
-            }
+            continue;
         };
+        let guard = Arc::new(TransactionGuard::new_read(id, transaction_tracker.clone()));
+        let scan = Database::verify_primary_checksums_detailed(
+            mem.clone(),
+            mem.get_persisted_data_root(),
+            mem.get_persisted_system_root(),
+            guard,
+        );
 
         if let Ok((pages_checked, corrupt_details)) = scan {
             cycle += 1;

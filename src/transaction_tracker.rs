@@ -380,6 +380,40 @@ impl TransactionTracker {
         Ok(id)
     }
 
+    /// Atomically attempt to extend the read hold on an existing historical
+    /// snapshot. Returns `true` if `transaction_id` was already present in
+    /// `live_read_transactions` (i.e. the snapshot's `register_history_hold`
+    /// is still alive) and the count was incremented; returns `false` if the
+    /// snapshot has already been evicted from the retention window.
+    ///
+    /// This is the correct registration for time-travel reads
+    /// (`Database::begin_read_at`, `Database::begin_read_at_time`): the
+    /// caller looks up a historical snapshot in the system history table,
+    /// then must extend the snapshot's hold before walking pages reachable
+    /// from its `user_root`. Without this, retention pruning could
+    /// `deallocate_history_hold(transaction_id)` between the lookup and the
+    /// read, allowing `oldest_live_read_transaction` to advance past
+    /// `transaction_id` and `process_freed_pages` to reclaim pages
+    /// reachable from the historical user tree -- the same id/root mismatch
+    /// class fixed for `verify_integrity` and the integrity scanner.
+    ///
+    /// The check-and-increment is atomic under the tracker lock, so it
+    /// serialises correctly with retention pruning's
+    /// `deallocate_history_hold` call.
+    #[cfg(feature = "std")]
+    pub(crate) fn try_register_historical_read_transaction(
+        &self,
+        transaction_id: TransactionId,
+    ) -> Result<bool> {
+        let mut state = self.state.lock()?;
+        if let Some(ref_count) = state.live_read_transactions.get_mut(&transaction_id) {
+            *ref_count += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) -> Result {
         #[cfg(feature = "std")]
         let mut state = self.state.lock()?;

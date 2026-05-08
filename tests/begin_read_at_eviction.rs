@@ -149,9 +149,14 @@ fn begin_read_at_survives_retention_eviction_and_durable_freeing() {
     // run. If it didn't, the test failed to exercise the race window.
     let post_history = db.transaction_history().unwrap();
     assert!(
-        !post_history.iter().any(|info| info.transaction_id == t_history),
+        !post_history
+            .iter()
+            .any(|info| info.transaction_id == t_history),
         "test must drive retention pruning past T_history (history now: {:?})",
-        post_history.iter().map(|i| i.transaction_id).collect::<Vec<_>>()
+        post_history
+            .iter()
+            .map(|i| i.transaction_id)
+            .collect::<Vec<_>>()
     );
 
     drop(historical_rtxn);

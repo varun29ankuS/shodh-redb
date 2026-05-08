@@ -28,7 +28,7 @@
 //!   5. continually walks the reader's tables -- without the fix this
 //!      panics within seconds; with the fix all reads remain valid
 
-use shodh_redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use shodh_redb::{Database, TableDefinition};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;

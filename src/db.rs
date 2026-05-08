@@ -2206,7 +2206,6 @@ impl Database {
     ///
     /// The pin and existence check are performed atomically under the
     /// tracker lock, so this serialises correctly with retention pruning.
-    #[cfg(feature = "std")]
     fn allocate_historical_read_transaction(
         &self,
         transaction_id: u64,

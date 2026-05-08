@@ -400,12 +400,14 @@ impl TransactionTracker {
     /// The check-and-increment is atomic under the tracker lock, so it
     /// serialises correctly with retention pruning's
     /// `deallocate_history_hold` call.
-    #[cfg(feature = "std")]
     pub(crate) fn try_register_historical_read_transaction(
         &self,
         transaction_id: TransactionId,
     ) -> Result<bool> {
+        #[cfg(feature = "std")]
         let mut state = self.state.lock()?;
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
         if let Some(ref_count) = state.live_read_transactions.get_mut(&transaction_id) {
             *ref_count += 1;
             Ok(true)

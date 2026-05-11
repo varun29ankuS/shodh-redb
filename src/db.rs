@@ -1720,8 +1720,12 @@ impl Database {
         &self,
         config: crate::integrity_scanner::IntegrityScannerConfig,
     ) -> Result<crate::integrity_scanner::IntegrityScannerHandle, DatabaseError> {
-        crate::integrity_scanner::IntegrityScannerHandle::start(self.mem.clone(), config)
-            .map_err(DatabaseError::from)
+        crate::integrity_scanner::IntegrityScannerHandle::start(
+            self.mem.clone(),
+            self.transaction_tracker.clone(),
+            config,
+        )
+        .map_err(DatabaseError::from)
     }
 
     /// Export a logical incremental snapshot of all key/value changes since

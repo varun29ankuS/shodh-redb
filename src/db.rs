@@ -2202,6 +2202,31 @@ impl Database {
         ))
     }
 
+    /// Allocate a read guard pinned to a specific historical transaction id
+    /// (e.g. one looked up from the retention history table). Returns
+    /// `Ok(None)` if the snapshot has already been evicted from the retention
+    /// window -- in that case the historical pages may have already been
+    /// reclaimed by `process_freed_pages` and reading is unsafe.
+    ///
+    /// The pin and existence check are performed atomically under the
+    /// tracker lock, so this serialises correctly with retention pruning.
+    fn allocate_historical_read_transaction(
+        &self,
+        transaction_id: u64,
+    ) -> Result<Option<TransactionGuard>> {
+        let id = TransactionId::new(transaction_id);
+        let pinned = self
+            .transaction_tracker
+            .try_register_historical_read_transaction(id)?;
+        if !pinned {
+            return Ok(None);
+        }
+        Ok(Some(TransactionGuard::new_read(
+            id,
+            self.transaction_tracker.clone(),
+        )))
+    }
+
     /// Convenience method for [`Builder::new`]
     pub fn builder() -> Builder {
         Builder::new()
@@ -2252,6 +2277,22 @@ impl Database {
     /// Returns a [`ReadTransaction`] that sees the user-table state as of the
     /// requested commit.
     pub fn begin_read_at(&self, transaction_id: u64) -> Result<ReadTransaction, TransactionError> {
+        // Pin the snapshot's history hold BEFORE walking its `user_root`.
+        // Without this, retention pruning could `deallocate_history_hold`
+        // for `transaction_id` during the read, allowing
+        // `oldest_live_read_transaction` to advance past `transaction_id`
+        // and `process_freed_pages` to reclaim pages reachable from the
+        // historical user tree -- the same id/root mismatch class fixed
+        // for `verify_integrity` and the integrity scanner. The pin must
+        // be allocated against the snapshot's id (T_history), not against
+        // `last_committed_id` which may be much newer and would not satisfy
+        // the invariant `registered_id <= walked_tree_id`.
+        let guard = self
+            .allocate_historical_read_transaction(transaction_id)
+            .map_err(TransactionError::Storage)?
+            .ok_or(TransactionError::Storage(
+                StorageError::HistorySnapshotNotFound(transaction_id),
+            ))?;
         let lookup_txn = self.begin_read()?;
         let snapshot = lookup_txn
             .get_history_snapshot_ro(transaction_id)
@@ -2260,7 +2301,6 @@ impl Database {
                 StorageError::HistorySnapshotNotFound(transaction_id),
             ))?;
         let user_root = snapshot.user_root();
-        let guard = self.allocate_read_transaction()?;
         drop(lookup_txn);
         ReadTransaction::new_historical(
             self.mem.clone(),
@@ -2281,33 +2321,50 @@ impl Database {
         &self,
         timestamp_ms: u64,
     ) -> Result<ReadTransaction, TransactionError> {
-        let lookup_txn = self.begin_read()?;
-        let ids = lookup_txn
-            .list_history_snapshot_ids_ro()
-            .map_err(TransactionError::Storage)?;
-        let mut best: Option<Option<BtreeHeader>> = None;
-        for id in ids {
-            if let Some(snap) = lookup_txn
-                .get_history_snapshot_ro(id)
+        // Bounded retry: the candidate snapshot picked by the in-flight
+        // lookup may be evicted by retention pruning between the scan and
+        // the pin. After a few collisions, return HistorySnapshotNotFound.
+        for _ in 0..3 {
+            let lookup_txn = self.begin_read()?;
+            let ids = lookup_txn
+                .list_history_snapshot_ids_ro()
+                .map_err(TransactionError::Storage)?;
+            let mut best: Option<(u64, Option<BtreeHeader>)> = None;
+            for id in ids {
+                if let Some(snap) = lookup_txn
+                    .get_history_snapshot_ro(id)
+                    .map_err(TransactionError::Storage)?
+                    && snap.timestamp_ms() <= timestamp_ms
+                {
+                    best = Some((id, snap.user_root()));
+                }
+            }
+            drop(lookup_txn);
+            let Some((best_id, best_root)) = best else {
+                return Err(TransactionError::Storage(
+                    StorageError::HistorySnapshotNotFound(timestamp_ms),
+                ));
+            };
+            // Pin the chosen snapshot's history hold under the tracker
+            // lock. If the snapshot was already evicted in the gap,
+            // try_register returns None and we re-scan.
+            if let Some(guard) = self
+                .allocate_historical_read_transaction(best_id)
                 .map_err(TransactionError::Storage)?
-                && snap.timestamp_ms() <= timestamp_ms
             {
-                best = Some(snap.user_root());
+                return ReadTransaction::new_historical(
+                    self.mem.clone(),
+                    guard,
+                    best_root,
+                    Arc::clone(&self.observer),
+                    #[cfg(feature = "metrics")]
+                    Arc::clone(&self.db_metrics),
+                );
             }
         }
-        let best_root = best.ok_or(TransactionError::Storage(
+        Err(TransactionError::Storage(
             StorageError::HistorySnapshotNotFound(timestamp_ms),
-        ))?;
-        let guard = self.allocate_read_transaction()?;
-        drop(lookup_txn);
-        ReadTransaction::new_historical(
-            self.mem.clone(),
-            guard,
-            best_root,
-            Arc::clone(&self.observer),
-            #[cfg(feature = "metrics")]
-            Arc::clone(&self.db_metrics),
-        )
+        ))
     }
 
     /// List all retained transaction snapshots.

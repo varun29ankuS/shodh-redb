@@ -2483,8 +2483,24 @@ impl Database {
                             StorageError::Corrupted(msg.clone()),
                         )));
                     }
-                    let _ = self.group_committer.finish_leader();
-                    return;
+                    // Must NOT return unconditionally here. `finish_leader`
+                    // deliberately retains leadership whenever it hands work
+                    // back, so returning while it still holds batches strands
+                    // `active_leader = true` forever: every later
+                    // `submit_write_batch` enqueues as a follower and blocks on
+                    // `recv()` waiting for a leader that can never exist.
+                    // Keep looping so the newly arrived batches are failed too,
+                    // and leadership is only released once the queue drains.
+                    match self.group_committer.finish_leader() {
+                        Ok(remaining) if remaining.is_empty() => return,
+                        Ok(remaining) => {
+                            batches = remaining;
+                            continue;
+                        }
+                        // Mutex poisoned -- finish_leader cannot succeed either,
+                        // so there is nothing further we can do.
+                        Err(_) => return,
+                    }
                 }
             };
 

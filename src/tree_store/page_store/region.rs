@@ -87,7 +87,10 @@ impl RegionTracker {
         }
         let mut data = vec![];
         for allocator_len in allocator_lens {
-            if start + allocator_len > page.len() {
+            if start
+                .checked_add(allocator_len)
+                .is_none_or(|end| end > page.len())
+            {
                 return Err(crate::StorageError::Corrupted(
                     "RegionTracker: allocator data extends beyond buffer".into(),
                 ));

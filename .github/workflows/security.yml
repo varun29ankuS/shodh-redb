@@ -26,8 +26,23 @@ jobs:
         with:
           tool: cargo-audit
 
+      # Ignored advisories, each with a justification:
+      #   RUSTSEC-2025-0141 bincode      -- dev-dependency, unmaintained, no upgrade path
+      #   RUSTSEC-2025-0057 fxhash       -- transitive dependency, unmaintained
+      #   RUSTSEC-2024-0384 instant      -- transitive dependency, unmaintained
+      #   RUSTSEC-2026-0235 rkyv 0.7.46  -- NOT in any build graph. rkyv is an
+      #     optional dependency of rust_decimal (via byte-unit, itself a
+      #     dev-dependency of shodh-redb-bench) that no feature in this
+      #     workspace enables. It appears only in Cargo.lock, which is
+      #     feature-agnostic, and cargo-audit scans the lockfile without
+      #     resolving features. Verified never compiled:
+      #       cargo tree -i rkyv --workspace --all-features --target all
+      #     prints "nothing to print", and `cargo tree -p byte-unit -e features`
+      #     shows rust_decimal pulling only arrayvec and num-traits.
+      #     cargo-deny, which is feature-aware, does not flag it.
+      #     Re-evaluate if anything ever enables rust_decimal's `rkyv` feature.
       - name: Run cargo-audit
-        run: cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2025-0057 --ignore RUSTSEC-2024-0384
+        run: cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2025-0057 --ignore RUSTSEC-2024-0384 --ignore RUSTSEC-2026-0235
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2

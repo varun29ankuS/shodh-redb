@@ -1837,12 +1837,6 @@ impl TransactionalMemory {
         self.page_size.try_into().unwrap()
     }
 
-    /// Flush all pending writes to the underlying storage
-    #[cfg(feature = "std")]
-    pub(crate) fn flush_data(&self) -> Result {
-        self.storage.flush()
-    }
-
     /// Read raw bytes from the underlying storage, bypassing the cache
     #[cfg(feature = "std")]
     pub(crate) fn read_raw(&self, offset: u64, buf: &mut [u8]) -> Result {

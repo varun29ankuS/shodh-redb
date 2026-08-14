@@ -144,6 +144,10 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The same-runner baseline checks out the PR base commit, so the
+          # default shallow clone is not enough.
+          fetch-depth: 0
 
       - name: Cache cargo
         uses: actions/cache@v4

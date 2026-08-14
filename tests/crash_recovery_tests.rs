@@ -858,3 +858,87 @@ fn corrupt_page_size_does_not_panic() {
         "opening a database with a zeroed page_size must fail cleanly"
     );
 }
+
+/// A commit slot whose checksum fails must not be trusted, even when the god
+/// byte says no recovery is needed. A crash cannot produce that combination
+/// (a write transaction sets recovery_required durably first), so it means the
+/// slot bytes rotted. The database must fall back to the intact slot and tell
+/// the caller that a committed transaction was discarded.
+#[test]
+fn corrupt_commit_slot_falls_back_and_reports() {
+    use std::sync::atomic::AtomicBool;
+
+    const GOD_BYTE_OFFSET: usize = 9;
+    const PRIMARY_BIT: u8 = 1;
+    const TRANSACTION_0_OFFSET: usize = 64;
+    const TRANSACTION_SIZE: usize = 128;
+    const SLOT_CHECKSUM_IN_SLOT: usize = 112;
+    const TRANSACTION_ID_IN_SLOT: usize = 104;
+
+    #[derive(Default)]
+    struct Rollbacks {
+        fired: AtomicBool,
+        discarded: AtomicU64,
+        recovered: AtomicU64,
+    }
+    struct Watcher(Arc<Rollbacks>);
+    impl shodh_redb::DatabaseObserver for Watcher {
+        fn on_commit_slot_rollback(&self, discarded: u64, recovered: u64) {
+            self.0.discarded.store(discarded, Ordering::SeqCst);
+            self.0.recovered.store(recovered, Ordering::SeqCst);
+            self.0.fired.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        for i in 0..3u64 {
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(U64_TABLE).unwrap();
+                t.insert(&i, &i).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+    }
+
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    let primary = usize::from(bytes[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
+    let pslot = TRANSACTION_0_OFFSET + primary * TRANSACTION_SIZE;
+    let sslot = TRANSACTION_0_OFFSET + (primary ^ 1) * TRANSACTION_SIZE;
+    let read_txn_id = |b: &[u8], slot: usize| -> u64 {
+        u64::from_le_bytes(
+            b[slot + TRANSACTION_ID_IN_SLOT..slot + TRANSACTION_ID_IN_SLOT + 8]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    let primary_txn = read_txn_id(&bytes, pslot);
+    let secondary_txn = read_txn_id(&bytes, sslot);
+    assert!(
+        primary_txn > secondary_txn,
+        "expected the primary slot to hold the newer transaction"
+    );
+
+    // Break ONLY the slot's own checksum, so every data field stays valid.
+    // This isolates the checksum check from the downstream page checksums.
+    bytes[pslot + SLOT_CHECKSUM_IN_SLOT] ^= 0xFF;
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    let seen = Arc::new(Rollbacks::default());
+    let db = Builder::new()
+        .set_observer(Watcher(seen.clone()))
+        .open(tmpfile.path())
+        .expect("must fall back to the intact commit slot");
+
+    assert!(
+        seen.fired.load(Ordering::SeqCst),
+        "falling back past a committed transaction must be reported"
+    );
+    assert_eq!(seen.discarded.load(Ordering::SeqCst), primary_txn);
+    assert_eq!(seen.recovered.load(Ordering::SeqCst), secondary_txn);
+
+    let report = db.verify_integrity(VerifyLevel::Pages).unwrap();
+    assert!(report.valid);
+}

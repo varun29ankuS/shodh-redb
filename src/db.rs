@@ -2098,6 +2098,13 @@ impl Database {
             )?;
         }
 
+        // A damaged commit slot was skipped, which silently rolls the database
+        // back past a committed transaction. Tell the caller before handing them
+        // a database that is quietly missing writes.
+        if let Some((discarded, recovered)) = mem.commit_slot_rollback() {
+            observer.on_commit_slot_rollback(discarded, recovered);
+        }
+
         mem.begin_writable()?;
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next()?;
 

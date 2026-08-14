@@ -842,7 +842,18 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                 let m = pq_len as usize;
                 for i in 0..blob.count() {
                     let codes = &pq_block[i as usize * m..(i as usize + 1) * m];
-                    let dist = adc.to_f32(adc.approximate_distance(codes));
+                    // Bound pruning: once the heap is full, any candidate whose
+                    // running ADC sum reaches the current k-th best distance
+                    // cannot displace it, so the remaining sub-vector lookups
+                    // are wasted work. The cutoff is recomputed per cluster
+                    // because `scale`/`offset` are rebuilt with the ADC table.
+                    let cutoff = heap
+                        .worst_distance()
+                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
+                    let Some(raw) = adc.approximate_distance_bounded(codes, cutoff) else {
+                        continue;
+                    };
+                    let dist = adc.to_f32(raw);
                     let vid = blob.vector_id(i);
 
                     // Vectors without metadata pass the filter -- absence
@@ -1311,7 +1322,18 @@ impl ReadOnlyIvfPqIndex {
                 let m = pq_len as usize;
                 for i in 0..blob.count() {
                     let codes = &pq_block[i as usize * m..(i as usize + 1) * m];
-                    let dist = adc.to_f32(adc.approximate_distance(codes));
+                    // Bound pruning: once the heap is full, any candidate whose
+                    // running ADC sum reaches the current k-th best distance
+                    // cannot displace it, so the remaining sub-vector lookups
+                    // are wasted work. The cutoff is recomputed per cluster
+                    // because `scale`/`offset` are rebuilt with the ADC table.
+                    let cutoff = heap
+                        .worst_distance()
+                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
+                    let Some(raw) = adc.approximate_distance_bounded(codes, cutoff) else {
+                        continue;
+                    };
+                    let dist = adc.to_f32(raw);
                     let vid = blob.vector_id(i);
 
                     // Vectors without metadata pass the filter -- absence
@@ -1377,6 +1399,20 @@ impl CandidateHeap {
             capacity,
             heap: BinaryHeap::with_capacity(capacity + 1),
         }
+    }
+
+    /// Distance of the current k-th best candidate, or `None` while the heap
+    /// still has spare capacity.
+    ///
+    /// While not full every candidate is admitted, so there is no threshold to
+    /// prune against. Once full, `push` admits only distances strictly less
+    /// than this value, which makes it an exact pruning bound.
+    #[inline]
+    fn worst_distance(&self) -> Option<f32> {
+        if self.heap.len() < self.capacity {
+            return None;
+        }
+        self.heap.peek().map(|e| e.distance)
     }
 
     fn push(&mut self, vector_id: u64, distance: f32) {

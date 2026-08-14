@@ -826,54 +826,68 @@ impl Database {
 
     /// Creates a consistent backup of the database at the given path.
     ///
-    /// The backup captures a snapshot of the last committed transaction. This method
-    /// can be called while other read or write transactions are active -- it will not
-    /// block writers and will not include uncommitted data.
+    /// The backup captures the last durable commit. The resulting file is a
+    /// valid redb database -- open it with [`Database::open`] (recommended,
+    /// handles any needed repair) or [`Builder::open`].
     ///
-    /// The resulting file is a valid redb database. Open it with [`Database::open`]
-    /// (recommended, handles any needed repair) or [`Builder::open`].
+    /// # Blocking
+    ///
+    /// **This method blocks writers for the duration of the copy.** Read
+    /// transactions are unaffected and proceed concurrently.
+    ///
+    /// This is a deliberate change from the previous behaviour, which claimed
+    /// not to block writers and was not correct. `backup` copies the file
+    /// byte-for-byte via `read_raw`, reading the header at the start and the
+    /// remaining pages progressively afterwards -- it is not a point-in-time
+    /// snapshot. A read hold prevents pages from being *reclaimed*, but nothing
+    /// prevents the file itself from advancing underneath the copy: a
+    /// concurrent commit reallocates free pages, writes them, mutates region
+    /// headers in place, and can resize the file via `try_shrink` after
+    /// `raw_len()` was sampled. The result was a file whose header and
+    /// structure verified but whose leaf pages did not match their checksums --
+    /// a silently corrupt backup, produced exactly when a backup matters most.
+    ///
+    /// Holding the write lock removes the whole class: no commit can run, so no
+    /// page is freed, reallocated, or rewritten, and the file cannot change
+    /// length while it is being read. Correctness here outranks concurrency --
+    /// a backup that blocks is strictly better than one that lies.
+    ///
+    /// For a non-blocking snapshot, take a savepoint and copy at your leisure,
+    /// or run the backup against a quiesced database.
     #[cfg(feature = "std")]
     #[allow(clippy::cast_possible_truncation)]
     pub fn backup(&self, path: impl AsRef<Path>) -> Result<(), StorageError> {
-        use std::io::Write;
-
         const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB
 
-        // Pin a consistent snapshot so pages aren't reclaimed during the copy.
+        // Acquire the write lock and hold it for the whole copy. Every mutation
+        // path -- commit, process_freed_pages, the allocator, try_shrink -- runs
+        // under this lock, so taking it freezes the on-disk state. The
+        // transaction is aborted at the end; it writes nothing.
         //
-        // This must be a *durable* read hold. `read_raw` below bypasses the page
-        // cache and copies the persisted file, which only ever contains the last
-        // durable commit -- the primary slot, transaction id `D`. Registering via
-        // `begin_read()` would peg the hold to `get_last_committed_transaction_id`,
-        // which honors `read_from_secondary` and so returns the secondary slot's
-        // id `N > D` after any non-durable commit. That violates the reader
-        // invariant `registered_id <= walked_tree_id`: a durable commit's
-        // `process_freed_pages` frees DATA_FREED_TABLE / SYSTEM_FREED_TABLE
-        // entries for all txns `<= oldest_live_read_transaction`, so entries for
-        // `(D, N]` -- persisted pages still reachable from the tree at `D` --
-        // would be reclaimed, reused, and overwritten while this loop is still
-        // copying them, silently corrupting the backup.
-        let _read_guard = self.allocate_durable_read_transaction()?;
+        // A read hold alone is insufficient. See the doc comment above.
+        let freeze_txn = self.begin_write().map_err(|e| e.into_storage_error())?;
 
-        // NOTE: deliberately no `flush_data()` here. The durable snapshot being
-        // copied is already fully persisted -- `TransactionalMemory::commit`
-        // flushes the write buffer and fsyncs before making a commit primary --
-        // so there is nothing to flush that belongs in the backup. Flushing here
-        // would be actively wrong twice over: it would push *non-durable* pages
-        // into the file that the copied header never references, and it races
-        // with a concurrent writer, since `flush_write_buffer` requires every
-        // cache entry to hold data while a writer's open `PageMut` leaves its
-        // entry taken -- surfacing as
-        // `Internal("flush_write_buffer: write cache entry has no data")`.
+        let result = self.backup_locked(path.as_ref(), CHUNK_SIZE);
+
+        // Abort regardless of outcome so the write lock is always released.
+        let abort_result = freeze_txn.abort();
+        result.and(abort_result)
+    }
+
+    /// Copy the frozen database file. Caller must hold the write lock.
+    #[cfg(feature = "std")]
+    #[allow(clippy::cast_possible_truncation)]
+    fn backup_locked(&self, path: &Path, chunk_size: usize) -> Result<(), StorageError> {
+        use std::io::Write;
+
         let file_len = self.mem.raw_len()?;
-        let mut dest =
-            File::create(path.as_ref()).map_err(|e| StorageError::Io(BackendError::Io(e)))?;
-        let mut buf = vec![0u8; CHUNK_SIZE];
+        let mut dest = File::create(path).map_err(|e| StorageError::Io(BackendError::Io(e)))?;
+        let mut buf = vec![0u8; chunk_size];
         let mut offset = 0u64;
 
         while offset < file_len {
             let remaining = (file_len - offset) as usize;
-            let to_read = remaining.min(CHUNK_SIZE);
+            let to_read = remaining.min(chunk_size);
             let chunk = &mut buf[..to_read];
             self.mem.read_raw(offset, chunk)?;
             dest.write_all(chunk)

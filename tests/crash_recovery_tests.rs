@@ -942,3 +942,50 @@ fn corrupt_commit_slot_falls_back_and_reports() {
     let report = db.verify_integrity(VerifyLevel::Pages).unwrap();
     assert!(report.valid);
 }
+
+/// The five layout u32s in the database header sit outside both commit slots,
+/// so nothing checksums them. Every value a corrupted field can take must
+/// produce a result or a clean error -- never a panic, and never a wrapped
+/// length that silently mis-describes the file.
+#[test]
+fn corrupt_layout_fields_never_panic() {
+    const PAGE_SIZE_OFFSET: usize = 9 + 1 + 2;
+    let fields = [
+        ("page_size", PAGE_SIZE_OFFSET),
+        ("region_header_pages", PAGE_SIZE_OFFSET + 4),
+        ("region_max_data_pages", PAGE_SIZE_OFFSET + 8),
+        ("full_regions", PAGE_SIZE_OFFSET + 12),
+        ("trailing_region_data_pages", PAGE_SIZE_OFFSET + 16),
+    ];
+    let values = [0u32, 1, 2, u32::MAX, 0x8000_0000, 0x7FFF_FFFF];
+
+    for (name, offset) in fields {
+        for value in values {
+            let tmpfile = create_tempfile();
+            {
+                let db = Database::create(tmpfile.path()).unwrap();
+                let txn = db.begin_write().unwrap();
+                {
+                    let mut t = txn.open_table(U64_TABLE).unwrap();
+                    t.insert(&1u64, &1u64).unwrap();
+                }
+                txn.commit().unwrap();
+            }
+
+            let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+            // Only the outcome matters: Ok or Err, but no panic and no hang.
+            if let Ok(db) = Database::open(tmpfile.path()) {
+                // If it opened, the layout it chose must describe a file it can
+                // actually walk.
+                let report = db.verify_integrity(VerifyLevel::Pages);
+                assert!(
+                    report.is_ok(),
+                    "{name}={value:#x}: opened but could not be verified: {report:?}"
+                );
+            }
+        }
+    }
+}

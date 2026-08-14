@@ -293,6 +293,27 @@ impl DatabaseHeader {
                 "Database header has a zero region_max_data_pages".to_string(),
             )));
         }
+        // `DatabaseLayout::num_regions` computes `full_regions + 1` when a
+        // trailing region is present, and `len()` computes `num_regions() - 1`.
+        // Neither end of that range may wrap.
+        if full_regions == u32::MAX {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header region count overflows".to_string(),
+            )));
+        }
+        if full_regions == 0 && trailing_data_pages == 0 {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header describes no regions".to_string(),
+            )));
+        }
+        // The trailing region is partial by definition, so it cannot be larger
+        // than a full region. Violating this makes the buddy allocator index
+        // its bitmaps out of bounds.
+        if trailing_data_pages > region_max_data_pages {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header trailing region exceeds a full region".to_string(),
+            )));
+        }
         let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
             &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
         )?;

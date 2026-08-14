@@ -3342,7 +3342,7 @@ impl WriteTransaction {
 
         for transaction_id in processed {
             self.transaction_tracker
-                .mark_unprocessed_non_durable_commit(transaction_id)?;
+                .mark_non_durable_commit_processed(transaction_id)?;
         }
 
         Ok(())

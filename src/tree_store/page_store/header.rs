@@ -275,6 +275,24 @@ impl DatabaseHeader {
         let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
         let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
         let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
+
+        // These layout fields live outside both commit slots, so the slot
+        // checksums do not cover them. Validate them here, at the parse
+        // boundary, rather than letting a corrupted value reach the layout
+        // arithmetic: `RegionLayout::new` asserts `num_pages > 0`, and
+        // `DatabaseLayout::recalculate` divides by
+        // `(region_header_pages + region_max_data_pages) * page_size`. Both
+        // would panic on an untrusted file instead of reporting corruption.
+        if page_size == 0 {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header has a zero page size".to_string(),
+            )));
+        }
+        if region_max_data_pages == 0 {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header has a zero region_max_data_pages".to_string(),
+            )));
+        }
         let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
             &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
         )?;

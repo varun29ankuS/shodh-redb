@@ -794,3 +794,67 @@ fn crash_on_empty_db_recovers() {
     let report = db.verify_integrity(VerifyLevel::Pages).unwrap();
     assert!(report.valid);
 }
+
+/// The layout fields in the database header (page_size, region_header_pages,
+/// region_max_data_pages, ...) sit outside both commit slots, so the slot
+/// checksums do not protect them. A corrupted value must produce a clean
+/// error, not a panic: `Database::open` is the boundary where an untrusted
+/// file is first parsed.
+#[test]
+fn corrupt_region_max_data_pages_does_not_panic() {
+    // Offsets mirror the private constants in tree_store::page_store::header.
+    const MAGICNUMBER_LEN: usize = 9;
+    const GOD_BYTE_OFFSET: usize = MAGICNUMBER_LEN;
+    const PAGE_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + 1 + 2;
+    const REGION_HEADER_PAGES_OFFSET: usize = PAGE_SIZE_OFFSET + 4;
+    const REGION_MAX_DATA_PAGES_OFFSET: usize = REGION_HEADER_PAGES_OFFSET + 4;
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(U64_TABLE).unwrap();
+            t.insert(&1u64, &1u64).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    // Zero the region_max_data_pages field. Nothing checksums it.
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    bytes[REGION_MAX_DATA_PAGES_OFFSET..REGION_MAX_DATA_PAGES_OFFSET + 4].fill(0);
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    // Must be reported, not panicked on.
+    assert!(
+        Database::open(tmpfile.path()).is_err(),
+        "opening a database with a zeroed region_max_data_pages must fail cleanly"
+    );
+}
+
+/// Sibling of the above: a zeroed page_size makes the region size zero, which
+/// `DatabaseLayout::recalculate` uses as a divisor.
+#[test]
+fn corrupt_page_size_does_not_panic() {
+    const PAGE_SIZE_OFFSET: usize = 9 + 1 + 2;
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(U64_TABLE).unwrap();
+            t.insert(&1u64, &1u64).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    bytes[PAGE_SIZE_OFFSET..PAGE_SIZE_OFFSET + 4].fill(0);
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    assert!(
+        Database::open(tmpfile.path()).is_err(),
+        "opening a database with a zeroed page_size must fail cleanly"
+    );
+}

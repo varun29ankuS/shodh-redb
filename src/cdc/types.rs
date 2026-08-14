@@ -369,7 +369,10 @@ impl CdcRecord {
             StorageError::format_error("CDC record: invalid table name length bytes")
         })?);
         pos += 2;
-        if pos + usize::from(name_len) > data.len() {
+        if pos
+            .checked_add(usize::from(name_len))
+            .is_none_or(|end| end > data.len())
+        {
             return Err(StorageError::format_error(
                 "CDC record truncated at table name",
             ));
@@ -389,7 +392,10 @@ impl CdcRecord {
                 .map_err(|_| StorageError::format_error("CDC record: invalid key length bytes"))?,
         );
         pos += 4;
-        if pos + key_len as usize > data.len() {
+        if pos
+            .checked_add(key_len as usize)
+            .is_none_or(|end| end > data.len())
+        {
             return Err(StorageError::format_error(
                 "CDC record truncated at key data",
             ));
@@ -409,7 +415,10 @@ impl CdcRecord {
         let new_value = if new_val_len == NONE_SENTINEL {
             None
         } else {
-            if pos + new_val_len as usize > data.len() {
+            if pos
+                .checked_add(new_val_len as usize)
+                .is_none_or(|end| end > data.len())
+            {
                 return Err(StorageError::format_error(
                     "CDC record truncated at new value data",
                 ));
@@ -431,7 +440,10 @@ impl CdcRecord {
         let old_value = if old_val_len == NONE_SENTINEL {
             None
         } else {
-            if pos + old_val_len as usize > data.len() {
+            if pos
+                .checked_add(old_val_len as usize)
+                .is_none_or(|end| end > data.len())
+            {
                 return Err(StorageError::format_error(
                     "CDC record truncated at old value data",
                 ));
@@ -534,6 +546,41 @@ impl ChangeStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A declared length near `u32::MAX` must be reported as a truncated
+    /// record, never panic. The bounds checks are written as
+    /// `pos.checked_add(len)` because `pos + len` wraps on 32-bit targets
+    /// (wasm32 / WASI), which would let the guard pass and push the failure
+    /// into the slice index as a panic instead of a `StorageError`.
+    #[test]
+    fn deserialize_rejects_length_that_would_overflow_pointer_width() {
+        // Legacy v0 record: op byte, then u16 table-name length, then name.
+        let mut rec = Vec::new();
+        rec.push(0u8); // op discriminant
+        rec.extend_from_slice(&1u16.to_le_bytes()); // name_len = 1
+        rec.push(b't'); // table name
+        rec.extend_from_slice(&(u32::MAX - 1).to_le_bytes()); // key_len, absurd
+        // No key bytes follow -- the record is truncated.
+
+        let result = CdcRecord::deserialize(&rec);
+        assert!(
+            result.is_err(),
+            "a record declaring a near-u32::MAX key length must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_oversized_table_name_length() {
+        let mut rec = Vec::new();
+        rec.push(0u8); // op discriminant
+        rec.extend_from_slice(&u16::MAX.to_le_bytes()); // name_len, absurd
+        // No name bytes follow.
+
+        assert!(
+            CdcRecord::deserialize(&rec).is_err(),
+            "a record declaring a u16::MAX table name length must be rejected"
+        );
+    }
 
     #[test]
     fn cdc_key_round_trip() {

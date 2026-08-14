@@ -81,7 +81,10 @@ impl<T: Value> Value for Vec<T> {
                 offset += consumed;
                 len
             };
-            if offset + element_len > data.len() {
+            if offset
+                .checked_add(element_len)
+                .is_none_or(|end| end > data.len())
+            {
                 break;
             }
             result.push(T::from_bytes(&data[offset..(offset + element_len)]));

@@ -928,7 +928,10 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         let map_len =
             u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| err())?) as usize;
         cursor += 4;
-        if cursor + map_len > data.len() {
+        if cursor
+            .checked_add(map_len)
+            .is_none_or(|end| end > data.len())
+        {
             return Err(err());
         }
         if map_len % 4 != 0 {
@@ -945,7 +948,10 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         let erase_len =
             u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| err())?) as usize;
         cursor += 4;
-        if cursor + erase_len > data.len() {
+        if cursor
+            .checked_add(erase_len)
+            .is_none_or(|end| end > data.len())
+        {
             return Err(err());
         }
         // Each erase count is a packed u32 (4 bytes). Reject unaligned lengths
@@ -963,7 +969,10 @@ impl<H: FlashHardware> FlashTranslationLayer<H> {
         let bbt_len =
             u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| err())?) as usize;
         cursor += 4;
-        if cursor + bbt_len > data.len() {
+        if cursor
+            .checked_add(bbt_len)
+            .is_none_or(|end| end > data.len())
+        {
             return Err(err());
         }
         let bad_blocks = BadBlockTable::from_bytes(&data[cursor..cursor + bbt_len], total_blocks)?;

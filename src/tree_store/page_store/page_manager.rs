@@ -28,6 +28,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
 use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "logging")]
+use log::warn;
 
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space

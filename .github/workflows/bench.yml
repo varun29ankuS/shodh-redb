@@ -139,6 +139,9 @@ jobs:
   bench-report:
     name: Benchmark Report (I/O)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -205,24 +208,78 @@ jobs:
       # Advisory: surface criterion's own same-runner verdict. Not a gate yet --
       # promoting this to a required check should be a separate, deliberate
       # change once we have seen the real noise floor across several PRs.
-      - name: Summarise I/O comparison
+      # Advisory: post criterion's same-runner verdict as a single sticky PR
+      # comment, updated in place rather than appended each run.
+      #
+      # The comment is deliberately kept (the previous implementation had one
+      # via github-action-benchmark): an advisory signal that lives only in the
+      # Actions UI does not reach reviewers, so it does not influence decisions.
+      # What changed is the data behind it -- same-runner comparison instead of
+      # cross-runner JSON.
+      #
+      # Not a gate yet: promoting this to a required check should be a separate,
+      # deliberate change once the real noise floor has been observed across
+      # several PRs.
+      - name: Report I/O comparison
         if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if [ ! -s bench_io_output.txt ]; then
-            echo "No I/O benchmark output produced." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          REGRESSED=$(grep -c "Performance has regressed" bench_io_output.txt || true)
-          IMPROVED=$(grep -c "Performance has improved" bench_io_output.txt || true)
+          MARKER="<!-- shodh-redb-io-bench -->"
           {
-            echo "## I/O benchmarks (advisory, same-runner baseline)"
+            echo "$MARKER"
+            echo "### I/O benchmarks (advisory)"
             echo ""
-            echo "- regressed: **$REGRESSED**"
-            echo "- improved: **$IMPROVED**"
-            echo ""
-            echo "Comparison is against \`${{ github.event.pull_request.base.sha }}\` benchmarked on this same runner, so cross-machine variance is excluded."
-            echo ""
-            echo '```'
-            grep -E "^(kv|blob|ivfpq)|time:|change:|Performance has|within noise" bench_io_output.txt | head -120
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } > comment.md
+
+          if [ ! -s bench_io_output.txt ]; then
+            echo "No benchmark output was produced -- the suite failed to run." >> comment.md
+          else
+            REGRESSED=$(grep -c "Performance has regressed" bench_io_output.txt || true)
+            IMPROVED=$(grep -c "Performance has improved" bench_io_output.txt || true)
+            NOISE=$(grep -c "within noise threshold" bench_io_output.txt || true)
+            NOCHANGE=$(grep -c "No change in performance" bench_io_output.txt || true)
+            {
+              echo "| verdict | count |"
+              echo "|---|---|"
+              echo "| regressed | **$REGRESSED** |"
+              echo "| improved | $IMPROVED |"
+              echo "| within noise | $NOISE |"
+              echo "| no change | $NOCHANGE |"
+              echo ""
+              echo "Baseline is \`${BASE_SHA:0:7}\` benchmarked on **this same runner**, so"
+              echo "cross-machine variance is excluded. Advisory only -- does not gate."
+              echo ""
+              if [ "$REGRESSED" -gt 0 ]; then
+                echo "<details><summary>Regressions</summary>"
+                echo ""
+                echo '```'
+                grep -B 4 "Performance has regressed" bench_io_output.txt | head -80
+                echo '```'
+                echo ""
+                echo "</details>"
+                echo ""
+              fi
+              echo "<details><summary>Full comparison</summary>"
+              echo ""
+              echo '```'
+              grep -E "time:|change:|Performance has|within noise|No change" bench_io_output.txt | head -150
+              echo '```'
+              echo ""
+              echo "</details>"
+            } >> comment.md
+          fi
+
+          # Update the existing sticky comment if present, else create it.
+          ID=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate                  --jq "[.[] | select(.body | startswith(\"$MARKER\"))] | .[0].id // empty")
+          if [ -n "$ID" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${ID}"               -F body=@comment.md >/dev/null
+            echo "updated comment $ID"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments"               -F body=@comment.md >/dev/null
+            echo "created comment"
+          fi
+
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"

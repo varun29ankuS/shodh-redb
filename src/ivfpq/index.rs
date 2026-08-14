@@ -840,16 +840,24 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
                 let pq_block = blob.pq_codes_block();
                 let m = pq_len as usize;
+                // Bound pruning cutoff, hoisted out of the candidate loop.
+                //
+                // Recomputing this per candidate costs a heap peek, a float
+                // subtract, a float DIVIDE and a ceil -- comparable to the
+                // entire `m`-lookup inner loop it is meant to skip, so it made
+                // the scan slower rather than faster. The heap's worst distance
+                // can only change on a successful push, so it is recomputed
+                // there instead. A stale cutoff is always larger than the
+                // current one, which prunes less but never wrongly -- so this
+                // stays exact.
+                //
+                // `scale`/`offset` are rebuilt with the ADC table per cluster,
+                // so the cutoff is seeded per cluster too.
+                let mut cutoff = heap
+                    .worst_distance()
+                    .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
                 for i in 0..blob.count() {
                     let codes = &pq_block[i as usize * m..(i as usize + 1) * m];
-                    // Bound pruning: once the heap is full, any candidate whose
-                    // running ADC sum reaches the current k-th best distance
-                    // cannot displace it, so the remaining sub-vector lookups
-                    // are wasted work. The cutoff is recomputed per cluster
-                    // because `scale`/`offset` are rebuilt with the ADC table.
-                    let cutoff = heap
-                        .worst_distance()
-                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
                     let Some(raw) = adc.approximate_distance_bounded(codes, cutoff) else {
                         continue;
                     };
@@ -866,6 +874,10 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                         continue;
                     }
                     heap.push(vid, dist);
+                    // Only a successful push can lower the k-th best distance.
+                    cutoff = heap
+                        .worst_distance()
+                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
                 }
             }
         }
@@ -1320,16 +1332,24 @@ impl ReadOnlyIvfPqIndex {
 
                 let pq_block = blob.pq_codes_block();
                 let m = pq_len as usize;
+                // Bound pruning cutoff, hoisted out of the candidate loop.
+                //
+                // Recomputing this per candidate costs a heap peek, a float
+                // subtract, a float DIVIDE and a ceil -- comparable to the
+                // entire `m`-lookup inner loop it is meant to skip, so it made
+                // the scan slower rather than faster. The heap's worst distance
+                // can only change on a successful push, so it is recomputed
+                // there instead. A stale cutoff is always larger than the
+                // current one, which prunes less but never wrongly -- so this
+                // stays exact.
+                //
+                // `scale`/`offset` are rebuilt with the ADC table per cluster,
+                // so the cutoff is seeded per cluster too.
+                let mut cutoff = heap
+                    .worst_distance()
+                    .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
                 for i in 0..blob.count() {
                     let codes = &pq_block[i as usize * m..(i as usize + 1) * m];
-                    // Bound pruning: once the heap is full, any candidate whose
-                    // running ADC sum reaches the current k-th best distance
-                    // cannot displace it, so the remaining sub-vector lookups
-                    // are wasted work. The cutoff is recomputed per cluster
-                    // because `scale`/`offset` are rebuilt with the ADC table.
-                    let cutoff = heap
-                        .worst_distance()
-                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
                     let Some(raw) = adc.approximate_distance_bounded(codes, cutoff) else {
                         continue;
                     };
@@ -1346,6 +1366,10 @@ impl ReadOnlyIvfPqIndex {
                         continue;
                     }
                     heap.push(vid, dist);
+                    // Only a successful push can lower the k-th best distance.
+                    cutoff = heap
+                        .worst_distance()
+                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
                 }
             }
         }

@@ -1030,3 +1030,80 @@ fn corrupt_commit_slot_fallback_survives_repair_path() {
     let report = db.verify_integrity(VerifyLevel::Pages).unwrap();
     assert!(report.valid, "recovered database must verify: {report:?}");
 }
+
+/// `crash_at_various_write_points` samples six countdown values and reuses one
+/// file, so each iteration crashes on the previous iteration's wreckage. Worse,
+/// a full open+write+commit for that workload consumes fewer backend operations
+/// than its smallest sampled value, so it injects no failure at all.
+///
+/// This sweeps every crash point from a pristine copy, asserting the ACID
+/// guarantee directly: after a failure at any single I/O operation, the database
+/// must reopen and verify. The workload is sized so the commit spans ~80
+/// operations, and the sweep runs past the end of that sequence so both the
+/// failing and the clean-commit cases are covered.
+#[test]
+fn crash_at_every_write_point_recovers() {
+    const SWEEP: u64 = 100;
+    // Guards against the sweep silently going vacuous if the I/O sequence ever
+    // gets shorter than the range: without this, every case would commit
+    // cleanly and the test would still pass while injecting nothing.
+    const MIN_INJECTED: u64 = 40;
+
+    let baseline = create_tempfile();
+    {
+        let db = populate_baseline(baseline.path(), 2000);
+        drop(db);
+    }
+    let pristine = std::fs::read(baseline.path()).unwrap();
+
+    let mut injected = 0u64;
+    for countdown in 1..=SWEEP {
+        let work = create_tempfile();
+        std::fs::write(work.path(), &pristine).unwrap();
+
+        {
+            let file_backend = FileBackend::new(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(work.path())
+                    .unwrap(),
+            )
+            .unwrap();
+            let crash_backend = CountdownBackend::new(file_backend, countdown);
+
+            match Builder::new().create_with_backend(crash_backend) {
+                Ok(db) => {
+                    let result = (|| -> Result<(), shodh_redb::Error> {
+                        let txn = db.begin_write()?;
+                        {
+                            let mut t = txn.open_table(TABLE)?;
+                            for i in 0..2000u64 {
+                                t.insert(&i, &[0xDD; 64][..])?;
+                            }
+                        }
+                        txn.commit()?;
+                        Ok(())
+                    })();
+                    if result.is_err() {
+                        injected += 1;
+                    }
+                    drop(db);
+                }
+                Err(_) => injected += 1,
+            }
+        }
+
+        let db = Database::open(work.path())
+            .unwrap_or_else(|e| panic!("countdown {countdown}: reopen failed: {e:?}"));
+        let report = db
+            .verify_integrity(VerifyLevel::Pages)
+            .unwrap_or_else(|e| panic!("countdown {countdown}: verify errored: {e:?}"));
+        assert!(report.valid, "countdown {countdown}: {report:?}");
+    }
+
+    assert!(
+        injected >= MIN_INJECTED,
+        "only {injected} of {SWEEP} crash points injected a failure; the sweep          no longer covers the commit's I/O sequence"
+    );
+}

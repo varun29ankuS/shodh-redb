@@ -989,3 +989,44 @@ fn corrupt_layout_fields_never_panic() {
         }
     }
 }
+
+/// The slot fallback must compose with `pick_primary_for_repair`, which runs
+/// afterwards when recovery_required is also set. That function swaps to the
+/// secondary when the primary is corrupt -- so unless repair_info is kept in
+/// step with the fallback's swap, it swaps straight back to the damaged slot.
+#[test]
+fn corrupt_commit_slot_fallback_survives_repair_path() {
+    const GOD_BYTE_OFFSET: usize = 9;
+    const PRIMARY_BIT: u8 = 1;
+    const RECOVERY_REQUIRED: u8 = 2;
+    const TRANSACTION_0_OFFSET: usize = 64;
+    const TRANSACTION_SIZE: usize = 128;
+    const SLOT_CHECKSUM_IN_SLOT: usize = 112;
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        for i in 0..3u64 {
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(U64_TABLE).unwrap();
+                t.insert(&i, &i).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+    }
+
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    let primary = usize::from(bytes[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
+    let pslot = TRANSACTION_0_OFFSET + primary * TRANSACTION_SIZE;
+    // Damage the primary slot AND demand recovery, so both the fallback and
+    // the repair path's slot selection run over the same header.
+    bytes[pslot + SLOT_CHECKSUM_IN_SLOT] ^= 0xFF;
+    bytes[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    let db = Database::open(tmpfile.path())
+        .expect("must recover using the intact commit slot, not the damaged one");
+    let report = db.verify_integrity(VerifyLevel::Pages).unwrap();
+    assert!(report.valid, "recovered database must verify: {report:?}");
+}

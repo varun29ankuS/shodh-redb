@@ -345,6 +345,7 @@ impl TransactionalMemory {
                 &mut repair_info.primary_corrupted,
                 &mut repair_info.secondary_corrupted,
             );
+
             let recovered = header.primary_slot().transaction_id.raw_id();
             #[cfg(feature = "logging")]
             warn!(

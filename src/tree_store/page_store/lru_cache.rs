@@ -1,6 +1,7 @@
 use crate::tree_store::page_store::fast_hash::FastHashMapU64;
 use alloc::collections::VecDeque;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::Ordering;
+use portable_atomic::AtomicBool;
 
 #[derive(Default)]
 pub struct LRUCache<T> {

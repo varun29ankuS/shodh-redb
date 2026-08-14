@@ -7,10 +7,13 @@ use crate::blob_store::types::{
 use crate::blob_store::writer::BlobWriter;
 use crate::cdc::CdcConfig;
 use crate::cdc::types::{CdcEvent, CdcKey, CdcRecord, ChangeStream};
+use crate::compat::Arc;
 use crate::compat::{HashMap, HashSet, Mutex};
 use crate::db::TransactionGuard;
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
+#[cfg_attr(target_has_atomic = "ptr", allow(unused_imports))]
+use crate::observer::DatabaseObserver;
 use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
 use crate::temporal::HybridLogicalClock;
@@ -31,7 +34,6 @@ use crate::{
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
@@ -42,9 +44,10 @@ use core::mem;
 use core::mem::size_of;
 use core::ops::{RangeBounds, RangeFull};
 use core::panic;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::Ordering;
 #[cfg(feature = "logging")]
 use log::{debug, warn};
+use portable_atomic::AtomicBool;
 use sha2::{Digest, Sha256};
 
 const MAX_PAGES_PER_COMPACTION: usize = 1_000_000;
@@ -1020,7 +1023,7 @@ pub struct WriteTransaction {
     pub(crate) cdc_log: Option<Mutex<Vec<CdcEvent>>>,
     cdc_config: CdcConfig,
     history_retention: u64,
-    observer: Arc<dyn crate::observer::DatabaseObserver>,
+    observer: crate::observer::ObserverRef,
     #[cfg(feature = "metrics")]
     db_metrics: Arc<crate::observer::DbMetrics>,
 }
@@ -1034,7 +1037,7 @@ impl WriteTransaction {
         blob_dedup_config: BlobDedupConfig,
         cdc_config: CdcConfig,
         history_retention: u64,
-        observer: Arc<dyn crate::observer::DatabaseObserver>,
+        observer: crate::observer::ObserverRef,
         #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self> {
         let transaction_id = guard.id()?;
@@ -3523,7 +3526,7 @@ pub struct ReadTransaction {
     /// would give a root whose pages may have been freed and reallocated.
     system_root: Option<BtreeHeader>,
     transaction_id: Option<u64>,
-    observer: Arc<dyn crate::observer::DatabaseObserver>,
+    observer: crate::observer::ObserverRef,
     #[cfg(feature = "metrics")]
     db_metrics: Arc<crate::observer::DbMetrics>,
 }
@@ -3532,7 +3535,7 @@ impl ReadTransaction {
     pub(crate) fn new(
         mem: Arc<TransactionalMemory>,
         guard: TransactionGuard,
-        observer: Arc<dyn crate::observer::DatabaseObserver>,
+        observer: crate::observer::ObserverRef,
         #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self, TransactionError> {
         let root_page = mem.get_data_root();
@@ -3556,7 +3559,7 @@ impl ReadTransaction {
         mem: Arc<TransactionalMemory>,
         guard: TransactionGuard,
         user_root: Option<BtreeHeader>,
-        observer: Arc<dyn crate::observer::DatabaseObserver>,
+        observer: crate::observer::ObserverRef,
         #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self, TransactionError> {
         let system_root = mem.get_system_root();

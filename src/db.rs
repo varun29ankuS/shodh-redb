@@ -1,11 +1,12 @@
 use crate::blob_store::{BlobCompactionPolicy, BlobCompactionReport, BlobDedupConfig, BlobStats};
 use crate::cdc::CdcConfig;
+use crate::compat::Arc;
 use crate::error::{BackendError, TransactionError};
 #[cfg(feature = "std")]
 use crate::group_commit::{GroupCommitError, GroupCommitter, WriteBatch};
 #[cfg(feature = "metrics")]
 use crate::observer::DbMetrics;
-use crate::observer::{DatabaseObserver, default_observer};
+use crate::observer::{DatabaseObserver, ObserverRef, default_observer};
 use crate::sealed::Sealed;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::transactions::{
@@ -30,7 +31,6 @@ use crate::{ReadTransaction, Result, WriteTransaction};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 #[cfg(feature = "std")]
 use alloc::vec;
 use alloc::vec::Vec;
@@ -678,7 +678,7 @@ pub struct Database {
     cdc_config: CdcConfig,
     history_retention: u64,
     blob_compaction_policy: BlobCompactionPolicy,
-    observer: Arc<dyn DatabaseObserver>,
+    observer: ObserverRef,
     #[cfg(feature = "metrics")]
     db_metrics: Arc<DbMetrics>,
     #[cfg(feature = "std")]
@@ -2068,7 +2068,7 @@ impl Database {
         read_verification: ReadVerification,
         read_verification_callback: Option<Arc<ReadVerificationCallback>>,
         blob_compaction_policy: BlobCompactionPolicy,
-        observer: Arc<dyn DatabaseObserver>,
+        observer: ObserverRef,
         #[cfg(feature = "metrics")] db_metrics: Arc<DbMetrics>,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
@@ -2318,7 +2318,7 @@ impl Database {
     }
 
     /// Returns the observer registered with this database.
-    pub fn observer(&self) -> &Arc<dyn DatabaseObserver> {
+    pub fn observer(&self) -> &ObserverRef {
         &self.observer
     }
 
@@ -2900,7 +2900,16 @@ pub enum ReadVerificationAction {
 ///
 /// Receives the internal page number (as `u64`) that failed checksum verification.
 /// Returns the action the database should take.
+/// Callback invoked when a page is selected for read verification.
+///
+/// On targets without atomic CAS (`thumbv6m` / Cortex-M0+) `Arc` comes from
+/// `portable-atomic-util`, which cannot coerce `Arc<Concrete>` to
+/// `Arc<dyn Trait>` on stable Rust, so this degrades to a plain function
+/// pointer. Closures capturing state cannot be registered on those targets.
+#[cfg(target_has_atomic = "ptr")]
 pub type ReadVerificationCallback = dyn Fn(u64) -> ReadVerificationAction + Send + Sync + 'static;
+#[cfg(not(target_has_atomic = "ptr"))]
+pub type ReadVerificationCallback = fn(u64) -> ReadVerificationAction;
 
 /// Configuration builder of a redb [Database].
 pub struct Builder {
@@ -2916,7 +2925,7 @@ pub struct Builder {
     history_retention: u64,
     read_verification: ReadVerification,
     read_verification_callback: Option<Arc<ReadVerificationCallback>>,
-    observer: Option<Arc<dyn DatabaseObserver>>,
+    observer: Option<ObserverRef>,
     blob_compaction_policy: BlobCompactionPolicy,
 }
 
@@ -3104,6 +3113,15 @@ impl Builder {
     /// thread. Implementations must not block, panic, or perform fallible I/O.
     ///
     /// See [`DatabaseObserver`] for the full list of events.
+    ///
+    /// # Availability
+    ///
+    /// Not available on targets without atomic compare-and-swap (`thumbv6m` /
+    /// Cortex-M0+, including the RP2040). Registering an arbitrary observer
+    /// requires `Arc<dyn DatabaseObserver>`, and `portable-atomic-util`'s
+    /// `Arc` cannot perform that unsized coercion on stable Rust. On those
+    /// targets observation is compiled out entirely.
+    #[cfg(target_has_atomic = "ptr")]
     pub fn set_observer(&mut self, observer: impl DatabaseObserver) -> &mut Self {
         self.observer = Some(Arc::new(observer));
         self
@@ -3259,6 +3277,12 @@ impl Builder {
     ///
     /// Without a callback, corrupted pages always return
     /// [`StorageError::Corrupted`].
+    /// # Availability
+    ///
+    /// Not available on targets without atomic compare-and-swap (`thumbv6m` /
+    /// Cortex-M0+). Registering a capturing closure requires `Arc<dyn Fn(..)>`,
+    /// which `portable-atomic-util`'s `Arc` cannot express on stable Rust.
+    #[cfg(target_has_atomic = "ptr")]
     pub fn set_read_verification_callback(
         &mut self,
         callback: impl Fn(u64) -> ReadVerificationAction + Send + Sync + 'static,
@@ -3407,7 +3431,7 @@ impl Builder {
         )
     }
 
-    fn resolve_observer(&self) -> Arc<dyn DatabaseObserver> {
+    fn resolve_observer(&self) -> ObserverRef {
         self.observer
             .as_ref()
             .map_or_else(default_observer, Arc::clone)

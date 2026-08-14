@@ -315,6 +315,15 @@ fn subvector_distance(query_sub: &[f32], centroid: &[f32], metric: DistanceMetri
     }
 }
 
+/// Distance between two equal-length vectors under `metric`.
+///
+/// Thin wrapper exposing [`subvector_distance`] to `kmeans`, which uses the
+/// same metric to chain centroids by spatial adjacency.
+#[inline]
+pub(crate) fn subvector_distance_pub(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
+    subvector_distance(a, b, metric)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

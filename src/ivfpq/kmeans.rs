@@ -489,3 +489,132 @@ mod tests {
         assert_eq!(result[1].0, 0); // next is (0,0)
     }
 }
+
+/// Reorder centroids so that geometrically close centroids receive close
+/// cluster IDs, via greedy nearest-neighbour chaining.
+///
+/// Cluster blobs are stored in a B-tree keyed by cluster ID, so ordered keys
+/// place adjacent IDs on adjacent pages. A search probes the `nprobe` centroids
+/// nearest the query -- which are, by definition, near each other. Numbering
+/// them arbitrarily scatters those reads across the tree; numbering them by
+/// spatial adjacency turns them into a near-sequential run, which is friendlier
+/// to the page cache, to readahead, and to the flash FTL's erase blocks.
+///
+/// This is the software form of the locality-aware centroid mapping in D-NOVA
+/// (arXiv 2607.17538), which grouped geometrically close centroids by greedy
+/// nearest-neighbour chaining and reported roughly 40% fewer sub-block
+/// activations.
+///
+/// Purely a relabelling, applied during training before any vector is assigned,
+/// so it cannot change which clusters a query probes or what it finds. Recall
+/// is unaffected by construction.
+///
+/// `O(k^2 * dim)`, run once per `train()` -- negligible beside k-means itself.
+#[must_use]
+pub(crate) fn reorder_centroids_for_locality(
+    centroids: &[f32],
+    dim: usize,
+    metric: DistanceMetric,
+) -> Vec<f32> {
+    if dim == 0 || centroids.len() < dim.saturating_mul(2) {
+        return centroids.to_vec();
+    }
+    let k = centroids.len() / dim;
+
+    let mut visited = alloc::vec![false; k];
+    let mut order = Vec::with_capacity(k);
+    let mut current = 0usize;
+    visited[0] = true;
+    order.push(0usize);
+
+    for _ in 1..k {
+        let cur = &centroids[current * dim..(current + 1) * dim];
+        let mut best: Option<(usize, f32)> = None;
+        for cand in 0..k {
+            if visited[cand] {
+                continue;
+            }
+            let other = &centroids[cand * dim..(cand + 1) * dim];
+            let d = super::adc::subvector_distance_pub(cur, other, metric);
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((cand, d));
+            }
+        }
+        // `best` is always Some: the loop runs k-1 times and one centroid is
+        // unvisited on each pass.
+        let Some((next, _)) = best else { break };
+        visited[next] = true;
+        order.push(next);
+        current = next;
+    }
+
+    let mut out = Vec::with_capacity(centroids.len());
+    for &idx in &order {
+        out.extend_from_slice(&centroids[idx * dim..(idx + 1) * dim]);
+    }
+    out
+}
+
+#[cfg(test)]
+mod locality_tests {
+    use super::*;
+
+    /// Relabelling must preserve the multiset of centroids exactly -- it may
+    /// only permute them. If it dropped or duplicated one, assignment would
+    /// silently change and recall with it.
+    #[test]
+    fn reorder_is_a_permutation() {
+        let dim = 2;
+        let centroids: Vec<f32> = alloc::vec![0.0, 0.0, 10.0, 10.0, 0.5, 0.5, 9.5, 9.5];
+        let out = reorder_centroids_for_locality(&centroids, dim, DistanceMetric::EuclideanSq);
+        assert_eq!(out.len(), centroids.len());
+
+        let mut got: Vec<[u32; 2]> = out
+            .chunks_exact(dim)
+            .map(|c| [c[0].to_bits(), c[1].to_bits()])
+            .collect();
+        let mut want: Vec<[u32; 2]> = centroids
+            .chunks_exact(dim)
+            .map(|c| [c[0].to_bits(), c[1].to_bits()])
+            .collect();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want, "reordering must be a pure permutation");
+    }
+
+    /// Two well-separated groups must come out contiguous, which is the whole
+    /// point: probing one group then reads a near-sequential ID range.
+    #[test]
+    fn reorder_groups_neighbours_together() {
+        let dim = 2;
+        // Interleaved input: near, far, near, far.
+        let centroids: Vec<f32> = alloc::vec![0.0, 0.0, 100.0, 100.0, 1.0, 1.0, 101.0, 101.0];
+        let out = reorder_centroids_for_locality(&centroids, dim, DistanceMetric::EuclideanSq);
+        let xs: Vec<f32> = out.chunks_exact(dim).map(|c| c[0]).collect();
+        // Chain starts at the first centroid and walks to its nearest
+        // neighbour, so the two low points precede the two high points.
+        assert!(
+            xs[0] < 50.0 && xs[1] < 50.0,
+            "near group must be contiguous: {xs:?}"
+        );
+        assert!(
+            xs[2] > 50.0 && xs[3] > 50.0,
+            "far group must be contiguous: {xs:?}"
+        );
+    }
+
+    /// Degenerate inputs must pass through untouched rather than panic.
+    #[test]
+    fn reorder_handles_degenerate_input() {
+        assert!(reorder_centroids_for_locality(&[], 4, DistanceMetric::EuclideanSq).is_empty());
+        let single = alloc::vec![1.0f32, 2.0];
+        assert_eq!(
+            reorder_centroids_for_locality(&single, 2, DistanceMetric::EuclideanSq),
+            single
+        );
+        assert_eq!(
+            reorder_centroids_for_locality(&single, 0, DistanceMetric::EuclideanSq),
+            single
+        );
+    }
+}

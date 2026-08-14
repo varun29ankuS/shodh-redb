@@ -257,6 +257,13 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         // 1. Train IVF centroids.
         let centroid_data = kmeans::kmeans(&flat, dim, num_clusters, max_iter, self.config.metric);
+        // Relabel so spatially adjacent centroids get adjacent cluster IDs.
+        // Cluster blobs are keyed by ID in a B-tree, so this turns the
+        // `nprobe` reads of a search into a near-sequential run instead of
+        // scattered lookups. Done before any assignment, so it cannot affect
+        // which clusters a query probes -- recall is unchanged.
+        let centroid_data =
+            kmeans::reorder_centroids_for_locality(&centroid_data, dim, self.config.metric);
 
         // kmeans clamps k to min(requested, n). Update config to reflect the
         // actual number of centroids so that subsequent opens don't try to
@@ -388,6 +395,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         progress(&p);
         self.observer.on_train_progress(&self.name, &p);
         let centroid_data = kmeans::kmeans(&flat, dim, num_clusters, max_iter, self.config.metric);
+        // See train(): locality relabelling, recall-neutral.
+        let centroid_data =
+            kmeans::reorder_centroids_for_locality(&centroid_data, dim, self.config.metric);
 
         let actual_k = centroid_data.len() / dim;
         let old_k = self.config.num_clusters as usize;

@@ -976,6 +976,7 @@ fn corrupt_layout_fields_never_panic() {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             std::fs::write(tmpfile.path(), &bytes).unwrap();
 
+            eprintln!("CASE {name}={value:#x}");
             // Only the outcome matters: Ok or Err, but no panic and no hang.
             if let Ok(db) = Database::open(tmpfile.path()) {
                 // If it opened, the layout it chose must describe a file it can

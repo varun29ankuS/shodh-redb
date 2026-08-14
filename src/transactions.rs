@@ -243,18 +243,25 @@ impl PageList<'_> {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.data[..size_of::<u16>()]
+        let stored = self.data[..size_of::<u16>()]
             .try_into()
             .map(|b| u16::from_le_bytes(b) as usize)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        // The count is read off a B-tree page, so it can disagree with the
+        // buffer that follows it. Clamp it, otherwise `get` slices out of
+        // bounds and panics. This is walked by `visit_freed_tree` during
+        // repair, on a database already known to be damaged.
+        let capacity =
+            self.data.len().saturating_sub(size_of::<u16>()) / PageNumber::serialized_size();
+        stored.min(capacity)
     }
 
     pub(crate) fn get(&self, index: usize) -> PageNumber {
         let start = size_of::<u16>() + PageNumber::serialized_size() * index;
-        self.data[start..(start + PageNumber::serialized_size())]
-            .try_into()
-            .map(PageNumber::from_le_bytes)
-            .unwrap_or(PageNumber::new(0, 0, 0))
+        self.data
+            .get(start..(start + PageNumber::serialized_size()))
+            .and_then(|b| b.try_into().ok())
+            .map_or(PageNumber::new(0, 0, 0), PageNumber::from_le_bytes)
     }
 }
 
@@ -4596,6 +4603,33 @@ mod test {
     use crate::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    /// `PageList::len` reads a u16 straight off a B-tree page. `get` then
+    /// slices `data[start..start + 8]`, which panics outright if that length
+    /// outruns the buffer. `visit_freed_tree` walks this during `do_repair` --
+    /// on a database already known to be damaged -- so a panic here turns a
+    /// partial recovery into no recovery at all.
+    #[test]
+    fn page_list_len_is_bounded_by_its_buffer() {
+        use crate::transactions::PageList;
+        use crate::types::Value;
+
+        // Claim 1000 entries but supply room for only two.
+        let mut data = Vec::new();
+        data.extend(1000u16.to_le_bytes());
+        data.extend([0u8; 16]);
+
+        let list = <PageList as Value>::from_bytes(&data);
+        assert_eq!(
+            list.len(),
+            2,
+            "len must be clamped to what the buffer can hold"
+        );
+        // Every index below len() must be readable without panicking.
+        for i in 0..list.len() {
+            let _ = list.get(i);
+        }
+    }
 
     #[test]
     fn transaction_id_persistence() {

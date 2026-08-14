@@ -223,14 +223,25 @@ impl IntAdcTable {
             return u32::MAX;
         }
         let base = self.num_subvectors as f32 * self.offset;
-        // Round up so that to_f32(cutoff) >= worst holds despite float error.
-        let raw = ((worst - base) / self.scale).ceil();
-        if raw <= 0.0 {
+        if !base.is_finite() {
+            return u32::MAX;
+        }
+        let quotient = (worst - base) / self.scale;
+        if quotient <= 0.0 {
             0
-        } else if raw >= u32::MAX as f32 {
+        } else if quotient >= u32::MAX as f32 {
             u32::MAX
         } else {
-            raw as u32
+            // Round up, so that to_f32(cutoff) >= worst holds despite float
+            // error. `f32::ceil` is std-only, and this crate builds no_std;
+            // truncation toward zero is exact for a positive f32 below
+            // `u32::MAX`, so add one whenever a fractional part was dropped.
+            let truncated = quotient as u32;
+            if (truncated as f32) < quotient {
+                truncated + 1
+            } else {
+                truncated
+            }
         }
     }
 
@@ -401,6 +412,22 @@ mod tests {
         let (adc, _) = sample_int_adc();
         assert_eq!(adc.cutoff_from_f32(f32::NAN), u32::MAX);
         assert_eq!(adc.cutoff_from_f32(f32::INFINITY), u32::MAX);
+    }
+
+    /// A non-finite `offset` makes the whole mapping meaningless. Returning a
+    /// small cutoff here would be worse than useless: it would prune every
+    /// candidate and silently return no results. Pruning must be disabled.
+    #[test]
+    fn cutoff_from_f32_disables_pruning_on_non_finite_offset() {
+        let (mut adc, _) = sample_int_adc();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            adc.offset = bad;
+            assert_eq!(
+                adc.cutoff_from_f32(1.0),
+                u32::MAX,
+                "offset {bad} must disable pruning, not prune everything"
+            );
+        }
     }
 
     #[test]

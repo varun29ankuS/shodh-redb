@@ -173,6 +173,23 @@ pub struct ClusterBlobRef<'a> {
     raw_vec_bytes: usize,
 }
 
+/// Total bytes a cluster blob with this header must occupy, or `None` if the
+/// computation overflows `u64` or does not fit in a `usize` on this target.
+///
+/// Kept as a standalone checked computation because every accessor on
+/// [`ClusterBlobRef`] indexes with `get_unchecked` and relies solely on the
+/// bounds check in [`ClusterBlobRef::new`] for soundness.
+fn required_blob_len(count: u32, pq_len: u16, has_raw: bool, dim: u32) -> Option<usize> {
+    let n = u64::from(count);
+    let mut total = (HEADER_SIZE as u64).checked_add(n.checked_mul(8)?)?;
+    total = total.checked_add(n.checked_mul(u64::from(pq_len))?)?;
+    if has_raw {
+        let raw_vec_bytes = u64::from(dim).checked_mul(4)?;
+        total = total.checked_add(n.checked_mul(raw_vec_bytes)?)?;
+    }
+    usize::try_from(total).ok()
+}
+
 impl<'a> ClusterBlobRef<'a> {
     /// Parse and validate a cluster blob.
     ///
@@ -211,19 +228,33 @@ impl<'a> ClusterBlobRef<'a> {
             )));
         }
 
-        let n = count as usize;
-        let ids_offset = HEADER_SIZE;
-        let pq_offset = ids_offset + n * 8;
-        let raw_offset = pq_offset + n * pq_len as usize;
-        let raw_vec_bytes = if has_raw { dim * 4 } else { 0 };
-
-        let expected_len = raw_offset + if has_raw { n * raw_vec_bytes } else { 0 };
+        // Compute the required length in u64 with checked arithmetic. `count` is
+        // attacker-controlled (it is read straight off disk), so on 32-bit
+        // targets the naive `count as usize * 8` wraps: a 16-byte blob would
+        // then validate while reporting a huge `count`, and every accessor
+        // below indexes with `get_unchecked`.
+        let dim_u32 = u32::try_from(dim).map_err(|_| {
+            StorageError::Corrupted(alloc::format!("cluster blob dim {dim} exceeds u32"))
+        })?;
+        let Some(expected_len) = required_blob_len(count, pq_len, has_raw, dim_u32) else {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "cluster blob size overflow (count={count}, pq_len={pq_len}, has_raw={has_raw}, dim={dim})"
+            )));
+        };
         if data.len() < expected_len {
             return Err(StorageError::Corrupted(alloc::format!(
                 "cluster blob truncated: {} < {expected_len} (count={count}, pq_len={pq_len}, has_raw={has_raw})",
                 data.len()
             )));
         }
+
+        // Safe: `required_blob_len` succeeded, so every partial sum below is
+        // <= expected_len <= data.len() and cannot overflow usize.
+        let n = count as usize;
+        let ids_offset = HEADER_SIZE;
+        let pq_offset = ids_offset + n * 8;
+        let raw_offset = pq_offset + n * pq_len as usize;
+        let raw_vec_bytes = if has_raw { dim * 4 } else { 0 };
 
         Ok(Self {
             data,
@@ -295,6 +326,9 @@ impl<'a> ClusterBlobRef<'a> {
     #[inline]
     pub(crate) fn pq_codes_block(&self) -> &[u8] {
         let end = self.pq_offset + self.count as usize * self.pq_len as usize;
+        // SAFETY: `new()` verified via `required_blob_len` (checked arithmetic)
+        // that `data.len() >= HEADER_SIZE + count*8 + count*pq_len`, so
+        // `pq_offset..end` is in bounds and cannot have wrapped.
         debug_assert!(end <= self.data.len());
         unsafe { self.data.get_unchecked(self.pq_offset..end) }
     }
@@ -309,6 +343,10 @@ impl<'a> ClusterBlobRef<'a> {
         }
         let start = self.raw_offset + i as usize * self.raw_vec_bytes;
         let end = start + self.raw_vec_bytes;
+        // SAFETY: `has_raw` is set, so `new()` verified via `required_blob_len`
+        // (checked arithmetic) that `data.len()` covers
+        // `raw_offset + count*dim*4`. Callers pass `i < count`, so
+        // `start..end` is in bounds and cannot have wrapped.
         debug_assert!(end <= self.data.len());
         Some(unsafe { self.data.get_unchecked(start..end) })
     }
@@ -440,6 +478,53 @@ pub fn remove_from_blob(blob: &ClusterBlobRef<'_>, vector_id: u64, pq_len: u16) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_blob_len_rejects_overflowing_headers() {
+        // Sane header: 2 vectors, 4-byte PQ codes, no raw vectors.
+        assert_eq!(
+            required_blob_len(2, 4, false, 0),
+            Some(HEADER_SIZE + 2 * 8 + 2 * 4)
+        );
+
+        // The products below exceed u64 and must be reported as overflow rather
+        // than wrapping to a small value that a short buffer would satisfy.
+        // count * dim * 4 = 2^32 * 2^32 * 4 = 2^66.
+        assert_eq!(
+            required_blob_len(u32::MAX, 0, true, u32::MAX),
+            None,
+            "count * dim * 4 overflows u64 and must be rejected"
+        );
+
+        // On a 32-bit target the total must not be silently truncated into
+        // usize. count * 8 = 2^32 alone exceeds a 32-bit usize.
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(
+            required_blob_len(u32::MAX, 0, false, 0),
+            None,
+            "total exceeding 32-bit usize must be rejected, not truncated"
+        );
+    }
+
+    /// On 32-bit targets (wasm32 / WASI) `n * 8` wraps, so a 16-byte blob could
+    /// validate while reporting a huge `count`. Callers iterate `0..count` and
+    /// index with `get_unchecked`, so that is an out-of-bounds read.
+    #[test]
+    fn rejects_count_that_overflows_pointer_width() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&MAGIC.to_le_bytes());
+        blob.extend_from_slice(&VERSION.to_le_bytes());
+        // count = 2^29; on 32-bit `count * 8` == 2^32 wraps to 0.
+        blob.extend_from_slice(&0x2000_0000u32.to_le_bytes());
+        blob.extend_from_slice(&0u16.to_le_bytes()); // pq_len
+        blob.extend_from_slice(&0u16.to_le_bytes()); // flags
+        assert_eq!(blob.len(), HEADER_SIZE);
+
+        assert!(
+            ClusterBlobRef::new(&blob, 0, 0).is_err(),
+            "a 16-byte blob claiming 2^29 vectors must be rejected"
+        );
+    }
 
     #[test]
     fn round_trip_no_raw() {

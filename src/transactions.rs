@@ -4653,18 +4653,16 @@ mod test {
     fn blob_prealloc_is_bounded() {
         use crate::transactions::{MAX_BLOB_PREALLOC, blob_prealloc};
 
+        let cap = usize::try_from(MAX_BLOB_PREALLOC).unwrap();
+
         // Ordinary lengths are reserved exactly.
         assert_eq!(blob_prealloc(0), 0);
         assert_eq!(blob_prealloc(4096), 4096);
-        assert_eq!(blob_prealloc(MAX_BLOB_PREALLOC), MAX_BLOB_PREALLOC as usize);
+        assert_eq!(blob_prealloc(MAX_BLOB_PREALLOC), cap);
 
         // A corrupted length is capped, not honoured.
         for absurd in [MAX_BLOB_PREALLOC + 1, 1 << 40, u64::MAX] {
-            assert_eq!(
-                blob_prealloc(absurd) as u64,
-                MAX_BLOB_PREALLOC,
-                "length {absurd} must be capped"
-            );
+            assert_eq!(blob_prealloc(absurd), cap, "length {absurd} must be capped");
         }
     }
 

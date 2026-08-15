@@ -1,6 +1,7 @@
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::Checksum;
 use crate::tree_store::btree_base::BtreeHeader;
+use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, MAX_REGIONS};
 use crate::tree_store::page_store::compression::CompressionConfig;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
@@ -275,6 +276,55 @@ impl DatabaseHeader {
         let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
         let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
         let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
+
+        // These layout fields live outside both commit slots, so the slot
+        // checksums do not cover them. Validate them here, at the parse
+        // boundary, rather than letting a corrupted value reach the layout
+        // arithmetic: `RegionLayout::new` asserts `num_pages > 0`, and
+        // `DatabaseLayout::recalculate` divides by
+        // `(region_header_pages + region_max_data_pages) * page_size`. Both
+        // would panic on an untrusted file instead of reporting corruption.
+        if page_size == 0 {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header has a zero page size".to_string(),
+            )));
+        }
+        if region_max_data_pages == 0 {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header has a zero region_max_data_pages".to_string(),
+            )));
+        }
+        // A page index has to be addressable by `PageNumber`, so no valid
+        // database can exceed these. Without the bound, `BuddyAllocator::new`
+        // sizes its bitmaps straight from `region_max_data_pages`: a corrupted
+        // 0xFFFFFFFF reserves roughly a gigabyte before anything validates it,
+        // which 64-bit absorbs silently and 32-bit (wasm32/WASI) aborts on.
+        //
+        // Bounding the region count also keeps `DatabaseLayout::num_regions`
+        // (`full_regions + 1`) and `len()` (`num_regions() - 1`) from wrapping.
+        if u64::from(region_max_data_pages) > u64::from(MAX_PAGE_INDEX) + 1 {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header region_max_data_pages exceeds the addressable maximum".to_string(),
+            )));
+        }
+        if full_regions > MAX_REGIONS {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header region count exceeds the addressable maximum".to_string(),
+            )));
+        }
+        if full_regions == 0 && trailing_data_pages == 0 {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header describes no regions".to_string(),
+            )));
+        }
+        // The trailing region is partial by definition, so it cannot be larger
+        // than a full region. Violating this makes the buddy allocator index
+        // its bitmaps out of bounds.
+        if trailing_data_pages > region_max_data_pages {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header trailing region exceeds a full region".to_string(),
+            )));
+        }
         let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
             &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
         )?;

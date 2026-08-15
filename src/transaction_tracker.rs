@@ -246,7 +246,7 @@ impl TransactionTracker {
         Ok(state.unprocessed_freed_non_durable_commits.contains(&id))
     }
 
-    pub(crate) fn mark_unprocessed_non_durable_commit(&self, id: TransactionId) -> Result {
+    pub(crate) fn mark_non_durable_commit_processed(&self, id: TransactionId) -> Result {
         #[cfg(feature = "std")]
         let mut state = self.state.lock()?;
         #[cfg(not(feature = "std"))]

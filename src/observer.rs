@@ -64,6 +64,22 @@ pub trait DatabaseObserver: Send + Sync + 'static {
 
     /// A page checksum verification failed.
     fn on_checksum_failure(&self, _page_number: u64) {}
+
+    /// A commit slot failed its checksum while opening the database, so the
+    /// other slot was used instead.
+    ///
+    /// The transaction described by the damaged slot is discarded: the database
+    /// opens at `recovered_transaction_id`, which is older than
+    /// `discarded_transaction_id`. Writes committed in between are gone. This
+    /// indicates storage-level corruption (bit rot, a failing device, or an
+    /// external edit) rather than an unclean shutdown, which takes the normal
+    /// repair path instead. Treat it as a signal to restore from a backup.
+    fn on_commit_slot_rollback(
+        &self,
+        _discarded_transaction_id: u64,
+        _recovered_transaction_id: u64,
+    ) {
+    }
 }
 
 /// Zero-sized no-op observer. Used as the default when no observer is registered.

@@ -28,6 +28,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
 use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "logging")]
+use log::warn;
 
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space
@@ -133,6 +135,10 @@ pub(crate) struct TransactionalMemory {
     // Design: lightweight guard retained independent of CheckedBackend, which
     // may not be enabled in all configurations.
     needs_recovery: AtomicBool,
+    /// Set when a commit slot failed its checksum on open and the other slot
+    /// was used instead. Carries `(discarded_transaction_id,
+    /// recovered_transaction_id)`. Written once during construction.
+    commit_slot_rollback: Option<(u64, u64)>,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
@@ -319,6 +325,37 @@ impl TransactionalMemory {
             }
         }
 
+        // A commit slot whose checksum failed must not be trusted, even when the
+        // god byte says no recovery is needed. A crash cannot produce that
+        // combination -- a write transaction durably sets `recovery_required`
+        // before touching anything -- so it means the slot bytes rotted under us.
+        // Fall back to the intact slot here, before any field of the damaged one
+        // is read (`blob_region_offset` below drives the layout calculation).
+        //
+        // This discards the transaction the damaged slot described, so the caller
+        // is told via `DatabaseObserver::on_commit_slot_rollback`.
+        let commit_slot_rollback = if repair_info.primary_corrupted
+            && !repair_info.secondary_corrupted
+        {
+            let discarded = header.primary_slot().transaction_id.raw_id();
+            header.swap_primary_slot();
+            // Keep repair_info describing the slots as they now stand, so that a
+            // later `pick_primary_for_repair` does not swap back to the bad one.
+            core::mem::swap(
+                &mut repair_info.primary_corrupted,
+                &mut repair_info.secondary_corrupted,
+            );
+
+            let recovered = header.primary_slot().transaction_id.raw_id();
+            #[cfg(feature = "logging")]
+            warn!(
+                "Commit slot checksum failed; falling back to transaction {recovered} and discarding {discarded}"
+            );
+            Some((discarded, recovered))
+        } else {
+            None
+        };
+
         // For existing databases, the on-disk compression config takes precedence.
         let compression = header.compression;
 
@@ -396,6 +433,7 @@ impl TransactionalMemory {
             allocated_since_commit: Mutex::new(Default::default()),
             unpersisted: Mutex::new(Default::default()),
             needs_recovery: AtomicBool::new(needs_recovery),
+            commit_slot_rollback,
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
@@ -508,6 +546,7 @@ impl TransactionalMemory {
             allocated_since_commit: Mutex::new(Default::default()),
             unpersisted: Mutex::new(Default::default()),
             needs_recovery: AtomicBool::new(needs_recovery),
+            commit_slot_rollback: None,
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
@@ -766,6 +805,12 @@ impl TransactionalMemory {
     /// will fail with `RecoveryRequired` until the database is repaired.
     fn mark_needs_recovery(&self) {
         self.needs_recovery.store(true, Ordering::Release);
+    }
+
+    /// `(discarded_transaction_id, recovered_transaction_id)` when a commit slot
+    /// failed its checksum on open and the other slot was used instead.
+    pub(crate) fn commit_slot_rollback(&self) -> Option<(u64, u64)> {
+        self.commit_slot_rollback
     }
 
     pub(crate) fn repair_primary_corrupted(&self) {

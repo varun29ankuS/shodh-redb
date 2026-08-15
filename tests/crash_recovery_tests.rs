@@ -976,7 +976,6 @@ fn corrupt_layout_fields_never_panic() {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             std::fs::write(tmpfile.path(), &bytes).unwrap();
 
-            eprintln!("CASE {name}={value:#x}");
             // Only the outcome matters: Ok or Err, but no panic and no hang.
             if let Ok(db) = Database::open(tmpfile.path()) {
                 // If it opened, the layout it chose must describe a file it can
@@ -1106,5 +1105,36 @@ fn crash_at_every_write_point_recovers() {
     assert!(
         injected >= MIN_INJECTED,
         "only {injected} of {SWEEP} crash points injected a failure; the sweep          no longer covers the commit's I/O sequence"
+    );
+}
+
+/// A page index must be addressable by `PageNumber`, so `region_max_data_pages`
+/// can never legitimately reach `u32::MAX`. It must be rejected rather than
+/// merely survived: `BuddyAllocator::new` sizes its bitmaps straight from this
+/// value, so an unbounded one reserves roughly a gigabyte before anything
+/// validates it. 64-bit absorbs that silently; 32-bit (wasm32/WASI) aborts.
+#[test]
+fn absurd_region_max_data_pages_is_rejected() {
+    const REGION_MAX_DATA_PAGES_OFFSET: usize = 9 + 1 + 2 + 4 + 4;
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(U64_TABLE).unwrap();
+            t.insert(&1u64, &1u64).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    bytes[REGION_MAX_DATA_PAGES_OFFSET..REGION_MAX_DATA_PAGES_OFFSET + 4]
+        .copy_from_slice(&u32::MAX.to_le_bytes());
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    assert!(
+        Database::open(tmpfile.path()).is_err(),
+        "an unaddressable region_max_data_pages must be rejected, not allocated for"
     );
 }

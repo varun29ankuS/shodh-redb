@@ -1,6 +1,7 @@
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::Checksum;
 use crate::tree_store::btree_base::BtreeHeader;
+use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, MAX_REGIONS};
 use crate::tree_store::page_store::compression::CompressionConfig;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
@@ -293,12 +294,22 @@ impl DatabaseHeader {
                 "Database header has a zero region_max_data_pages".to_string(),
             )));
         }
-        // `DatabaseLayout::num_regions` computes `full_regions + 1` when a
-        // trailing region is present, and `len()` computes `num_regions() - 1`.
-        // Neither end of that range may wrap.
-        if full_regions == u32::MAX {
+        // A page index has to be addressable by `PageNumber`, so no valid
+        // database can exceed these. Without the bound, `BuddyAllocator::new`
+        // sizes its bitmaps straight from `region_max_data_pages`: a corrupted
+        // 0xFFFFFFFF reserves roughly a gigabyte before anything validates it,
+        // which 64-bit absorbs silently and 32-bit (wasm32/WASI) aborts on.
+        //
+        // Bounding the region count also keeps `DatabaseLayout::num_regions`
+        // (`full_regions + 1`) and `len()` (`num_regions() - 1`) from wrapping.
+        if u64::from(region_max_data_pages) > u64::from(MAX_PAGE_INDEX) + 1 {
             return Err(DatabaseError::Storage(StorageError::Corrupted(
-                "Database header region count overflows".to_string(),
+                "Database header region_max_data_pages exceeds the addressable maximum".to_string(),
+            )));
+        }
+        if full_regions > MAX_REGIONS {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header region count exceeds the addressable maximum".to_string(),
             )));
         }
         if full_regions == 0 && trailing_data_pages == 0 {

@@ -125,6 +125,11 @@ compression_lz4 = ["dep:lz4_flex"]
 compression_zstd = ["dep:zstd"]
 # Enable all compression algorithms
 compression = ["compression_lz4", "compression_zstd"]
+# Exposes internal primitives (checksums) that fuzz targets need in order to
+# build database images which are internally consistent, so the fuzzer can
+# reach code past the integrity checks instead of only proving they reject
+# random bytes. Not part of the public API and exempt from semver.
+fuzzing = []
 
 [profile.bench]
 debug = true

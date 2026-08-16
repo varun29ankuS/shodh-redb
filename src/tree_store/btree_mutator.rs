@@ -17,6 +17,7 @@ use crate::types::{Key, Value};
 use crate::{AccessGuard, Result, StorageError};
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
 use core::marker::PhantomData;

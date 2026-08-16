@@ -37,7 +37,7 @@ fn wall_clock_ms() -> u64 {
     ms
 }
 
-/// Fallback wall clock for no_std: always returns 0.
+/// Fallback wall clock for `no_std`: always returns 0.
 #[cfg(not(feature = "std"))]
 fn wall_clock_ms() -> u64 {
     0

@@ -227,7 +227,7 @@ fn train_subvectors(
     Ok(all_data)
 }
 
-/// Sequential sub-vector training for no_std environments.
+/// Sequential sub-vector training for `no_std` environments.
 #[cfg(not(feature = "std"))]
 fn train_subvectors(
     flat_vectors: &[f32],

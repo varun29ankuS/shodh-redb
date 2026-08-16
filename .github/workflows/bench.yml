@@ -139,8 +139,15 @@ jobs:
   bench-report:
     name: Benchmark Report (I/O)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The same-runner baseline checks out the PR base commit, so the
+          # default shallow clone is not enough.
+          fetch-depth: 0
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -153,53 +160,130 @@ jobs:
             target/
           key: bench-report-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
           restore-keys: bench-report-${{ runner.os }}-
-
       - name: Install Rust
         run: rustup component add rustfmt
 
+      # Same CPU stabilisation as the vector_ops gate. Without it, frequency
+      # scaling and turbo/thermal behaviour add variance that swamps the signal.
+      - name: Stabilize CPU for benchmarking
+        run: |
+          if command -v cpupower &>/dev/null; then
+            sudo cpupower frequency-set -g performance || true
+          fi
+          if [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+            echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo || true
+          fi
+          if [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
+            echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost || true
+          fi
+
+      # Build the baseline on THIS runner, mirroring the vector_ops gate.
+      #
+      # The previous implementation restored a `.bench_baseline.json` written by
+      # an earlier run on a DIFFERENT GitHub runner, so every comparison
+      # measured the difference between two machines rather than between two
+      # commits. That produced +/-30-62% apparent variance (e.g. kv/insert/1000
+      # reported 2377594 ns +/- 1468337) and systematic-looking "improvements"
+      # where six benchmarks all landed at ratio 0.88-0.94 simultaneously --
+      # the signature of a faster runner, not faster code. At that noise level
+      # the suite could not detect a real 20% regression, which is why it could
+      # never be promoted from advisory to gating.
       - name: Run I/O benchmarks
         id: run_bench
         run: |
-          cargo bench --bench criterion_kv \
-                      --bench criterion_blob \
-                      --bench criterion_ivfpq \
-                      -p shodh-redb \
-                      -- --output-format bencher 2>bench_stderr.txt | grep "^test " | tee bench_output.txt || true
-          if [ ! -s bench_output.txt ]; then
-            echo "::warning::No benchmark output produced. Stderr:" >&2
-            cat bench_stderr.txt >&2
-            echo "bench_empty=true" >> "$GITHUB_OUTPUT"
+          BENCHES="--bench criterion_kv --bench criterion_blob --bench criterion_ivfpq"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git checkout ${{ github.event.pull_request.base.sha }}
+            cargo bench $BENCHES -p shodh-redb -- --save-baseline base 2>&1 | tail -20
+
+            # Let page cache, disk queue and thermal state settle so the second
+            # run is not measuring the first run's after-effects.
+            sync || true
+            sleep 15
+
+            git checkout ${{ github.sha }}
+            cargo bench $BENCHES -p shodh-redb -- --baseline base 2>&1 | tee bench_io_output.txt
+          else
+            cargo bench $BENCHES -p shodh-redb -- --save-baseline base 2>&1 | tee bench_io_output.txt
           fi
         env:
           RUSTFLAGS: ""
 
-      - name: Restore advisory baseline
-        if: github.event_name == 'pull_request' && steps.run_bench.outputs.bench_empty != 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: .bench_baseline.json
-          key: bench-advisory-baseline-${{ runner.os }}
+      # Advisory: surface criterion's own same-runner verdict. Not a gate yet --
+      # promoting this to a required check should be a separate, deliberate
+      # change once we have seen the real noise floor across several PRs.
+      # Advisory: post criterion's same-runner verdict as a single sticky PR
+      # comment, updated in place rather than appended each run.
+      #
+      # The comment is deliberately kept (the previous implementation had one
+      # via github-action-benchmark): an advisory signal that lives only in the
+      # Actions UI does not reach reviewers, so it does not influence decisions.
+      # What changed is the data behind it -- same-runner comparison instead of
+      # cross-runner JSON.
+      #
+      # Not a gate yet: promoting this to a required check should be a separate,
+      # deliberate change once the real noise floor has been observed across
+      # several PRs.
+      - name: Report I/O comparison
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          MARKER="<!-- shodh-redb-io-bench -->"
+          {
+            echo "$MARKER"
+            echo "### I/O benchmarks (advisory)"
+            echo ""
+          } > comment.md
 
-      - name: Post benchmark comparison
-        if: steps.run_bench.outputs.bench_empty != 'true'
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: shodh-redb I/O benchmarks (advisory)
-          tool: cargo
-          output-file-path: bench_output.txt
-          external-data-json-path: .bench_baseline.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: false
-          comment-on-alert: true
-          alert-threshold: "115%"
-          # Advisory only -- never fail CI on I/O benchmarks.
-          fail-on-alert: false
-          comment-always: ${{ github.event_name == 'pull_request' }}
-          alert-comment-cc-users: "@varun29ankuS"
+          if [ ! -s bench_io_output.txt ]; then
+            echo "No benchmark output was produced -- the suite failed to run." >> comment.md
+          else
+            REGRESSED=$(grep -c "Performance has regressed" bench_io_output.txt || true)
+            IMPROVED=$(grep -c "Performance has improved" bench_io_output.txt || true)
+            NOISE=$(grep -c "within noise threshold" bench_io_output.txt || true)
+            NOCHANGE=$(grep -c "No change in performance" bench_io_output.txt || true)
+            {
+              echo "| verdict | count |"
+              echo "|---|---|"
+              echo "| regressed | **$REGRESSED** |"
+              echo "| improved | $IMPROVED |"
+              echo "| within noise | $NOISE |"
+              echo "| no change | $NOCHANGE |"
+              echo ""
+              echo "Baseline is \`${BASE_SHA:0:7}\` benchmarked on **this same runner**, so"
+              echo "cross-machine variance is excluded. Advisory only -- does not gate."
+              echo ""
+              if [ "$REGRESSED" -gt 0 ]; then
+                echo "<details><summary>Regressions</summary>"
+                echo ""
+                echo '```'
+                grep -B 4 "Performance has regressed" bench_io_output.txt | head -80
+                echo '```'
+                echo ""
+                echo "</details>"
+                echo ""
+              fi
+              echo "<details><summary>Full comparison</summary>"
+              echo ""
+              echo '```'
+              grep -E "time:|change:|Performance has|within noise|No change" bench_io_output.txt | head -150
+              echo '```'
+              echo ""
+              echo "</details>"
+            } >> comment.md
+          fi
 
-      - name: Save advisory baseline
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.run_bench.outputs.bench_empty != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .bench_baseline.json
-          key: bench-advisory-baseline-${{ runner.os }}
+          # Update the existing sticky comment if present, else create it.
+          ID=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate                  --jq "[.[] | select(.body | startswith(\"$MARKER\"))] | .[0].id // empty")
+          if [ -n "$ID" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${ID}"               -F body=@comment.md >/dev/null
+            echo "updated comment $ID"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments"               -F body=@comment.md >/dev/null
+            echo "created comment"
+          fi
+
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"

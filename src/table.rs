@@ -1,4 +1,5 @@
 use crate::cdc::types::{CdcEvent, ChangeOp};
+use crate::compat::Arc;
 use crate::compat::Mutex;
 use crate::db::TransactionGuard;
 use crate::merge::MergeOperator;
@@ -12,7 +13,6 @@ use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, AccessGuardMut, StorageError, WriteTransaction};
 use crate::{Result, TableHandle};
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::fmt::{Debug, Formatter};

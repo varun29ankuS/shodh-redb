@@ -3,7 +3,13 @@ name: Release
 on:
   push:
     tags:
+      # Releases are tagged `shodh-v*` to preserve upstream redb's existing
+      # `v0.5.0` .. `v4.x.x` tag history. The trigger previously matched only
+      # `v*`, so `shodh-v0.5.0` never fired it and 0.5.0 shipped with no
+      # GitHub release artifacts at all -- the last successful run was v0.3.3.
+      # Both patterns are kept so old-style tags still work.
       - "v*"
+      - "shodh-v*"
 
 permissions:
   contents: write

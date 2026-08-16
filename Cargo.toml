@@ -42,7 +42,26 @@ sha2 = { version = "0.10", default-features = false }
 zstd = { version = "0.13.3", optional = true, default-features = false }
 hashbrown = "0.15"
 portable-atomic = { version = "1", default-features = false, features = ["fallback"] }
-spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex", "rwlock", "portable-atomic"] }
+spin = { version = "0.10", default-features = false, features = ["mutex", "spin_mutex", "rwlock", "portable-atomic"] }
+
+# Targets without native pointer-width atomic CAS (e.g. thumbv6m / Cortex-M0+,
+# including the RP2040) cannot use `alloc::sync::Arc`. portable-atomic-util
+# provides a CAS-free Arc, and portable-atomic needs a CAS strategy.
+#
+# `critical-section` is enabled HERE rather than as a crate feature on purpose:
+# it makes portable-atomic take a critical section for *every* atomic
+# operation, which would be a severe regression on targets that have native
+# atomics. Scoping it to this target table means `--all-features` cannot
+# accidentally turn it on for x86_64/aarch64.
+#
+# The final binary must supply a critical-section implementation (e.g. the
+# `cortex-m` crate's `critical-section-single-core` feature, or `embassy-rp`
+# on RP2040). Single-core targets that can guarantee it may instead build with
+# RUSTFLAGS="--cfg portable_atomic_unsafe_assume_single_core", which is faster
+# because loads and stores then avoid disabling interrupts.
+[target.'cfg(not(target_has_atomic = "ptr"))'.dependencies]
+portable-atomic-util = { version = "0.2", default-features = false, features = ["alloc"] }
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 
 [target.'cfg(target_os = "wasi")'.dependencies]
 libc = "0.2.174"

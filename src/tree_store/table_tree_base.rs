@@ -1,3 +1,4 @@
+use crate::compat::Arc;
 use crate::compat::{HashMap, Mutex};
 use crate::multimap_table::{UntypedMultiBtree, relocate_subtrees};
 use crate::tree_store::{
@@ -6,7 +7,6 @@ use crate::tree_store::{
 use crate::{Key, Result, TableError, TypeName, Value};
 use alloc::format;
 use alloc::string::ToString;
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;

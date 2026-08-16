@@ -313,6 +313,16 @@ impl U64GroupedBitmap {
             crate::StorageError::Corrupted("U64GroupedBitmap: failed to read length".into())
         })?);
         let words = (serialized.len() - size_of::<u32>()) / size_of::<u64>();
+        // `len` comes off disk, the word count comes from the buffer size.
+        // `set`/`clear` bounds-check the bit against `len` and then index
+        // `data`, so a `len` that outruns the words present turns that guard
+        // into an out-of-bounds index. `to_vec` always writes
+        // `required_words(len)`, so this only fails on corrupted input.
+        if words < Self::required_words(len) {
+            return Err(crate::StorageError::Corrupted(
+                "U64GroupedBitmap: length exceeds the serialized data".into(),
+            ));
+        }
         let mut data = Vec::with_capacity(words);
         for i in 0..words {
             let start = size_of::<u32>() + i * size_of::<u64>();
@@ -437,6 +447,25 @@ mod test {
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
+
+    /// `len` is read from disk but the word count comes from the buffer size.
+    /// A `len` larger than the words present must be rejected: `set`/`clear`
+    /// bounds-check against `len` and then index `data`, so an inconsistent
+    /// pair indexes out of bounds.
+    #[test]
+    fn grouped_bitmap_rejects_len_exceeding_data() {
+        use crate::tree_store::page_store::bitmap::U64GroupedBitmap;
+
+        // len = 1000 (needs 16 u64 words) but only one word follows.
+        let mut serialized = Vec::new();
+        serialized.extend(1000u32.to_le_bytes());
+        serialized.extend(0u64.to_le_bytes());
+
+        assert!(
+            U64GroupedBitmap::from_bytes(&serialized).is_err(),
+            "a length larger than the serialized data must be rejected"
+        );
+    }
 
     #[test]
     fn alloc() {

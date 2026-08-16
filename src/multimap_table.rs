@@ -1,4 +1,5 @@
 use crate::cdc::types::{CdcEvent, ChangeOp};
+use crate::compat::Arc;
 use crate::compat::{HashMap, Mutex};
 #[cfg(feature = "std")]
 use crate::db::CorruptPageInfo;
@@ -17,7 +18,6 @@ use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;

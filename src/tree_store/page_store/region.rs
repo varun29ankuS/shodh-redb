@@ -161,6 +161,17 @@ impl Allocators {
         let mut region_tracker = RegionTracker::new(initial_regions, MAX_MAX_PAGE_ORDER + 1);
         for i in 0..layout.num_regions() {
             let region_layout = layout.region_layout(i);
+            // A region cannot hold more pages than a full region's capacity --
+            // the trailing region is by definition partial. `BuddyAllocator::new`
+            // sizes its bitmaps from the capacity and then clears bits up to
+            // `num_pages`, so it indexes out of bounds if this is violated. The
+            // layout can come from a corrupted header, so reject rather than
+            // trust it.
+            if region_layout.num_pages() > layout.full_region_layout().num_pages() {
+                return Err(crate::StorageError::Corrupted(
+                    "region has more pages than a full region's capacity".into(),
+                ));
+            }
             let allocator = BuddyAllocator::new(
                 region_layout.num_pages(),
                 layout.full_region_layout().num_pages(),

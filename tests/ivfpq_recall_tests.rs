@@ -120,7 +120,7 @@ fn make_vectors(n: u64, dim: usize, seed_offset: u64) -> Vec<(u64, Vec<f32>)> {
 // ---------------------------------------------------------------------------
 
 /// Train 200 vectors in 8D with Euclidean distance, search top-5, verify
-/// recall >= 0.6 averaged over multiple queries.
+/// recall >= 0.95 averaged over multiple queries (measured 1.000).
 #[test]
 fn train_and_search_euclidean() {
     let vectors = make_vectors(200, 8, 10000);
@@ -145,13 +145,13 @@ fn train_and_search_euclidean() {
 
     let avg = total_recall / num_queries as f64;
     assert!(
-        avg >= 0.6,
-        "euclidean recall@{k} = {avg:.3}, expected >= 0.6"
+        avg >= 0.95,
+        "euclidean recall@{k} = {avg:.3}, expected >= 0.95 (measured 1.000)"
     );
 }
 
 /// Train 200 vectors in 8D with cosine distance, search top-5, verify
-/// recall >= 0.6.
+/// recall threshold set just below the measured value.
 #[test]
 fn train_and_search_cosine() {
     let vectors = make_vectors(200, 8, 20000);
@@ -175,11 +175,14 @@ fn train_and_search_cosine() {
     }
 
     let avg = total_recall / num_queries as f64;
-    assert!(avg >= 0.6, "cosine recall@{k} = {avg:.3}, expected >= 0.6");
+    assert!(
+        avg >= 0.95,
+        "cosine recall@{k} = {avg:.3}, expected >= 0.95 (measured 1.000)"
+    );
 }
 
 /// Train 200 vectors in 8D with dot product distance, search top-5, verify
-/// recall >= 0.6.
+/// recall threshold set just below the measured value.
 #[test]
 fn train_and_search_dot_product() {
     let vectors = make_vectors(200, 8, 30000);
@@ -204,13 +207,13 @@ fn train_and_search_dot_product() {
 
     let avg = total_recall / num_queries as f64;
     assert!(
-        avg >= 0.6,
-        "dot_product recall@{k} = {avg:.3}, expected >= 0.6"
+        avg >= 0.70,
+        "dot_product recall@{k} = {avg:.3}, expected >= 0.70 (measured 0.760)"
     );
 }
 
 /// Train 200 vectors in 8D with Manhattan distance, search top-5, verify
-/// recall >= 0.6.
+/// recall threshold set just below the measured value.
 #[test]
 fn train_and_search_manhattan() {
     let vectors = make_vectors(200, 8, 40000);
@@ -235,8 +238,8 @@ fn train_and_search_manhattan() {
 
     let avg = total_recall / num_queries as f64;
     assert!(
-        avg >= 0.6,
-        "manhattan recall@{k} = {avg:.3}, expected >= 0.6"
+        avg >= 0.95,
+        "manhattan recall@{k} = {avg:.3}, expected >= 0.95 (measured 1.000)"
     );
 }
 
@@ -527,8 +530,8 @@ fn large_dataset_recall() {
 
     let avg = total_recall / num_queries as f64;
     assert!(
-        avg >= 0.5,
-        "large dataset recall@{k} = {avg:.3}, expected >= 0.5"
+        avg >= 0.95,
+        "large dataset recall@{k} = {avg:.3}, expected >= 0.95 (measured 1.000)"
     );
 }
 

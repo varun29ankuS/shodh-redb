@@ -259,6 +259,13 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
         // 1. Train IVF centroids.
         let centroid_data = kmeans::kmeans(&flat, dim, num_clusters, max_iter, self.config.metric);
+        // Relabel so spatially adjacent centroids get adjacent cluster IDs.
+        // Cluster blobs are keyed by ID in a B-tree, so this turns the
+        // `nprobe` reads of a search into a near-sequential run instead of
+        // scattered lookups. Done before any assignment, so it cannot affect
+        // which clusters a query probes -- recall is unchanged.
+        let centroid_data =
+            kmeans::reorder_centroids_for_locality(&centroid_data, dim, self.config.metric);
 
         // kmeans clamps k to min(requested, n). Update config to reflect the
         // actual number of centroids so that subsequent opens don't try to
@@ -390,6 +397,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         progress(&p);
         self.observer.on_train_progress(&self.name, &p);
         let centroid_data = kmeans::kmeans(&flat, dim, num_clusters, max_iter, self.config.metric);
+        // See train(): locality relabelling, recall-neutral.
+        let centroid_data =
+            kmeans::reorder_centroids_for_locality(&centroid_data, dim, self.config.metric);
 
         let actual_k = centroid_data.len() / dim;
         let old_k = self.config.num_clusters as usize;
@@ -842,9 +852,28 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
 
                 let pq_block = blob.pq_codes_block();
                 let m = pq_len as usize;
+                // Bound pruning cutoff, hoisted out of the candidate loop.
+                //
+                // Recomputing this per candidate costs a heap peek, a float
+                // subtract, a float DIVIDE and a ceil -- comparable to the
+                // entire `m`-lookup inner loop it is meant to skip, so it made
+                // the scan slower rather than faster. The heap's worst distance
+                // can only change on a successful push, so it is recomputed
+                // there instead. A stale cutoff is always larger than the
+                // current one, which prunes less but never wrongly -- so this
+                // stays exact.
+                //
+                // `scale`/`offset` are rebuilt with the ADC table per cluster,
+                // so the cutoff is seeded per cluster too.
+                let mut cutoff = heap
+                    .worst_distance()
+                    .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
                 for i in 0..blob.count() {
                     let codes = &pq_block[i as usize * m..(i as usize + 1) * m];
-                    let dist = adc.to_f32(adc.approximate_distance(codes));
+                    let Some(raw) = adc.approximate_distance_bounded(codes, cutoff) else {
+                        continue;
+                    };
+                    let dist = adc.to_f32(raw);
                     let vid = blob.vector_id(i);
 
                     // Vectors without metadata pass the filter -- absence
@@ -857,6 +886,10 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                         continue;
                     }
                     heap.push(vid, dist);
+                    // Only a successful push can lower the k-th best distance.
+                    cutoff = heap
+                        .worst_distance()
+                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
                 }
             }
         }
@@ -1311,9 +1344,28 @@ impl ReadOnlyIvfPqIndex {
 
                 let pq_block = blob.pq_codes_block();
                 let m = pq_len as usize;
+                // Bound pruning cutoff, hoisted out of the candidate loop.
+                //
+                // Recomputing this per candidate costs a heap peek, a float
+                // subtract, a float DIVIDE and a ceil -- comparable to the
+                // entire `m`-lookup inner loop it is meant to skip, so it made
+                // the scan slower rather than faster. The heap's worst distance
+                // can only change on a successful push, so it is recomputed
+                // there instead. A stale cutoff is always larger than the
+                // current one, which prunes less but never wrongly -- so this
+                // stays exact.
+                //
+                // `scale`/`offset` are rebuilt with the ADC table per cluster,
+                // so the cutoff is seeded per cluster too.
+                let mut cutoff = heap
+                    .worst_distance()
+                    .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
                 for i in 0..blob.count() {
                     let codes = &pq_block[i as usize * m..(i as usize + 1) * m];
-                    let dist = adc.to_f32(adc.approximate_distance(codes));
+                    let Some(raw) = adc.approximate_distance_bounded(codes, cutoff) else {
+                        continue;
+                    };
+                    let dist = adc.to_f32(raw);
                     let vid = blob.vector_id(i);
 
                     // Vectors without metadata pass the filter -- absence
@@ -1326,6 +1378,10 @@ impl ReadOnlyIvfPqIndex {
                         continue;
                     }
                     heap.push(vid, dist);
+                    // Only a successful push can lower the k-th best distance.
+                    cutoff = heap
+                        .worst_distance()
+                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
                 }
             }
         }
@@ -1379,6 +1435,20 @@ impl CandidateHeap {
             capacity,
             heap: BinaryHeap::with_capacity(capacity + 1),
         }
+    }
+
+    /// Distance of the current k-th best candidate, or `None` while the heap
+    /// still has spare capacity.
+    ///
+    /// While not full every candidate is admitted, so there is no threshold to
+    /// prune against. Once full, `push` admits only distances strictly less
+    /// than this value, which makes it an exact pruning bound.
+    #[inline]
+    fn worst_distance(&self) -> Option<f32> {
+        if self.heap.len() < self.capacity {
+            return None;
+        }
+        self.heap.peek().map(|e| e.distance)
     }
 
     fn push(&mut self, vector_id: u64, distance: f32) {

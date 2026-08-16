@@ -166,7 +166,14 @@ impl IntAdcTable {
     /// The inner loop is pure integer: u16 loads + u32 accumulation.
     /// No floating-point operations. Uses unchecked indexing for maximum
     /// throughput on the hot scan path (~40K calls per search).
+    ///
+    /// Retained as the unpruned reference implementation that
+    /// [`approximate_distance_bounded`] is verified against; the scan path
+    /// itself always goes through the bounded variant.
+    ///
+    /// [`approximate_distance_bounded`]: Self::approximate_distance_bounded
     #[inline]
+    #[cfg(test)]
     pub(crate) fn approximate_distance(&self, pq_codes: &[u8]) -> u32 {
         debug_assert!(pq_codes.len() >= self.num_subvectors);
         debug_assert!(self.distances.len() >= self.num_subvectors * 256);
@@ -192,6 +199,88 @@ impl IntAdcTable {
     #[allow(clippy::cast_precision_loss)]
     pub(crate) fn to_f32(&self, dist_u32: u32) -> f32 {
         dist_u32 as f32 * self.scale + self.num_subvectors as f32 * self.offset
+    }
+
+    /// Smallest accumulated `u32` distance whose [`to_f32`] value is `>= worst`.
+    ///
+    /// Used to translate the candidate heap's current worst distance -- an
+    /// `f32` shared across clusters -- into this table's integer domain.
+    /// `scale` and `offset` are rebuilt per cluster, so a `u32` cutoff derived
+    /// from one cluster is meaningless in another.
+    ///
+    /// Returns `u32::MAX` (i.e. prune nothing) when `scale` is not positive,
+    /// which would make the mapping non-monotonic.
+    ///
+    /// [`to_f32`]: Self::to_f32
+    #[inline]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    pub(crate) fn cutoff_from_f32(&self, worst: f32) -> u32 {
+        if self.scale.is_nan() || self.scale <= 0.0 || !worst.is_finite() {
+            return u32::MAX;
+        }
+        let base = self.num_subvectors as f32 * self.offset;
+        if !base.is_finite() {
+            return u32::MAX;
+        }
+        let quotient = (worst - base) / self.scale;
+        if quotient <= 0.0 {
+            0
+        } else if quotient >= u32::MAX as f32 {
+            u32::MAX
+        } else {
+            // Round up, so that to_f32(cutoff) >= worst holds despite float
+            // error. `f32::ceil` is std-only, and this crate builds no_std;
+            // truncation toward zero is exact for a positive f32 below
+            // `u32::MAX`, so add one whenever a fractional part was dropped.
+            let truncated = quotient as u32;
+            if (truncated as f32) < quotient {
+                truncated + 1
+            } else {
+                truncated
+            }
+        }
+    }
+
+    /// Like [`approximate_distance`], but abandons the candidate as soon as the
+    /// running sum reaches `cutoff`.
+    ///
+    /// Every table entry is a `u16`, so the accumulator is non-decreasing and
+    /// any partial sum is a **lower bound** on the final distance. If that
+    /// lower bound already reaches `cutoff` -- the distance of the current
+    /// k-th best candidate -- this vector cannot displace anything in the heap,
+    /// because `CandidateHeap::push` admits only distances strictly less than
+    /// the current worst. Skipping it is therefore exact: the returned result
+    /// set is identical to the unpruned scan, and only the remaining table
+    /// lookups are saved.
+    ///
+    /// Pass `u32::MAX` to disable pruning; the result is then always `Some` and
+    /// equal to [`approximate_distance`].
+    ///
+    /// [`approximate_distance`]: Self::approximate_distance
+    #[inline]
+    pub(crate) fn approximate_distance_bounded(&self, pq_codes: &[u8], cutoff: u32) -> Option<u32> {
+        debug_assert!(pq_codes.len() >= self.num_subvectors);
+        debug_assert!(self.distances.len() >= self.num_subvectors * 256);
+        let mut dist = 0u32;
+        for m in 0..self.num_subvectors {
+            // SAFETY: identical to `approximate_distance` -- `pq_codes` length
+            // is validated by `ClusterBlobRef` (>= num_subvectors),
+            // `self.distances` has exactly `num_subvectors * 256` entries by
+            // the invariant of `build()`, and `code` is a u8 so
+            // `m * 256 + code` <= `num_subvectors * 256 - 1`.
+            unsafe {
+                let code = *pq_codes.get_unchecked(m);
+                dist += u32::from(*self.distances.get_unchecked(m * 256 + code as usize));
+            }
+            if dist >= cutoff {
+                return None;
+            }
+        }
+        Some(dist)
     }
 }
 
@@ -237,6 +326,15 @@ fn subvector_distance(query_sub: &[f32], centroid: &[f32], metric: DistanceMetri
     }
 }
 
+/// Distance between two equal-length vectors under `metric`.
+///
+/// Thin wrapper exposing [`subvector_distance`] to `kmeans`, which uses the
+/// same metric to chain centroids by spatial adjacency.
+#[inline]
+pub(crate) fn subvector_distance_pub(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
+    subvector_distance(a, b, metric)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -245,6 +343,92 @@ fn subvector_distance(query_sub: &[f32], centroid: &[f32], metric: DistanceMetri
 mod tests {
     use super::*;
     use crate::ivfpq::pq::train_codebooks;
+
+    fn sample_int_adc() -> (IntAdcTable, Vec<u8>) {
+        #[rustfmt::skip]
+        let training: Vec<f32> = vec![
+            1.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0, 1.0,
+            0.0, 1.0, 0.0, 0.0,  0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,  0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,  1.0, 0.0, 0.0, 0.0,
+        ];
+        let codebooks = train_codebooks(&training, 8, 2, 25, DistanceMetric::EuclideanSq).unwrap();
+        let query = vec![0.4, 0.1, 0.0, 0.0, 0.0, 0.0, 0.2, 0.9];
+        let adc = IntAdcTable::build(&query, &codebooks, DistanceMetric::EuclideanSq);
+        let codes = codebooks.encode(&training[8..16]);
+        (adc, codes)
+    }
+
+    /// With pruning disabled the bounded scan must be bit-identical to the
+    /// unbounded one. This is what makes the optimisation safe to enable
+    /// unconditionally.
+    #[test]
+    fn bounded_with_max_cutoff_matches_unbounded() {
+        let (adc, codes) = sample_int_adc();
+        assert_eq!(
+            adc.approximate_distance_bounded(&codes, u32::MAX),
+            Some(adc.approximate_distance(&codes)),
+            "u32::MAX cutoff must disable pruning entirely"
+        );
+    }
+
+    /// A cutoff at or below the true distance must prune.
+    #[test]
+    fn bounded_prunes_at_or_below_true_distance() {
+        let (adc, codes) = sample_int_adc();
+        let exact = adc.approximate_distance(&codes);
+        assert_eq!(
+            adc.approximate_distance_bounded(&codes, exact),
+            None,
+            "cutoff equal to the true distance must prune -- push() requires strictly less"
+        );
+        assert_eq!(
+            adc.approximate_distance_bounded(&codes, exact + 1),
+            Some(exact),
+            "cutoff above the true distance must not prune"
+        );
+    }
+
+    /// `cutoff_from_f32` must round up, so that a pruned candidate is
+    /// guaranteed to have been rejected by the heap anyway. If it rounded down
+    /// we could drop a candidate that belonged in the results.
+    #[test]
+    fn cutoff_from_f32_never_prunes_a_qualifying_candidate() {
+        let (adc, _) = sample_int_adc();
+        for raw in [0u32, 1, 7, 1000, 65_535] {
+            let worst = adc.to_f32(raw);
+            let cutoff = adc.cutoff_from_f32(worst);
+            assert!(
+                adc.to_f32(cutoff) >= worst - f32::EPSILON,
+                "cutoff {cutoff} maps to {} which is below worst {worst}",
+                adc.to_f32(cutoff)
+            );
+        }
+    }
+
+    /// Degenerate tables must disable pruning rather than mis-map.
+    #[test]
+    fn cutoff_from_f32_disables_pruning_on_non_finite_input() {
+        let (adc, _) = sample_int_adc();
+        assert_eq!(adc.cutoff_from_f32(f32::NAN), u32::MAX);
+        assert_eq!(adc.cutoff_from_f32(f32::INFINITY), u32::MAX);
+    }
+
+    /// A non-finite `offset` makes the whole mapping meaningless. Returning a
+    /// small cutoff here would be worse than useless: it would prune every
+    /// candidate and silently return no results. Pruning must be disabled.
+    #[test]
+    fn cutoff_from_f32_disables_pruning_on_non_finite_offset() {
+        let (mut adc, _) = sample_int_adc();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            adc.offset = bad;
+            assert_eq!(
+                adc.cutoff_from_f32(1.0),
+                u32::MAX,
+                "offset {bad} must disable pruning, not prune everything"
+            );
+        }
+    }
 
     #[test]
     fn adc_matches_exact_distance() {

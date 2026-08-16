@@ -293,8 +293,6 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
 
         // Copy key and existing value bytes, then drop the access guard
         // to release the immutable borrow before calling insert/remove.
-        // Copy key and existing value bytes, then drop the access guard
-        // to release the immutable borrow before calling insert/remove.
         let key_bytes = K::as_bytes(key_ref).as_ref().to_vec();
         let existing_bytes: Option<Vec<u8>> = {
             let guard = self.get(key_ref)?;
@@ -306,6 +304,18 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         let key_ref = K::from_bytes(&key_bytes);
         match merged {
             Some(new_bytes) => {
+                // The operator hands back raw bytes. For a fixed-width value
+                // type, a wrong length would be stored and then silently
+                // deserialize to a default on read -- e.g. three bytes in a
+                // `u64` table reads back as 0. Reject it instead.
+                if let Some(width) = V::fixed_width()
+                    && new_bytes.len() != width
+                {
+                    return Err(StorageError::MergeValueWidthMismatch {
+                        expected: width,
+                        actual: new_bytes.len(),
+                    });
+                }
                 let new_value = V::from_bytes(&new_bytes);
                 self.insert(&key_ref, &new_value)?;
             }

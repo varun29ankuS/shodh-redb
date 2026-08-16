@@ -6,6 +6,7 @@ use crate::db::CorruptPageInfo;
 /// Real B-trees of page-sized nodes rarely exceed 10-20 levels.
 /// 64 is generous but still prevents unbounded recursion on corrupted data.
 pub(crate) const MAX_TREE_DEPTH: u32 = 64;
+use crate::compat::Arc;
 use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
@@ -25,7 +26,6 @@ use alloc::format;
 use alloc::string::String;
 #[cfg(feature = "std")]
 use alloc::string::ToString;
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;

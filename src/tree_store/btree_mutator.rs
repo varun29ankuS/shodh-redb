@@ -1,3 +1,4 @@
+use crate::compat::Arc;
 use crate::compat::Mutex;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
@@ -16,7 +17,6 @@ use crate::types::{Key, Value};
 use crate::{AccessGuard, Result, StorageError};
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
 use core::marker::PhantomData;

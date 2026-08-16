@@ -10,7 +10,7 @@
 //! The [`DbMetrics`] struct (behind the `metrics` feature) provides atomic
 //! counters for pull-based monitoring.
 
-use alloc::sync::Arc;
+use crate::compat::Arc;
 
 use crate::db::CompactionProgress;
 use crate::ivfpq::index::TrainProgress;
@@ -84,12 +84,33 @@ pub trait DatabaseObserver: Send + Sync + 'static {
 
 /// Zero-sized no-op observer. Used as the default when no observer is registered.
 /// The compiler devirtualizes calls to this, making it truly zero-cost.
-pub(crate) struct NoopObserver;
+///
+/// Public because it is the concrete observer type on targets without atomic
+/// CAS, where [`ObserverRef`] cannot be a trait object.
+pub struct NoopObserver;
 
 impl DatabaseObserver for NoopObserver {}
 
+/// Handle to the registered observer.
+///
+/// On targets with atomic CAS this is a trait object, so any user type
+/// implementing [`DatabaseObserver`] can be registered via
+/// [`Builder::set_observer`](crate::Builder::set_observer).
+///
+/// On targets without atomic CAS (`thumbv6m` / Cortex-M0+, including the
+/// RP2040) `Arc` comes from `portable-atomic-util`, which cannot perform the
+/// unsized coercion `Arc<Concrete> -> Arc<dyn Trait>` on stable Rust
+/// (<https://github.com/taiki-e/portable-atomic/issues/143>). There the handle
+/// is the concrete zero-sized [`NoopObserver`], observation is compiled out,
+/// and `set_observer` is unavailable. Calls still resolve -- they are
+/// statically dispatched no-ops the optimiser removes entirely.
+#[cfg(target_has_atomic = "ptr")]
+pub(crate) type ObserverRef = Arc<dyn DatabaseObserver>;
+#[cfg(not(target_has_atomic = "ptr"))]
+pub(crate) type ObserverRef = Arc<NoopObserver>;
+
 /// Returns the default observer (no-op).
-pub(crate) fn default_observer() -> Arc<dyn DatabaseObserver> {
+pub(crate) fn default_observer() -> ObserverRef {
     Arc::new(NoopObserver)
 }
 

@@ -1,3 +1,4 @@
+use crate::compat::Arc;
 use crate::compat::Mutex;
 use crate::tree_store::page_store::compression::{
     CompressionConfig, compress_value, decompress_value,
@@ -9,7 +10,6 @@ use crate::{Result, StorageError};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::cmp::Ordering;

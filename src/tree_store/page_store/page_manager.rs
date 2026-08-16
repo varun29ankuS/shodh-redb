@@ -1,3 +1,4 @@
+use crate::compat::Arc;
 use crate::compat::Mutex;
 #[cfg(debug_assertions)]
 use crate::compat::{HashMap, HashSet};
@@ -23,13 +24,13 @@ use crate::{DatabaseError, Result, StorageError};
 use alloc::boxed::Box;
 #[cfg(feature = "std")]
 use alloc::format;
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::Ordering;
 #[cfg(feature = "logging")]
 use log::warn;
+use portable_atomic::AtomicBool;
 
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space

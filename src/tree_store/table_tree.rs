@@ -1,3 +1,4 @@
+use crate::compat::Arc;
 use crate::compat::{HashMap, HashSet, Mutex};
 #[cfg(feature = "std")]
 use crate::db::CorruptPageInfo;
@@ -20,7 +21,6 @@ use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result, StorageError};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::max;

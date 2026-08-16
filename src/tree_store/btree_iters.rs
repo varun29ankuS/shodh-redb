@@ -1,3 +1,4 @@
+use crate::compat::Arc;
 use crate::compat::Mutex;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, Checksum, DEFERRED, LEAF, LeafAccessor, branch_checksum, leaf_checksum,
@@ -12,7 +13,6 @@ use crate::{Result, StorageError};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;

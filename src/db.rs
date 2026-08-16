@@ -1,11 +1,12 @@
 use crate::blob_store::{BlobCompactionPolicy, BlobCompactionReport, BlobDedupConfig, BlobStats};
 use crate::cdc::CdcConfig;
+use crate::compat::Arc;
 use crate::error::{BackendError, TransactionError};
 #[cfg(feature = "std")]
 use crate::group_commit::{GroupCommitError, GroupCommitter, WriteBatch};
 #[cfg(feature = "metrics")]
 use crate::observer::DbMetrics;
-use crate::observer::{DatabaseObserver, default_observer};
+use crate::observer::{DatabaseObserver, ObserverRef, default_observer};
 use crate::sealed::Sealed;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::transactions::{
@@ -30,7 +31,6 @@ use crate::{ReadTransaction, Result, WriteTransaction};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 #[cfg(feature = "std")]
 use alloc::vec;
 use alloc::vec::Vec;
@@ -678,7 +678,7 @@ pub struct Database {
     cdc_config: CdcConfig,
     history_retention: u64,
     blob_compaction_policy: BlobCompactionPolicy,
-    observer: Arc<dyn DatabaseObserver>,
+    observer: ObserverRef,
     #[cfg(feature = "metrics")]
     db_metrics: Arc<DbMetrics>,
     #[cfg(feature = "std")]
@@ -1402,10 +1402,18 @@ impl Database {
 
     /// Compacts the blob region, removing dead space left by deleted blobs.
     ///
-    /// Uses a two-pass crash-safe algorithm:
-    /// 1. Appends live blobs after the current region end, updates all offsets, commits.
-    /// 2. Shifts live data to the start of the region, updates offsets, commits.
-    /// 3. Truncates the file.
+    /// # This is currently always a no-op
+    ///
+    /// Blob data is stored as chunks in the ordinary B-tree, not in a separate
+    /// blob region, so deleting a blob frees its chunks through normal B-tree
+    /// page reclamation and no dead space accumulates. Accordingly
+    /// [`blob_stats`](crate::WriteTransaction::blob_stats) reports
+    /// `dead_bytes == 0` unconditionally, and this method returns a report with
+    /// `was_noop: true` and `bytes_reclaimed: 0` without relocating anything.
+    ///
+    /// It is retained so that callers written against the earlier
+    /// separate-region layout keep compiling. To reclaim file space, use
+    /// [`compact()`](Self::compact), which compacts the page store itself.
     ///
     /// Same constraints as [`compact()`](Self::compact): no active read transactions
     /// or persistent/ephemeral savepoints.
@@ -1505,6 +1513,13 @@ impl Database {
     /// recommended, or `None` if the region is healthy.
     ///
     /// This is purely advisory -- the database never auto-compacts.
+    ///
+    /// # This currently always returns `None`
+    ///
+    /// The policy is compared against `dead_bytes` and `fragmentation_ratio`,
+    /// both of which are structurally zero under chunked B-tree blob storage.
+    /// See [`compact_blobs()`](Self::compact_blobs) for why, and use
+    /// [`compact()`](Self::compact) to reclaim file space.
     pub fn should_compact_blobs(&self) -> Result<Option<BlobStats>, TransactionError> {
         let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
         let stats = txn.blob_stats().map_err(TransactionError::Storage)?;
@@ -1523,6 +1538,9 @@ impl Database {
     /// Like [`compact_blobs()`](Self::compact_blobs), but invokes `callback`
     /// after each pass with `(blobs_processed, total_blobs, bytes_processed,
     /// total_bytes)`. Return `false` from the callback to cancel compaction.
+    ///
+    /// Like `compact_blobs`, this is currently always a no-op and the callback
+    /// is never invoked -- see [`compact_blobs()`](Self::compact_blobs).
     ///
     /// Same constraints as `compact_blobs`: no active read transactions or
     /// persistent/ephemeral savepoints.
@@ -2050,7 +2068,7 @@ impl Database {
         read_verification: ReadVerification,
         read_verification_callback: Option<Arc<ReadVerificationCallback>>,
         blob_compaction_policy: BlobCompactionPolicy,
-        observer: Arc<dyn DatabaseObserver>,
+        observer: ObserverRef,
         #[cfg(feature = "metrics")] db_metrics: Arc<DbMetrics>,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
@@ -2096,6 +2114,13 @@ impl Database {
                 true,
                 ShrinkPolicy::Never,
             )?;
+        }
+
+        // A damaged commit slot was skipped, which silently rolls the database
+        // back past a committed transaction. Tell the caller before handing them
+        // a database that is quietly missing writes.
+        if let Some((discarded, recovered)) = mem.commit_slot_rollback() {
+            observer.on_commit_slot_rollback(discarded, recovered);
         }
 
         mem.begin_writable()?;
@@ -2293,7 +2318,7 @@ impl Database {
     }
 
     /// Returns the observer registered with this database.
-    pub fn observer(&self) -> &Arc<dyn DatabaseObserver> {
+    pub fn observer(&self) -> &ObserverRef {
         &self.observer
     }
 
@@ -2483,8 +2508,24 @@ impl Database {
                             StorageError::Corrupted(msg.clone()),
                         )));
                     }
-                    let _ = self.group_committer.finish_leader();
-                    return;
+                    // Must NOT return unconditionally here. `finish_leader`
+                    // deliberately retains leadership whenever it hands work
+                    // back, so returning while it still holds batches strands
+                    // `active_leader = true` forever: every later
+                    // `submit_write_batch` enqueues as a follower and blocks on
+                    // `recv()` waiting for a leader that can never exist.
+                    // Keep looping so the newly arrived batches are failed too,
+                    // and leadership is only released once the queue drains.
+                    match self.group_committer.finish_leader() {
+                        Ok(remaining) if remaining.is_empty() => return,
+                        Ok(remaining) => {
+                            batches = remaining;
+                            continue;
+                        }
+                        // Mutex poisoned -- finish_leader cannot succeed either,
+                        // so there is nothing further we can do.
+                        Err(_) => return,
+                    }
                 }
             };
 
@@ -2859,7 +2900,16 @@ pub enum ReadVerificationAction {
 ///
 /// Receives the internal page number (as `u64`) that failed checksum verification.
 /// Returns the action the database should take.
+/// Callback invoked when a page is selected for read verification.
+///
+/// On targets without atomic CAS (`thumbv6m` / Cortex-M0+) `Arc` comes from
+/// `portable-atomic-util`, which cannot coerce `Arc<Concrete>` to
+/// `Arc<dyn Trait>` on stable Rust, so this degrades to a plain function
+/// pointer. Closures capturing state cannot be registered on those targets.
+#[cfg(target_has_atomic = "ptr")]
 pub type ReadVerificationCallback = dyn Fn(u64) -> ReadVerificationAction + Send + Sync + 'static;
+#[cfg(not(target_has_atomic = "ptr"))]
+pub type ReadVerificationCallback = fn(u64) -> ReadVerificationAction;
 
 /// Configuration builder of a redb [Database].
 pub struct Builder {
@@ -2875,7 +2925,7 @@ pub struct Builder {
     history_retention: u64,
     read_verification: ReadVerification,
     read_verification_callback: Option<Arc<ReadVerificationCallback>>,
-    observer: Option<Arc<dyn DatabaseObserver>>,
+    observer: Option<ObserverRef>,
     blob_compaction_policy: BlobCompactionPolicy,
 }
 
@@ -3063,6 +3113,15 @@ impl Builder {
     /// thread. Implementations must not block, panic, or perform fallible I/O.
     ///
     /// See [`DatabaseObserver`] for the full list of events.
+    ///
+    /// # Availability
+    ///
+    /// Not available on targets without atomic compare-and-swap (`thumbv6m` /
+    /// Cortex-M0+, including the RP2040). Registering an arbitrary observer
+    /// requires `Arc<dyn DatabaseObserver>`, and `portable-atomic-util`'s
+    /// `Arc` cannot perform that unsized coercion on stable Rust. On those
+    /// targets observation is compiled out entirely.
+    #[cfg(target_has_atomic = "ptr")]
     pub fn set_observer(&mut self, observer: impl DatabaseObserver) -> &mut Self {
         self.observer = Some(Arc::new(observer));
         self
@@ -3218,6 +3277,12 @@ impl Builder {
     ///
     /// Without a callback, corrupted pages always return
     /// [`StorageError::Corrupted`].
+    /// # Availability
+    ///
+    /// Not available on targets without atomic compare-and-swap (`thumbv6m` /
+    /// Cortex-M0+). Registering a capturing closure requires `Arc<dyn Fn(..)>`,
+    /// which `portable-atomic-util`'s `Arc` cannot express on stable Rust.
+    #[cfg(target_has_atomic = "ptr")]
     pub fn set_read_verification_callback(
         &mut self,
         callback: impl Fn(u64) -> ReadVerificationAction + Send + Sync + 'static,
@@ -3366,7 +3431,7 @@ impl Builder {
         )
     }
 
-    fn resolve_observer(&self) -> Arc<dyn DatabaseObserver> {
+    fn resolve_observer(&self) -> ObserverRef {
         self.observer
             .as_ref()
             .map_or_else(default_observer, Arc::clone)

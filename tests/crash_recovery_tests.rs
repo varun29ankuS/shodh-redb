@@ -794,3 +794,347 @@ fn crash_on_empty_db_recovers() {
     let report = db.verify_integrity(VerifyLevel::Pages).unwrap();
     assert!(report.valid);
 }
+
+/// The layout fields in the database header (page_size, region_header_pages,
+/// region_max_data_pages, ...) sit outside both commit slots, so the slot
+/// checksums do not protect them. A corrupted value must produce a clean
+/// error, not a panic: `Database::open` is the boundary where an untrusted
+/// file is first parsed.
+#[test]
+fn corrupt_region_max_data_pages_does_not_panic() {
+    // Offsets mirror the private constants in tree_store::page_store::header.
+    const MAGICNUMBER_LEN: usize = 9;
+    const GOD_BYTE_OFFSET: usize = MAGICNUMBER_LEN;
+    const PAGE_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + 1 + 2;
+    const REGION_HEADER_PAGES_OFFSET: usize = PAGE_SIZE_OFFSET + 4;
+    const REGION_MAX_DATA_PAGES_OFFSET: usize = REGION_HEADER_PAGES_OFFSET + 4;
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(U64_TABLE).unwrap();
+            t.insert(&1u64, &1u64).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    // Zero the region_max_data_pages field. Nothing checksums it.
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    bytes[REGION_MAX_DATA_PAGES_OFFSET..REGION_MAX_DATA_PAGES_OFFSET + 4].fill(0);
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    // Must be reported, not panicked on.
+    assert!(
+        Database::open(tmpfile.path()).is_err(),
+        "opening a database with a zeroed region_max_data_pages must fail cleanly"
+    );
+}
+
+/// Sibling of the above: a zeroed page_size makes the region size zero, which
+/// `DatabaseLayout::recalculate` uses as a divisor.
+#[test]
+fn corrupt_page_size_does_not_panic() {
+    const PAGE_SIZE_OFFSET: usize = 9 + 1 + 2;
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(U64_TABLE).unwrap();
+            t.insert(&1u64, &1u64).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    bytes[PAGE_SIZE_OFFSET..PAGE_SIZE_OFFSET + 4].fill(0);
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    assert!(
+        Database::open(tmpfile.path()).is_err(),
+        "opening a database with a zeroed page_size must fail cleanly"
+    );
+}
+
+/// A commit slot whose checksum fails must not be trusted, even when the god
+/// byte says no recovery is needed. A crash cannot produce that combination
+/// (a write transaction sets recovery_required durably first), so it means the
+/// slot bytes rotted. The database must fall back to the intact slot and tell
+/// the caller that a committed transaction was discarded.
+#[test]
+fn corrupt_commit_slot_falls_back_and_reports() {
+    use std::sync::atomic::AtomicBool;
+
+    const GOD_BYTE_OFFSET: usize = 9;
+    const PRIMARY_BIT: u8 = 1;
+    const TRANSACTION_0_OFFSET: usize = 64;
+    const TRANSACTION_SIZE: usize = 128;
+    const SLOT_CHECKSUM_IN_SLOT: usize = 112;
+    const TRANSACTION_ID_IN_SLOT: usize = 104;
+
+    #[derive(Default)]
+    struct Rollbacks {
+        fired: AtomicBool,
+        discarded: AtomicU64,
+        recovered: AtomicU64,
+    }
+    struct Watcher(Arc<Rollbacks>);
+    impl shodh_redb::DatabaseObserver for Watcher {
+        fn on_commit_slot_rollback(&self, discarded: u64, recovered: u64) {
+            self.0.discarded.store(discarded, Ordering::SeqCst);
+            self.0.recovered.store(recovered, Ordering::SeqCst);
+            self.0.fired.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        for i in 0..3u64 {
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(U64_TABLE).unwrap();
+                t.insert(&i, &i).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+    }
+
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    let primary = usize::from(bytes[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
+    let pslot = TRANSACTION_0_OFFSET + primary * TRANSACTION_SIZE;
+    let sslot = TRANSACTION_0_OFFSET + (primary ^ 1) * TRANSACTION_SIZE;
+    let read_txn_id = |b: &[u8], slot: usize| -> u64 {
+        u64::from_le_bytes(
+            b[slot + TRANSACTION_ID_IN_SLOT..slot + TRANSACTION_ID_IN_SLOT + 8]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    let primary_txn = read_txn_id(&bytes, pslot);
+    let secondary_txn = read_txn_id(&bytes, sslot);
+    assert!(
+        primary_txn > secondary_txn,
+        "expected the primary slot to hold the newer transaction"
+    );
+
+    // Break ONLY the slot's own checksum, so every data field stays valid.
+    // This isolates the checksum check from the downstream page checksums.
+    bytes[pslot + SLOT_CHECKSUM_IN_SLOT] ^= 0xFF;
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    let seen = Arc::new(Rollbacks::default());
+    let db = Builder::new()
+        .set_observer(Watcher(seen.clone()))
+        .open(tmpfile.path())
+        .expect("must fall back to the intact commit slot");
+
+    assert!(
+        seen.fired.load(Ordering::SeqCst),
+        "falling back past a committed transaction must be reported"
+    );
+    assert_eq!(seen.discarded.load(Ordering::SeqCst), primary_txn);
+    assert_eq!(seen.recovered.load(Ordering::SeqCst), secondary_txn);
+
+    let report = db.verify_integrity(VerifyLevel::Pages).unwrap();
+    assert!(report.valid);
+}
+
+/// The five layout u32s in the database header sit outside both commit slots,
+/// so nothing checksums them. Every value a corrupted field can take must
+/// produce a result or a clean error -- never a panic, and never a wrapped
+/// length that silently mis-describes the file.
+#[test]
+fn corrupt_layout_fields_never_panic() {
+    const PAGE_SIZE_OFFSET: usize = 9 + 1 + 2;
+    let fields = [
+        ("page_size", PAGE_SIZE_OFFSET),
+        ("region_header_pages", PAGE_SIZE_OFFSET + 4),
+        ("region_max_data_pages", PAGE_SIZE_OFFSET + 8),
+        ("full_regions", PAGE_SIZE_OFFSET + 12),
+        ("trailing_region_data_pages", PAGE_SIZE_OFFSET + 16),
+    ];
+    let values = [0u32, 1, 2, u32::MAX, 0x8000_0000, 0x7FFF_FFFF];
+
+    for (name, offset) in fields {
+        for value in values {
+            let tmpfile = create_tempfile();
+            {
+                let db = Database::create(tmpfile.path()).unwrap();
+                let txn = db.begin_write().unwrap();
+                {
+                    let mut t = txn.open_table(U64_TABLE).unwrap();
+                    t.insert(&1u64, &1u64).unwrap();
+                }
+                txn.commit().unwrap();
+            }
+
+            let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+            // Only the outcome matters: Ok or Err, but no panic and no hang.
+            if let Ok(db) = Database::open(tmpfile.path()) {
+                // If it opened, the layout it chose must describe a file it can
+                // actually walk.
+                let report = db.verify_integrity(VerifyLevel::Pages);
+                assert!(
+                    report.is_ok(),
+                    "{name}={value:#x}: opened but could not be verified: {report:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The slot fallback must compose with `pick_primary_for_repair`, which runs
+/// afterwards when recovery_required is also set. That function swaps to the
+/// secondary when the primary is corrupt -- so unless repair_info is kept in
+/// step with the fallback's swap, it swaps straight back to the damaged slot.
+#[test]
+fn corrupt_commit_slot_fallback_survives_repair_path() {
+    const GOD_BYTE_OFFSET: usize = 9;
+    const PRIMARY_BIT: u8 = 1;
+    const RECOVERY_REQUIRED: u8 = 2;
+    const TRANSACTION_0_OFFSET: usize = 64;
+    const TRANSACTION_SIZE: usize = 128;
+    const SLOT_CHECKSUM_IN_SLOT: usize = 112;
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        for i in 0..3u64 {
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(U64_TABLE).unwrap();
+                t.insert(&i, &i).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+    }
+
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    let primary = usize::from(bytes[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
+    let pslot = TRANSACTION_0_OFFSET + primary * TRANSACTION_SIZE;
+    // Damage the primary slot AND demand recovery, so both the fallback and
+    // the repair path's slot selection run over the same header.
+    bytes[pslot + SLOT_CHECKSUM_IN_SLOT] ^= 0xFF;
+    bytes[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    let db = Database::open(tmpfile.path())
+        .expect("must recover using the intact commit slot, not the damaged one");
+    let report = db.verify_integrity(VerifyLevel::Pages).unwrap();
+    assert!(report.valid, "recovered database must verify: {report:?}");
+}
+
+/// `crash_at_various_write_points` samples six countdown values and reuses one
+/// file, so each iteration crashes on the previous iteration's wreckage. Worse,
+/// a full open+write+commit for that workload consumes fewer backend operations
+/// than its smallest sampled value, so it injects no failure at all.
+///
+/// This sweeps every crash point from a pristine copy, asserting the ACID
+/// guarantee directly: after a failure at any single I/O operation, the database
+/// must reopen and verify. The workload is sized so the commit spans ~80
+/// operations, and the sweep runs past the end of that sequence so both the
+/// failing and the clean-commit cases are covered.
+#[test]
+fn crash_at_every_write_point_recovers() {
+    const SWEEP: u64 = 100;
+    // Guards against the sweep silently going vacuous if the I/O sequence ever
+    // gets shorter than the range: without this, every case would commit
+    // cleanly and the test would still pass while injecting nothing.
+    const MIN_INJECTED: u64 = 40;
+
+    let baseline = create_tempfile();
+    {
+        let db = populate_baseline(baseline.path(), 2000);
+        drop(db);
+    }
+    let pristine = std::fs::read(baseline.path()).unwrap();
+
+    let mut injected = 0u64;
+    for countdown in 1..=SWEEP {
+        let work = create_tempfile();
+        std::fs::write(work.path(), &pristine).unwrap();
+
+        {
+            let file_backend = FileBackend::new(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(work.path())
+                    .unwrap(),
+            )
+            .unwrap();
+            let crash_backend = CountdownBackend::new(file_backend, countdown);
+
+            match Builder::new().create_with_backend(crash_backend) {
+                Ok(db) => {
+                    let result = (|| -> Result<(), shodh_redb::Error> {
+                        let txn = db.begin_write()?;
+                        {
+                            let mut t = txn.open_table(TABLE)?;
+                            for i in 0..2000u64 {
+                                t.insert(&i, &[0xDD; 64][..])?;
+                            }
+                        }
+                        txn.commit()?;
+                        Ok(())
+                    })();
+                    if result.is_err() {
+                        injected += 1;
+                    }
+                    drop(db);
+                }
+                Err(_) => injected += 1,
+            }
+        }
+
+        let db = Database::open(work.path())
+            .unwrap_or_else(|e| panic!("countdown {countdown}: reopen failed: {e:?}"));
+        let report = db
+            .verify_integrity(VerifyLevel::Pages)
+            .unwrap_or_else(|e| panic!("countdown {countdown}: verify errored: {e:?}"));
+        assert!(report.valid, "countdown {countdown}: {report:?}");
+    }
+
+    assert!(
+        injected >= MIN_INJECTED,
+        "only {injected} of {SWEEP} crash points injected a failure; the sweep          no longer covers the commit's I/O sequence"
+    );
+}
+
+/// A page index must be addressable by `PageNumber`, so `region_max_data_pages`
+/// can never legitimately reach `u32::MAX`. It must be rejected rather than
+/// merely survived: `BuddyAllocator::new` sizes its bitmaps straight from this
+/// value, so an unbounded one reserves roughly a gigabyte before anything
+/// validates it. 64-bit absorbs that silently; 32-bit (wasm32/WASI) aborts.
+#[test]
+fn absurd_region_max_data_pages_is_rejected() {
+    const REGION_MAX_DATA_PAGES_OFFSET: usize = 9 + 1 + 2 + 4 + 4;
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(U64_TABLE).unwrap();
+            t.insert(&1u64, &1u64).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    bytes[REGION_MAX_DATA_PAGES_OFFSET..REGION_MAX_DATA_PAGES_OFFSET + 4]
+        .copy_from_slice(&u32::MAX.to_le_bytes());
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    assert!(
+        Database::open(tmpfile.path()).is_err(),
+        "an unaddressable region_max_data_pages must be rejected, not allocated for"
+    );
+}

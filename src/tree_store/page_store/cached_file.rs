@@ -1,17 +1,18 @@
+use crate::compat::Arc;
 use crate::compat::{Mutex, RwLock};
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
 use crate::{CacheStats, DatabaseError, Result, StorageBackend, StorageError};
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Index;
 use core::slice::SliceIndex;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
 #[cfg(feature = "cache_metrics")]
 use portable_atomic::AtomicU64;
+use portable_atomic::{AtomicBool, AtomicUsize};
 
 pub(super) struct WritablePage {
     buffer: Arc<Mutex<LRUWriteCache>>,

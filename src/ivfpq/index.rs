@@ -1,12 +1,14 @@
 use alloc::collections::BinaryHeap;
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
 
 use crate::TableDefinition;
+#[cfg(feature = "metrics")]
+use crate::compat::Arc;
 use crate::error::StorageError;
+#[cfg_attr(target_has_atomic = "ptr", allow(unused_imports))]
 use crate::observer::DatabaseObserver;
 #[cfg(feature = "metrics")]
 use crate::observer::DbMetrics;
@@ -126,7 +128,7 @@ pub struct IvfPqIndex<'txn, T: StorageWrite> {
     codebooks: Option<Codebooks>,
     /// Tracks whether config has been modified since last persist.
     config_dirty: bool,
-    observer: Arc<dyn DatabaseObserver>,
+    observer: crate::observer::ObserverRef,
     #[cfg(feature = "metrics")]
     db_metrics: Arc<DbMetrics>,
 }
@@ -136,7 +138,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     pub(crate) fn open(
         txn: &'txn T,
         definition: &IvfPqIndexDefinition,
-        observer: Arc<dyn DatabaseObserver>,
+        observer: crate::observer::ObserverRef,
         #[cfg(feature = "metrics")] db_metrics: Arc<DbMetrics>,
     ) -> crate::Result<Self> {
         let name = String::from(definition.name());

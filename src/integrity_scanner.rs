@@ -8,10 +8,10 @@
 //! the page state each cycle using the same verification infrastructure
 //! as [`Database::verify_integrity()`](crate::Database::verify_integrity).
 
+use crate::compat::Arc;
 use crate::db::{CorruptPageInfo, Database, TransactionGuard};
 use crate::transaction_tracker::TransactionTracker;
 use crate::tree_store::TransactionalMemory;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use portable_atomic::AtomicU64;

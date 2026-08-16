@@ -7,10 +7,13 @@ use crate::blob_store::types::{
 use crate::blob_store::writer::BlobWriter;
 use crate::cdc::CdcConfig;
 use crate::cdc::types::{CdcEvent, CdcKey, CdcRecord, ChangeStream};
+use crate::compat::Arc;
 use crate::compat::{HashMap, HashSet, Mutex};
 use crate::db::TransactionGuard;
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
+#[cfg_attr(target_has_atomic = "ptr", allow(unused_imports))]
+use crate::observer::DatabaseObserver;
 use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
 use crate::temporal::HybridLogicalClock;
@@ -31,7 +34,6 @@ use crate::{
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
@@ -42,9 +44,10 @@ use core::mem;
 use core::mem::size_of;
 use core::ops::{RangeBounds, RangeFull};
 use core::panic;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::Ordering;
 #[cfg(feature = "logging")]
 use log::{debug, warn};
+use portable_atomic::AtomicBool;
 use sha2::{Digest, Sha256};
 
 const MAX_PAGES_PER_COMPACTION: usize = 1_000_000;
@@ -93,6 +96,23 @@ const BLOB_DEDUP_INDEX: SystemTableDefinition<Sha256Key, DedupVal> =
     SystemTableDefinition::new("blob_dedup_idx");
 const BLOB_DEDUP_MAP: SystemTableDefinition<BlobId, Sha256Key> =
     SystemTableDefinition::new("blob_dedup_map");
+/// Cap for buffer reservations driven by a length read off disk.
+///
+/// Blob lengths come from `BlobRef.length` in a B-tree value. Reserving on an
+/// unvalidated length lets a corrupted value request an enormous allocation,
+/// and allocation failure in Rust **aborts** the process -- it does not unwind,
+/// so no caller can turn it into an error. Reserve at most this much up front
+/// and let the buffer grow as chunks actually arrive; the post-assembly length
+/// check still rejects a length that disagrees with the data.
+const MAX_BLOB_PREALLOC: u64 = 64 * 1024 * 1024;
+
+/// Reservation size to use for a blob buffer of `expected_length` bytes.
+#[allow(clippy::cast_possible_truncation)]
+fn blob_prealloc(expected_length: u64) -> usize {
+    // The min() bounds this well below usize::MAX on 32-bit targets too.
+    expected_length.min(MAX_BLOB_PREALLOC) as usize
+}
+
 /// Chunked blob data storage: blob data is split into BLOB_CHUNK_SIZE-byte
 /// chunks and stored in this B-tree table. This gives blob data full MVCC
 /// semantics via the page store's copy-on-write mechanism.
@@ -243,18 +263,25 @@ impl PageList<'_> {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.data[..size_of::<u16>()]
+        let stored = self.data[..size_of::<u16>()]
             .try_into()
             .map(|b| u16::from_le_bytes(b) as usize)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        // The count is read off a B-tree page, so it can disagree with the
+        // buffer that follows it. Clamp it, otherwise `get` slices out of
+        // bounds and panics. This is walked by `visit_freed_tree` during
+        // repair, on a database already known to be damaged.
+        let capacity =
+            self.data.len().saturating_sub(size_of::<u16>()) / PageNumber::serialized_size();
+        stored.min(capacity)
     }
 
     pub(crate) fn get(&self, index: usize) -> PageNumber {
         let start = size_of::<u16>() + PageNumber::serialized_size() * index;
-        self.data[start..(start + PageNumber::serialized_size())]
-            .try_into()
-            .map(PageNumber::from_le_bytes)
-            .unwrap_or(PageNumber::new(0, 0, 0))
+        self.data
+            .get(start..(start + PageNumber::serialized_size()))
+            .and_then(|b| b.try_into().ok())
+            .map_or(PageNumber::new(0, 0, 0), PageNumber::from_le_bytes)
     }
 }
 
@@ -996,7 +1023,7 @@ pub struct WriteTransaction {
     pub(crate) cdc_log: Option<Mutex<Vec<CdcEvent>>>,
     cdc_config: CdcConfig,
     history_retention: u64,
-    observer: Arc<dyn crate::observer::DatabaseObserver>,
+    observer: crate::observer::ObserverRef,
     #[cfg(feature = "metrics")]
     db_metrics: Arc<crate::observer::DbMetrics>,
 }
@@ -1010,7 +1037,7 @@ impl WriteTransaction {
         blob_dedup_config: BlobDedupConfig,
         cdc_config: CdcConfig,
         history_retention: u64,
-        observer: Arc<dyn crate::observer::DatabaseObserver>,
+        observer: crate::observer::ObserverRef,
         #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self> {
         let transaction_id = guard.id()?;
@@ -2024,8 +2051,7 @@ impl WriteTransaction {
         let end_key = BlobChunkKey::new(source_sequence, u32::MAX);
         let range = chunks_table.range(start_key..=end_key)?;
 
-        #[allow(clippy::cast_possible_truncation)]
-        let mut buf = Vec::with_capacity(expected_length as usize);
+        let mut buf = Vec::with_capacity(blob_prealloc(expected_length));
         for entry in range {
             let (_, value_guard) = entry?;
             buf.extend_from_slice(value_guard.value());
@@ -2095,7 +2121,7 @@ impl WriteTransaction {
         let end_key = BlobChunkKey::new(source_sequence, end_chunk);
         let range = chunks_table.range(start_key..=end_key)?;
 
-        let mut buf = Vec::with_capacity(length as usize);
+        let mut buf = Vec::with_capacity(blob_prealloc(length));
         let mut global_pos = u64::from(start_chunk) * chunk_size;
         for entry in range {
             let (_, value_guard) = entry?;
@@ -3342,7 +3368,7 @@ impl WriteTransaction {
 
         for transaction_id in processed {
             self.transaction_tracker
-                .mark_unprocessed_non_durable_commit(transaction_id)?;
+                .mark_non_durable_commit_processed(transaction_id)?;
         }
 
         Ok(())
@@ -3500,7 +3526,7 @@ pub struct ReadTransaction {
     /// would give a root whose pages may have been freed and reallocated.
     system_root: Option<BtreeHeader>,
     transaction_id: Option<u64>,
-    observer: Arc<dyn crate::observer::DatabaseObserver>,
+    observer: crate::observer::ObserverRef,
     #[cfg(feature = "metrics")]
     db_metrics: Arc<crate::observer::DbMetrics>,
 }
@@ -3509,7 +3535,7 @@ impl ReadTransaction {
     pub(crate) fn new(
         mem: Arc<TransactionalMemory>,
         guard: TransactionGuard,
-        observer: Arc<dyn crate::observer::DatabaseObserver>,
+        observer: crate::observer::ObserverRef,
         #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self, TransactionError> {
         let root_page = mem.get_data_root();
@@ -3533,7 +3559,7 @@ impl ReadTransaction {
         mem: Arc<TransactionalMemory>,
         guard: TransactionGuard,
         user_root: Option<BtreeHeader>,
-        observer: Arc<dyn crate::observer::DatabaseObserver>,
+        observer: crate::observer::ObserverRef,
         #[cfg(feature = "metrics")] db_metrics: Arc<crate::observer::DbMetrics>,
     ) -> Result<Self, TransactionError> {
         let system_root = mem.get_system_root();
@@ -3765,8 +3791,7 @@ impl ReadTransaction {
         let range = chunks_btree
             .range::<core::ops::RangeInclusive<BlobChunkKey>, BlobChunkKey>(&(start..=end))?;
 
-        #[allow(clippy::cast_possible_truncation)]
-        let mut buf = Vec::with_capacity(expected_length as usize);
+        let mut buf = Vec::with_capacity(blob_prealloc(expected_length));
         for entry in range {
             let entry = entry?;
             buf.extend_from_slice(entry.value());
@@ -3808,7 +3833,7 @@ impl ReadTransaction {
             &(start_key..=end_key),
         )?;
 
-        let mut buf = Vec::with_capacity(length as usize);
+        let mut buf = Vec::with_capacity(blob_prealloc(length));
         let mut global_pos = u64::from(start_chunk) * chunk_size;
         for entry in range {
             let entry = entry?;
@@ -4596,6 +4621,53 @@ mod test {
     use crate::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    /// `PageList::len` reads a u16 straight off a B-tree page. `get` then
+    /// slices `data[start..start + 8]`, which panics outright if that length
+    /// outruns the buffer. `visit_freed_tree` walks this during `do_repair` --
+    /// on a database already known to be damaged -- so a panic here turns a
+    /// partial recovery into no recovery at all.
+    #[test]
+    fn page_list_len_is_bounded_by_its_buffer() {
+        use crate::transactions::PageList;
+        use crate::types::Value;
+
+        // Claim 1000 entries but supply room for only two.
+        let mut data = Vec::new();
+        data.extend(1000u16.to_le_bytes());
+        data.extend([0u8; 16]);
+
+        let list = <PageList as Value>::from_bytes(&data);
+        assert_eq!(
+            list.len(),
+            2,
+            "len must be clamped to what the buffer can hold"
+        );
+        // Every index below len() must be readable without panicking.
+        for i in 0..list.len() {
+            let _ = list.get(i);
+        }
+    }
+
+    /// A blob length read off disk must not drive an unbounded reservation:
+    /// allocation failure aborts the process rather than unwinding, so no
+    /// caller could turn it into an error.
+    #[test]
+    fn blob_prealloc_is_bounded() {
+        use crate::transactions::{MAX_BLOB_PREALLOC, blob_prealloc};
+
+        let cap = usize::try_from(MAX_BLOB_PREALLOC).unwrap();
+
+        // Ordinary lengths are reserved exactly.
+        assert_eq!(blob_prealloc(0), 0);
+        assert_eq!(blob_prealloc(4096), 4096);
+        assert_eq!(blob_prealloc(MAX_BLOB_PREALLOC), cap);
+
+        // A corrupted length is capped, not honoured.
+        for absurd in [MAX_BLOB_PREALLOC + 1, 1 << 40, u64::MAX] {
+            assert_eq!(blob_prealloc(absurd), cap, "length {absurd} must be capped");
+        }
+    }
 
     #[test]
     fn transaction_id_persistence() {

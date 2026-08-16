@@ -1,3 +1,26 @@
+//! Tables with per-key time-to-live.
+//!
+//! An entry stores its expiry as a `u64` of milliseconds since the UNIX epoch,
+//! prefixed to the value. Eviction is lazy: reads and iterators skip entries
+//! whose expiry has passed, and [`TtlTable::purge_expired`] removes them from
+//! disk.
+//!
+//! # Expiry is wall-clock, not snapshot-relative
+//!
+//! Expiry is evaluated against the system clock at the moment of each read,
+//! not against the transaction's snapshot. Two consequences differ from the
+//! rest of the database, which is snapshot-isolated:
+//!
+//! - Within a single long-running read transaction, a key can return `Some`
+//!   and then `None` as real time passes. Repeated reads are not stable.
+//! - If the system clock moves backwards (NTP correction, manual change), an
+//!   entry that had expired becomes visible again, unless `purge_expired`
+//!   already removed it from disk.
+//!
+//! Code that needs a stable view across a transaction should read the expiry
+//! itself via [`TtlAccessGuard::expires_at_ms`] and apply its own cutoff,
+//! rather than relying on `get` returning `None`.
+
 use crate::sealed::Sealed;
 use crate::table::{Range, ReadableTable, ReadableTableMetadata, TableStats};
 use crate::tree_store::AccessGuard;

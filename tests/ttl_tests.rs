@@ -278,3 +278,46 @@ fn ttl_purge_returns_count() {
     }
     write_txn.commit().unwrap();
 }
+
+/// TTL expiry is evaluated against the wall clock at each read, not against the
+/// transaction's snapshot. So unlike the rest of the database, a TTL key is not
+/// stable within one read transaction: it can return `Some` and later `None`
+/// without any write occurring.
+///
+/// This pins documented behaviour rather than asserting it is desirable. If
+/// expiry ever becomes snapshot-relative, this test should fail and the module
+/// docs must change with it.
+#[test]
+fn ttl_expiry_is_not_snapshot_stable() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_ttl_table(TTL_TABLE).unwrap();
+        // A full second of headroom, so the first read below cannot lose a
+        // race with expiry on a loaded machine.
+        table
+            .insert_with_ttl("fading", &7, Duration::from_secs(1))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    // One read transaction, held across the expiry boundary.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_ttl_table(TTL_TABLE).unwrap();
+
+    assert_eq!(
+        table.get("fading").unwrap().unwrap().value(),
+        7,
+        "entry must be visible before its TTL elapses"
+    );
+
+    thread::sleep(Duration::from_millis(1500));
+
+    assert!(
+        table.get("fading").unwrap().is_none(),
+        "the same key in the same read transaction must vanish once the wall \
+         clock passes its expiry -- TTL is not snapshot-relative"
+    );
+}

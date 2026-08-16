@@ -66,6 +66,15 @@ pub enum StorageError {
     Internal(String),
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
+    /// A merge operator produced a value whose length does not match the
+    /// table's fixed-width value type. Writing it would store bytes that
+    /// cannot be deserialized back into the declared type.
+    MergeValueWidthMismatch {
+        /// The width the table's value type requires
+        expected: usize,
+        /// The length the merge operator returned
+        actual: usize,
+    },
     /// A blob with the given sequence ID was not found in the blob store
     BlobNotFound(u64),
     /// Blob data checksum does not match the stored checksum
@@ -221,6 +230,9 @@ impl From<StorageError> for Error {
             StorageError::Corrupted(msg) => Error::Corrupted(msg),
             StorageError::Internal(msg) => Error::Internal(msg),
             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
+            StorageError::MergeValueWidthMismatch { expected, actual } => {
+                Error::MergeValueWidthMismatch { expected, actual }
+            }
             StorageError::BlobNotFound(seq) => Error::BlobNotFound(seq),
             StorageError::BlobChecksumMismatch {
                 sequence,
@@ -334,6 +346,10 @@ impl Display for StorageError {
             StorageError::Internal(msg) => {
                 write!(f, "Internal error (this is a bug): {msg}")
             }
+            StorageError::MergeValueWidthMismatch { expected, actual } => write!(
+                f,
+                "Merge operator returned {actual} bytes, but the table's value type requires exactly {expected}"
+            ),
             StorageError::ValueTooLarge(len) => {
                 write!(
                     f,
@@ -1036,6 +1052,15 @@ pub enum Error {
     UpgradeRequired(u8),
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
+    /// A merge operator produced a value whose length does not match the
+    /// table's fixed-width value type. Writing it would store bytes that
+    /// cannot be deserialized back into the declared type.
+    MergeValueWidthMismatch {
+        /// The width the table's value type requires
+        expected: usize,
+        /// The length the merge operator returned
+        actual: usize,
+    },
     /// Table types didn't match.
     TableTypeMismatch {
         table: String,
@@ -1227,6 +1252,10 @@ impl Display for Error {
                     "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION3}, but file is version {actual}"
                 )
             }
+            Error::MergeValueWidthMismatch { expected, actual } => write!(
+                f,
+                "Merge operator returned {actual} bytes, but the table's value type requires exactly {expected}"
+            ),
             Error::ValueTooLarge(len) => {
                 write!(
                     f,

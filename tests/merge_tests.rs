@@ -316,3 +316,49 @@ fn merge_different_width_types() {
     }
     write_txn.commit().unwrap();
 }
+
+/// A merge operator returns raw bytes, which are deserialized as `V` with no
+/// length check of their own. For a fixed-width `V`, a wrong-length result used
+/// to be stored and then silently read back as the type's default -- three
+/// bytes in a `u64` table returned 0, with no error anywhere. Reject it.
+///
+/// This needs no custom operator: `merge` takes a raw `&[u8]` operand, so an
+/// ordinary caller mistake with a builtin operator reaches it.
+#[test]
+fn merge_wrong_width_operand_is_rejected() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE_U64).unwrap();
+        // Three bytes for a u64 table. NumericAdd passes the operand straight
+        // through when there is no existing value.
+        let result = table.merge("counter", &[1u8, 2, 3], &NumericAdd);
+        assert!(
+            result.is_err(),
+            "a wrong-width merge result must be reported, not silently stored"
+        );
+    }
+    drop(write_txn);
+}
+
+/// The same guard must not fire for variable-width value types, where any
+/// length is legitimate.
+#[test]
+fn merge_variable_width_accepts_any_length() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE_BYTES).unwrap();
+        table.insert("log", b"ab".as_slice()).unwrap();
+        table.merge("log", b"cde", &BytesAppend).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE_BYTES).unwrap();
+    assert_eq!(table.get("log").unwrap().unwrap().value(), b"abcde");
+}

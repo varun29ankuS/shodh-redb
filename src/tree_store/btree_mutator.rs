@@ -152,7 +152,18 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 checksum,
                 DeleteTarget::Key(K::as_bytes(key).as_ref()),
             )?;
-            let new_length = if found.is_some() { length - 1 } else { length };
+            // `length` comes off disk in the root BtreeHeader. A tree that
+            // yields an entry while claiming to be empty is inconsistent, so
+            // report it rather than underflowing.
+            let new_length = if found.is_some() {
+                length.checked_sub(1).ok_or_else(|| {
+                    StorageError::Corrupted(
+                        "btree length is zero but an entry was deleted".to_string(),
+                    )
+                })?
+            } else {
+                length
+            };
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
                 DeletedLeaf => None,
@@ -167,7 +178,14 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     );
                     builder.push_all_except(&accessor, Some(deleted_pair));
                     let page = builder.build()?;
-                    assert_eq!(new_length, accessor.num_pairs() as u64 - 1);
+                    // Same disk-derived comparison: a mismatch means the
+                    // stored length disagrees with the leaf, which is
+                    // corruption rather than an engine bug.
+                    if new_length != accessor.num_pairs() as u64 - 1 {
+                        return Err(StorageError::Corrupted(
+                            "btree length does not match the leaf contents".to_string(),
+                        ));
+                    }
                     Some(BtreeHeader::new(
                         page.get_page_number(),
                         DEFERRED,
@@ -201,7 +219,18 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             self.extracted_key = None;
             let (deletion_result, found) =
                 *self.delete_helper(self.mem.get_page(p)?, checksum, target)?;
-            let new_length = if found.is_some() { length - 1 } else { length };
+            // `length` comes off disk in the root BtreeHeader. A tree that
+            // yields an entry while claiming to be empty is inconsistent, so
+            // report it rather than underflowing.
+            let new_length = if found.is_some() {
+                length.checked_sub(1).ok_or_else(|| {
+                    StorageError::Corrupted(
+                        "btree length is zero but an entry was deleted".to_string(),
+                    )
+                })?
+            } else {
+                length
+            };
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
                 DeletedLeaf => None,
@@ -216,7 +245,14 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     );
                     builder.push_all_except(&accessor, Some(deleted_pair));
                     let page = builder.build()?;
-                    assert_eq!(new_length, accessor.num_pairs() as u64 - 1);
+                    // Same disk-derived comparison: a mismatch means the
+                    // stored length disagrees with the leaf, which is
+                    // corruption rather than an engine bug.
+                    if new_length != accessor.num_pairs() as u64 - 1 {
+                        return Err(StorageError::Corrupted(
+                            "btree length does not match the leaf contents".to_string(),
+                        ));
+                    }
                     Some(BtreeHeader::new(
                         page.get_page_number(),
                         DEFERRED,

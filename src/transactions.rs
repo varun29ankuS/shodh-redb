@@ -423,12 +423,17 @@ impl Value for AllocatorStateKey {
     where
         Self: 'a,
     {
-        match data[0] {
-            3 => Self::Region(data[1..].try_into().map(u32::from_le_bytes).unwrap_or(0)),
-            4 => Self::RegionTracker,
-            5 => Self::TransactionId,
-            // 0, 1, 2 were used in redb 2.x; unknown discriminants are also
-            // treated as deprecated to avoid panicking on corrupt data.
+        // `first()` rather than `data[0]`: an empty slice panicked here with
+        // "index out of bounds: the len is 0 but the index is 0". The
+        // discriminant arm below already degrades rather than panics, so the
+        // length check was the only gap.
+        match data.first() {
+            Some(3) => Self::Region(data[1..].try_into().map(u32::from_le_bytes).unwrap_or(0)),
+            Some(4) => Self::RegionTracker,
+            Some(5) => Self::TransactionId,
+            // 0, 1, 2 were used in redb 2.x; unknown discriminants, and an
+            // empty slice, are treated as deprecated to avoid panicking on
+            // corrupt data.
             _ => Self::Deprecated,
         }
     }
@@ -4667,6 +4672,26 @@ mod test {
         for absurd in [MAX_BLOB_PREALLOC + 1, 1 << 40, u64::MAX] {
             assert_eq!(blob_prealloc(absurd), cap, "length {absurd} must be capped");
         }
+    }
+
+    /// `AllocatorStateKey::from_bytes` read `data[0]` before checking the
+    /// length: "index out of bounds: the len is 0 but the index is 0". Found by
+    /// the `fuzz_db_image` target. The unknown-discriminant arm already
+    /// degraded rather than panicking; only the length check was missing.
+    #[test]
+    fn allocator_state_key_from_empty_bytes_does_not_panic() {
+        use crate::transactions::AllocatorStateKey;
+        use crate::types::Value;
+
+        // Must return, not panic.
+        let key = <AllocatorStateKey as Value>::from_bytes(&[]);
+        assert_eq!(key, AllocatorStateKey::Deprecated);
+
+        // An unknown discriminant degrades the same way.
+        assert_eq!(
+            <AllocatorStateKey as Value>::from_bytes(&[99, 0, 0, 0, 0]),
+            AllocatorStateKey::Deprecated
+        );
     }
 
     #[test]

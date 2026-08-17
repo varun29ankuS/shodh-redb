@@ -1417,6 +1417,10 @@ impl Database {
     ///
     /// Same constraints as [`compact()`](Self::compact): no active read transactions
     /// or persistent/ephemeral savepoints.
+    #[deprecated(
+        since = "0.6.0",
+        note = "blob data lives in the ordinary B-tree, so there is no dead space to reclaim; this always reports was_noop. Use Database::compact() to reclaim file space."
+    )]
     pub fn compact_blobs(&mut self) -> core::result::Result<BlobCompactionReport, CompactionError> {
         if self
             .transaction_tracker
@@ -1520,6 +1524,10 @@ impl Database {
     /// both of which are structurally zero under chunked B-tree blob storage.
     /// See [`compact_blobs()`](Self::compact_blobs) for why, and use
     /// [`compact()`](Self::compact) to reclaim file space.
+    #[deprecated(
+        since = "0.6.0",
+        note = "dead_bytes and fragmentation_ratio are structurally zero, so this always returns None. Use Database::compact() to reclaim file space."
+    )]
     pub fn should_compact_blobs(&self) -> Result<Option<BlobStats>, TransactionError> {
         let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
         let stats = txn.blob_stats().map_err(TransactionError::Storage)?;
@@ -1544,6 +1552,10 @@ impl Database {
     ///
     /// Same constraints as `compact_blobs`: no active read transactions or
     /// persistent/ephemeral savepoints.
+    #[deprecated(
+        since = "0.6.0",
+        note = "always a no-op, so the callback is never invoked. Use Database::compact() to reclaim file space."
+    )]
     pub fn compact_blobs_with_progress(
         &mut self,
         mut callback: impl FnMut(u64, u64, u64, u64) -> bool,
@@ -3132,6 +3144,10 @@ impl Builder {
     ///
     /// This only affects the advisory recommendation; the database never
     /// auto-compacts blobs.
+    #[deprecated(
+        since = "0.6.0",
+        note = "the policy is compared against dead_bytes and fragmentation_ratio, both structurally zero, so it can never trigger."
+    )]
     pub fn set_blob_compaction_policy(&mut self, policy: BlobCompactionPolicy) -> &mut Self {
         self.blob_compaction_policy = policy;
         self

@@ -2,6 +2,11 @@
 //! Each test opens a fresh DB, exercises one feature, and asserts correctness.
 //! Target: ~100 tests pass in < 10 seconds.
 
+// The blob compaction API is deprecated in 0.6.0 because it is inert.
+// These tests deliberately assert that inert behaviour, so they opt in
+// rather than migrate away.
+#![allow(deprecated)]
+
 use std::io::Write;
 use std::time::Duration;
 

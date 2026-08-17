@@ -1,3 +1,8 @@
+// The blob compaction API is deprecated in 0.6.0 because it is inert.
+// These tests deliberately assert that inert behaviour, so they opt in
+// rather than migrate away.
+#![allow(deprecated)]
+
 /// SOC Compliance Test Suite
 ///
 /// Comprehensive tests covering type system, merge operators, multimap,

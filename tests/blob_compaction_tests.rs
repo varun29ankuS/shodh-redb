@@ -13,6 +13,11 @@
 //! These tests verify both the no-op compaction API behavior and the underlying
 //! data integrity of the chunked blob storage.
 
+// The blob compaction API is deprecated in 0.6.0 because it is inert.
+// These tests deliberately assert that inert behaviour, so they opt in
+// rather than migrate away.
+#![allow(deprecated)]
+
 use shodh_redb::*;
 
 fn create_tempfile() -> tempfile::NamedTempFile {

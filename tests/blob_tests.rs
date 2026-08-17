@@ -1,3 +1,8 @@
+// The blob compaction API is deprecated in 0.6.0 because it is inert.
+// These tests deliberately assert that inert behaviour, so they opt in
+// rather than migrate away.
+#![allow(deprecated)]
+
 use shodh_redb::{
     BlobId, Builder, CausalLink, ContentType, Database, ReadableDatabase, RelationType,
     StorageError, StoreOptions,

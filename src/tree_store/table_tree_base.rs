@@ -453,8 +453,17 @@ impl Value for InternalTableDefinition {
                 .unwrap(),
         ) as usize;
         offset += size_of::<u32>();
-        let key_type = TypeName::from_bytes(&data[offset..(offset + key_type_len)]);
-        offset += key_type_len;
+        // `key_type_len` is read off disk and is NOT covered by the min_len
+        // assert above, which only spans the fixed-size prefix. A corrupted
+        // value sliced past the buffer:
+        //   range end index 12648546 out of range for slice of length 113
+        // The Value trait forces this function to return Self, so there is no
+        // error to return -- but clamping is strictly better than panicking.
+        // A truncated type name simply fails the later type comparison, which
+        // reports corruption through a normal error path.
+        let key_type_end = offset.saturating_add(key_type_len).min(data.len());
+        let key_type = TypeName::from_bytes(&data[offset..key_type_end]);
+        offset = key_type_end;
         let value_type = TypeName::from_bytes(&data[offset..]);
 
         match table_type {
@@ -532,5 +541,39 @@ impl Value for InternalTableDefinition {
 
     fn type_name() -> TypeName {
         TypeName::internal("redb::InternalTableDefinition")
+    }
+}
+
+#[cfg(test)]
+mod corrupt_metadata_tests {
+    use super::*;
+
+    /// `key_type_len` is read off disk and lies outside the `min_len` assert,
+    /// which only spans the fixed-size prefix. A corrupted value used to slice
+    /// past the buffer:
+    ///
+    /// ```text
+    /// range end index 12648546 out of range for slice of length 113
+    /// ```
+    ///
+    /// Found by the `fuzz_db_image` target. `Value::from_bytes` cannot return
+    /// an error, so the requirement is simply that it does not panic.
+    #[test]
+    fn absurd_key_type_len_does_not_slice_past_the_buffer() {
+        // Fixed-size prefix, matching the layout from_bytes expects.
+        let mut data = vec![0u8; 64];
+        data[0] = 3; // TableType::Normal (1 and 2 are the legacy v1 encodings)
+        // table_length at 1..9, root null flag at 9, BtreeHeader at 10..42,
+        // fixed key/value flags and sizes at 42..60 -- all zero is fine.
+        // key_type_len at 60..64: absurd.
+        data[60..64].copy_from_slice(&0xC0FFEEu32.to_le_bytes());
+        // A little trailing data, so the buffer is longer than min_len but far
+        // shorter than the claimed key type name.
+        data.extend_from_slice(&[0u8; 49]);
+
+        // Must return, not panic.
+        let def = <InternalTableDefinition as Value>::from_bytes(&data);
+        // The type name is necessarily truncated; it just has to be produced.
+        let _ = format!("{def:?}");
     }
 }

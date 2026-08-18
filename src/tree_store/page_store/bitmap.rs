@@ -41,10 +41,12 @@ impl BtreeBitmap {
             while height < self.get_height() - 1 {
                 height += 1;
                 entry *= 64;
-                entry = self
-                    .get_level(height)
-                    .first_unset(entry, entry + 64)
-                    .unwrap();
+                // The tree invariant says a parent bit is unset only when some
+                // child below it is unset, so this "cannot" fail -- but the
+                // levels are rebuilt from disk, and corrupt data breaks it.
+                // Reporting "nothing free" makes the allocator fail cleanly
+                // rather than panicking here.
+                entry = self.get_level(height).first_unset(entry, entry + 64)?;
             }
 
             Some(entry)
@@ -359,13 +361,17 @@ impl U64GroupedBitmap {
 
     fn first_unset(&self, start_bit: u32, end_bit: u32) -> Option<u32> {
         assert_eq!(end_bit, (start_bit - start_bit % 64) + 64);
-        if self.len == 0 {
+        // Unlike get/set/clear, `start_bit` comes from the caller rather than
+        // being checked against `len` first, and the buddy allocator derives it
+        // from on-disk state. A bit past the end simply has nothing unset in
+        // it, so report that instead of indexing out of the word vector.
+        if self.len == 0 || start_bit >= self.len {
             return None;
         }
 
         let (index, bit) = Self::data_index_of(start_bit);
         let mask = (1 << bit) - 1;
-        let group = self.data[index];
+        let group = *self.data.get(index)?;
         let group = group | mask;
         match group.trailing_ones() {
             64 => None,
@@ -465,6 +471,22 @@ mod test {
             U64GroupedBitmap::from_bytes(&serialized).is_err(),
             "a length larger than the serialized data must be rejected"
         );
+    }
+
+    /// `first_unset` takes `start_bit` from its caller rather than checking it
+    /// against `len` the way get/set/clear do, and the buddy allocator derives
+    /// that value from on-disk state. A bit past the end used to index out of
+    /// the word vector: "index out of bounds: the len is 5 but the index is 56".
+    /// Found by the `fuzz_db_image` target.
+    #[test]
+    fn first_unset_past_the_end_returns_none() {
+        use crate::tree_store::page_store::bitmap::U64GroupedBitmap;
+
+        // 100 bits -> 2 words of storage.
+        let bitmap = U64GroupedBitmap::new_full(100, 100);
+        // Well past the end, and word-aligned so the internal assert holds.
+        let start = 3584u32;
+        assert_eq!(bitmap.first_unset(start, start + 64), None);
     }
 
     #[test]

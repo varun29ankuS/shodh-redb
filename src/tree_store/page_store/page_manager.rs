@@ -104,12 +104,28 @@ impl InMemoryState {
         Ok(Self { header, allocators })
     }
 
-    fn get_region(&self, region: u32) -> &BuddyAllocator {
-        &self.allocators.region_allocators[region as usize]
+    // Region indexes come from PageNumbers parsed off disk, so they can point
+    // past the allocators rebuilt from the header. Report that instead of
+    // indexing out of the vector.
+    fn get_region(&self, region: u32) -> Result<&BuddyAllocator> {
+        self.allocators
+            .region_allocators
+            .get(region as usize)
+            .ok_or_else(|| Self::bad_region(region, self.allocators.region_allocators.len()))
     }
 
-    fn get_region_mut(&mut self, region: u32) -> &mut BuddyAllocator {
-        &mut self.allocators.region_allocators[region as usize]
+    fn get_region_mut(&mut self, region: u32) -> Result<&mut BuddyAllocator> {
+        let count = self.allocators.region_allocators.len();
+        self.allocators
+            .region_allocators
+            .get_mut(region as usize)
+            .ok_or_else(|| Self::bad_region(region, count))
+    }
+
+    fn bad_region(region: u32, count: usize) -> StorageError {
+        StorageError::Corrupted(alloc::format!(
+            "region index {region} is outside the {count} allocators for this database"
+        ))
     }
 
     fn get_region_tracker_mut(&mut self) -> &mut RegionTracker {
@@ -831,7 +847,7 @@ impl TransactionalMemory {
     pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) -> Result {
         let mut state = self.state.lock();
         let region_index = page_number.region;
-        let allocator = state.get_region_mut(region_index);
+        let allocator = state.get_region_mut(region_index)?;
         allocator.record_alloc(page_number.page_index, page_number.page_order)?;
         #[cfg(debug_assertions)]
         // Idempotent: corrupted on-disk data may reference the same page twice.
@@ -1316,7 +1332,7 @@ impl TransactionalMemory {
                 .get_region_tracker_mut()
                 .mark_free(page_number.page_order, region_index)?;
             state
-                .get_region_mut(region_index)
+                .get_region_mut(region_index)?
                 .free(page_number.page_index, page_number.page_order)?;
             #[cfg(debug_assertions)]
             // Tolerate missing entries: corrupted data may cause inconsistent tracking.
@@ -1541,7 +1557,7 @@ impl TransactionalMemory {
         let region_index = page.region;
         // Free in the regional allocator
         state
-            .get_region_mut(region_index)
+            .get_region_mut(region_index)?
             .free(page.page_index, page.page_order)?;
         // Ensure that the region is marked as having free space
         state
@@ -1667,7 +1683,7 @@ impl TransactionalMemory {
             else {
                 return Ok(None);
             };
-            let region = state.get_region_mut(candidate_region);
+            let region = state.get_region_mut(candidate_region)?;
             let r = if lowest {
                 region.alloc_lowest(required_order)?
             } else {
@@ -1690,7 +1706,7 @@ impl TransactionalMemory {
     fn try_shrink(state: &mut InMemoryState, force: bool) -> Result<bool> {
         let layout = state.header.layout();
         let last_region_index = layout.num_regions() - 1;
-        let last_allocator = state.get_region(last_region_index);
+        let last_allocator = state.get_region(last_region_index)?;
         let trailing_free = last_allocator.trailing_free_pages()?;
         let last_allocator_len = last_allocator.len();
         if trailing_free == 0 {
@@ -1851,7 +1867,7 @@ impl TransactionalMemory {
         let state = self.state.lock();
         let mut count = 0u64;
         for i in 0..state.header.layout().num_regions() {
-            count += u64::from(state.get_region(i).count_allocated_pages());
+            count += u64::from(state.get_region(i)?.count_allocated_pages());
         }
 
         Ok(count)
@@ -1861,7 +1877,7 @@ impl TransactionalMemory {
         let state = self.state.lock();
         let mut count = 0u64;
         for i in 0..state.header.layout().num_regions() {
-            count += u64::from(state.get_region(i).count_free_pages());
+            count += u64::from(state.get_region(i)?.count_free_pages());
         }
 
         Ok(count)
@@ -1875,7 +1891,7 @@ impl TransactionalMemory {
         }
         let last_region = layout.num_regions() - 1;
         Ok(u64::from(
-            state.get_region(last_region).trailing_free_pages()?,
+            state.get_region(last_region)?.trailing_free_pages()?,
         ))
     }
 

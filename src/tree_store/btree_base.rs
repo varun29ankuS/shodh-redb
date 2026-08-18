@@ -1657,7 +1657,11 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         }
         let offset = self.key_offset(n);
         let end = self.key_end(n)?;
-        Some(&self.page.memory()[offset..end])
+        // Both bounds come from on-disk offsets, so the range can be reversed
+        // or past the page: "range start index 1728053248 out of range for
+        // slice of length 4096". This already returns Option, so `get` reports
+        // it the same way an absent key is reported.
+        self.page.memory().get(offset..end)
     }
 
     pub(crate) fn count_children(&self) -> usize {

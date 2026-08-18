@@ -1138,3 +1138,57 @@ fn absurd_region_max_data_pages_is_rejected() {
         "an unaddressable region_max_data_pages must be rejected, not allocated for"
     );
 }
+
+/// Regression for the first crash the `fuzz_db_image` target found, reduced to
+/// a deterministic test so it runs in the normal suite rather than only under
+/// the fuzzer (whose corpus is gitignored).
+///
+/// Zeroing a byte of the system root's `length` in the primary commit slot and
+/// resealing that slot's checksum yields a header that parses as consistent
+/// while describing a tree that claims to be empty but still holds entries.
+/// Deleting through it during open computed `length - 1` and panicked with
+/// "attempt to subtract with overflow".
+/// Requires the `fuzzing` feature for `slot_checksum`; CI runs
+/// `cargo test --all --all-features`, which includes it.
+#[test]
+#[cfg(feature = "fuzzing")]
+fn resealed_slot_with_zero_length_does_not_underflow() {
+    const GOD_BYTE_OFFSET: usize = 9;
+    const PRIMARY_BIT: u8 = 1;
+    const TRANSACTION_0_OFFSET: usize = 64;
+    const TRANSACTION_SIZE: usize = 128;
+    const SLOT_CHECKSUM_IN_SLOT: usize = 112;
+    // system_root BtreeHeader spans 40..72 within a slot: page 40..48,
+    // checksum 48..64, length 64..72.
+    const SYSTEM_ROOT_LENGTH_IN_SLOT: usize = 64;
+
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        for i in 0..64u64 {
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(U64_TABLE).unwrap();
+                t.insert(&i, &i).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+    }
+
+    let mut bytes = std::fs::read(tmpfile.path()).unwrap();
+    let primary = usize::from(bytes[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
+    let slot = TRANSACTION_0_OFFSET + primary * TRANSACTION_SIZE;
+
+    // Claim the system tree is empty.
+    bytes[slot + SYSTEM_ROOT_LENGTH_IN_SLOT..slot + SYSTEM_ROOT_LENGTH_IN_SLOT + 8].fill(0);
+    // Reseal, so the header is internally consistent and the field is trusted.
+    let checksum = shodh_redb::fuzzing::slot_checksum(&bytes[slot..slot + SLOT_CHECKSUM_IN_SLOT]);
+    bytes[slot + SLOT_CHECKSUM_IN_SLOT..slot + TRANSACTION_SIZE]
+        .copy_from_slice(&checksum.to_le_bytes());
+    std::fs::write(tmpfile.path(), &bytes).unwrap();
+
+    // Any outcome is fine except a panic.
+    if let Ok(db) = Database::open(tmpfile.path()) {
+        let _ = db.verify_integrity(VerifyLevel::Pages);
+    }
+}

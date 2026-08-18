@@ -145,6 +145,27 @@ pub use vector_ops::{
 
 pub type Result<T = (), E = StorageError> = core::result::Result<T, E>;
 
+/// Internals exposed for fuzz targets.
+///
+/// A fuzzer that only flips random bytes proves the integrity checks reject
+/// garbage; it never reaches the code behind them. Recomputing checksums lets
+/// it build images that are internally consistent but semantically wrong,
+/// which is where the interesting failures live.
+///
+/// Not part of the public API. No stability guarantee, exempt from semver.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    /// Checksum over a commit slot's bytes, as `DatabaseHeader` computes it.
+    ///
+    /// A fuzzer that edits a commit slot must rewrite this, or the header is
+    /// rejected before anything reads the fields it changed.
+    #[must_use]
+    pub fn slot_checksum(data: &[u8]) -> u128 {
+        crate::tree_store::hash128_with_seed(data, 0)
+    }
+}
+
 pub mod backends;
 pub mod blob_store;
 pub mod cdc;

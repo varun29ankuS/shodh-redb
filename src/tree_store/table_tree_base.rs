@@ -21,12 +21,6 @@ pub(crate) enum TableType {
     Multimap,
 }
 
-impl TableType {
-    fn is_legacy(value: u8) -> bool {
-        value == 1 || value == 2
-    }
-}
-
 #[allow(clippy::from_over_into)]
 impl Into<u8> for TableType {
     fn into(self) -> u8 {
@@ -103,6 +97,32 @@ impl InternalTableDefinition {
                 key_type: K::type_name(),
                 value_type: V::type_name(),
             },
+        }
+    }
+
+    /// A definition that every caller path refuses to act on.
+    ///
+    /// `Value::from_bytes` cannot return an error, so metadata that is not
+    /// self-consistent degrades to this instead of panicking. Alignment 0 is
+    /// deliberately invalid -- `ALIGNMENT` is 1 -- so `check_match_untyped`
+    /// rejects it with `TypeDefinitionChanged` before a caller can use it.
+    /// That matters because the untyped API does not compare type names, so a
+    /// plausible-looking empty table would silently mask the corruption.
+    ///
+    /// The null root carries just as much weight: the paths that bypass
+    /// `check_match_untyped` -- `list_tables` and the pending-root flush in
+    /// `table_tree.rs` -- read `table_root` directly, so a root recovered from
+    /// metadata already known to be corrupt must never reach them.
+    fn rejected() -> Self {
+        InternalTableDefinition::Normal {
+            table_root: None,
+            table_length: 0,
+            fixed_key_size: None,
+            fixed_value_size: None,
+            key_alignment: 0,
+            value_alignment: 0,
+            key_type: TypeName::from_bytes(&[]),
+            value_type: TypeName::from_bytes(&[]),
         }
     }
 
@@ -364,7 +384,6 @@ impl Value for InternalTableDefinition {
         // Minimum length: 1 (type) + 8 (length) + 1 (root null) + BtreeHeader::serialized_size()
         // + 1 (key null) + 4 (key size) + 1 (val null) + 4 (val size) + 4 (key align)
         // + 4 (val align) + 4 (key_type_len) = 32 + BtreeHeader::serialized_size()
-        // NOTE: Value trait prevents returning Result; controlled panic is the best we can do.
         let min_len = 1
             + size_of::<u64>()
             + 1
@@ -376,15 +395,24 @@ impl Value for InternalTableDefinition {
             + size_of::<u32>()
             + size_of::<u32>()
             + size_of::<u32>();
-        assert!(
-            data.len() >= min_len,
-            "InternalTableDefinition: data length {} < minimum {min_len} (corrupted table metadata)",
-            data.len()
-        );
+        if data.len() < min_len {
+            // Truncated metadata. The Value trait forces this function to
+            // return Self, and the previous "controlled panic" here was
+            // reachable from a crafted database image, so degrade instead.
+            return Self::rejected();
+        }
         let mut offset = 0;
-        let legacy = TableType::is_legacy(data[offset]);
-        debug_assert!(!legacy);
-        let table_type = TableType::try_from_byte(data[offset]).unwrap_or(TableType::Normal);
+        // The table type byte comes off disk: 1 and 2 are the v1 file format's
+        // encodings and anything outside 3..=4 is simply invalid. A crafted
+        // image reaches both. This used to `debug_assert!` on the legacy pair
+        // and then coerce every unrecognized byte to `Normal`, so a release
+        // build parsed corrupt metadata as a well-formed normal table -- and
+        // `get_table_untyped` handed it back, because `check_match_untyped`
+        // compares the type it was *told* to expect against the coerced value.
+        // Reject the record instead; nothing after this byte is trustworthy.
+        let Ok(table_type) = TableType::try_from_byte(data[offset]) else {
+            return Self::rejected();
+        };
         offset += 1;
 
         let table_length = u64::from_le_bytes(
@@ -453,8 +481,17 @@ impl Value for InternalTableDefinition {
                 .unwrap(),
         ) as usize;
         offset += size_of::<u32>();
-        let key_type = TypeName::from_bytes(&data[offset..(offset + key_type_len)]);
-        offset += key_type_len;
+        // `key_type_len` is read off disk and is NOT covered by the min_len
+        // assert above, which only spans the fixed-size prefix. A corrupted
+        // value sliced past the buffer:
+        //   range end index 12648546 out of range for slice of length 113
+        // The Value trait forces this function to return Self, so there is no
+        // error to return -- but clamping is strictly better than panicking.
+        // A truncated type name simply fails the later type comparison, which
+        // reports corruption through a normal error path.
+        let key_type_end = offset.saturating_add(key_type_len).min(data.len());
+        let key_type = TypeName::from_bytes(&data[offset..key_type_end]);
+        offset = key_type_end;
         let value_type = TypeName::from_bytes(&data[offset..]);
 
         match table_type {
@@ -532,5 +569,82 @@ impl Value for InternalTableDefinition {
 
     fn type_name() -> TypeName {
         TypeName::internal("redb::InternalTableDefinition")
+    }
+}
+
+#[cfg(test)]
+mod corrupt_metadata_tests {
+    use super::*;
+
+    /// Truncated metadata used to hit a deliberate `assert!`, reachable from a
+    /// crafted database image. It must degrade instead -- and the degradation
+    /// must be rejected, not merely plausible: the untyped API does not compare
+    /// type names, so an empty-looking table would mask the corruption.
+    #[test]
+    fn truncated_metadata_degrades_to_a_rejected_definition() {
+        for len in [0usize, 1, 8, 32, 63] {
+            let data = vec![0u8; len];
+            let def = <InternalTableDefinition as Value>::from_bytes(&data);
+            // Alignment 0 is invalid (ALIGNMENT is 1), so every caller path
+            // through check_match_untyped refuses it.
+            assert!(
+                def.check_match_untyped(TableType::Normal, "t").is_err(),
+                "truncated metadata of {len} bytes must be rejected"
+            );
+        }
+    }
+
+    /// The table type byte is disk-derived, so every value is reachable from a
+    /// crafted image -- including the v1 encodings 1 and 2, which used to trip
+    /// `debug_assert!(!legacy)`, and every other invalid byte, which used to be
+    /// coerced to `TableType::Normal` and parsed as a well-formed table.
+    ///
+    /// Found by the `fuzz_db_image` target (input `[77, 16, 192, 0]`).
+    #[test]
+    fn invalid_table_type_byte_degrades_to_a_rejected_definition() {
+        let multimap = InternalTableDefinition::new::<u64, u64>(TableType::Multimap, None, 0);
+        let valid = <InternalTableDefinition as Value>::as_bytes(&multimap);
+        // Sanity check: the buffer this test corrupts is otherwise accepted.
+        let def = <InternalTableDefinition as Value>::from_bytes(&valid);
+        assert!(def.check_match_untyped(TableType::Multimap, "t").is_ok());
+
+        for byte in [0u8, 1, 2, 5, 77, 255] {
+            let mut data = valid.clone();
+            data[0] = byte;
+            let def = <InternalTableDefinition as Value>::from_bytes(&data);
+            // Rejected whichever type the caller asks for: the coerced value
+            // must not satisfy the type check for either one.
+            for requested in [TableType::Normal, TableType::Multimap] {
+                assert!(
+                    def.check_match_untyped(requested, "t").is_err(),
+                    "table type byte {byte} must be rejected as {requested:?}"
+                );
+            }
+            // The paths that bypass check_match_untyped read the root directly.
+            assert_eq!(
+                def.private_get_root(),
+                None,
+                "table type byte {byte} must not yield a root"
+            );
+        }
+    }
+
+    #[test]
+    fn absurd_key_type_len_does_not_slice_past_the_buffer() {
+        // Fixed-size prefix, matching the layout from_bytes expects.
+        let mut data = vec![0u8; 64];
+        data[0] = 3; // TableType::Normal (1 and 2 are the legacy v1 encodings)
+        // table_length at 1..9, root null flag at 9, BtreeHeader at 10..42,
+        // fixed key/value flags and sizes at 42..60 -- all zero is fine.
+        // key_type_len at 60..64: absurd.
+        data[60..64].copy_from_slice(&0xC0FFEEu32.to_le_bytes());
+        // A little trailing data, so the buffer is longer than min_len but far
+        // shorter than the claimed key type name.
+        data.extend_from_slice(&[0u8; 49]);
+
+        // Must return, not panic.
+        let def = <InternalTableDefinition as Value>::from_bytes(&data);
+        // The type name is necessarily truncated; it just has to be produced.
+        let _ = format!("{def:?}");
     }
 }

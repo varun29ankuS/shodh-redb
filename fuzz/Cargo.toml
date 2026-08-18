@@ -18,7 +18,7 @@ rand_distr = "0.4.3"
 [dependencies.redb]
 package = "shodh-redb"
 path = ".."
-features = ["std"]
+features = ["std", "fuzzing"]
 
 # Fuzzer feeds corrupted data; debug assertions in the allocator and
 # page manager fire on inconsistent state that is expected during crash
@@ -94,5 +94,11 @@ doc = false
 [[bin]]
 name = "fuzz_ivfpq_index"
 path = "fuzz_targets/fuzz_ivfpq_index.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_db_image"
+path = "fuzz_targets/fuzz_db_image.rs"
 test = false
 doc = false

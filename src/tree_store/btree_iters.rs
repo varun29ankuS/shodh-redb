@@ -12,6 +12,7 @@ use crate::types::{Key, Value};
 use crate::{Result, StorageError};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -215,6 +216,20 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
         value_range: Range<usize>,
         compression_enabled: bool,
     ) -> Result<Self> {
+        // Both ranges are built from on-disk offsets, so they can be reversed
+        // or run past the page. Validating them here means every accessor on
+        // the guard is safe by construction, rather than each having to defend
+        // itself -- `value()` and `key()` cannot return an error at all.
+        let page_len = page.memory().len();
+        if key_range.start > key_range.end
+            || key_range.end > page_len
+            || value_range.start > value_range.end
+            || value_range.end > page_len
+        {
+            return Err(StorageError::Corrupted(format!(
+                "entry ranges outside the page: key {key_range:?}, value {value_range:?}, page length {page_len}"
+            )));
+        }
         let decompressed_value = if compression_enabled {
             let raw = &page.memory()[value_range.clone()];
             match decompress_value(raw) {
@@ -274,7 +289,19 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
         let bytes: &[u8] = if let Some(ref decompressed) = self.decompressed_value {
             decompressed
         } else {
-            &self.page.memory()[self.value_range.clone()]
+            // `value_range` is built from on-disk offsets, so it can be
+            // reversed or run past the page. Indexing it panics *outside* the
+            // catch_unwind below, which defeats the point of this function --
+            // observed as "slice index starts at 2056 but ends at 54".
+            // `get` rejects both cases.
+            self.page
+                .memory()
+                .get(self.value_range.clone())
+                .ok_or_else(|| {
+                    crate::StorageError::Corrupted(alloc::string::String::from(
+                        "value range is outside the page (corrupted metadata)",
+                    ))
+                })?
         };
         let ptr = bytes.as_ptr();
         let len = bytes.len();
@@ -291,11 +318,20 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
         })
     }
 
-    /// `no_std` fallback: calls `from_bytes` directly (no panic protection).
+    /// `no_std` fallback: no `catch_unwind`, so `from_bytes` itself is
+    /// unprotected. The range check below still applies, since that is a plain
+    /// bounds test rather than unwinding.
     #[cfg(not(feature = "std"))]
     pub(crate) fn value_checked(
         &self,
     ) -> core::result::Result<V::SelfType<'_>, crate::StorageError> {
+        if self.decompressed_value.is_none()
+            && self.page.memory().get(self.value_range.clone()).is_none()
+        {
+            return Err(crate::StorageError::Corrupted(alloc::string::String::from(
+                "value range is outside the page (corrupted metadata)",
+            )));
+        }
         Ok(self.value())
     }
 

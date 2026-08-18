@@ -376,11 +376,27 @@ impl Value for InternalTableDefinition {
             + size_of::<u32>()
             + size_of::<u32>()
             + size_of::<u32>();
-        assert!(
-            data.len() >= min_len,
-            "InternalTableDefinition: data length {} < minimum {min_len} (corrupted table metadata)",
-            data.len()
-        );
+        if data.len() < min_len {
+            // Truncated metadata. The Value trait forces this function to
+            // return Self, and the previous "controlled panic" here was
+            // reachable from a crafted database image, so degrade instead.
+            //
+            // Alignment 0 is deliberately invalid -- ALIGNMENT is 1 -- so
+            // check_match_untyped rejects this with TypeDefinitionChanged
+            // before any caller can act on it. That matters because the
+            // untyped API does not compare type names, so returning a
+            // plausible-looking empty table would silently mask corruption.
+            return InternalTableDefinition::Normal {
+                table_root: None,
+                table_length: 0,
+                fixed_key_size: None,
+                fixed_value_size: None,
+                key_alignment: 0,
+                value_alignment: 0,
+                key_type: TypeName::from_bytes(&[]),
+                value_type: TypeName::from_bytes(&[]),
+            };
+        }
         let mut offset = 0;
         let legacy = TableType::is_legacy(data[offset]);
         debug_assert!(!legacy);
@@ -558,6 +574,24 @@ mod corrupt_metadata_tests {
     ///
     /// Found by the `fuzz_db_image` target. `Value::from_bytes` cannot return
     /// an error, so the requirement is simply that it does not panic.
+    /// Truncated metadata used to hit a deliberate `assert!`, reachable from a
+    /// crafted database image. It must degrade instead -- and the degradation
+    /// must be rejected, not merely plausible: the untyped API does not compare
+    /// type names, so an empty-looking table would mask the corruption.
+    #[test]
+    fn truncated_metadata_degrades_to_a_rejected_definition() {
+        for len in [0usize, 1, 8, 32, 63] {
+            let data = vec![0u8; len];
+            let def = <InternalTableDefinition as Value>::from_bytes(&data);
+            // Alignment 0 is invalid (ALIGNMENT is 1), so every caller path
+            // through check_match_untyped refuses it.
+            assert!(
+                def.check_match_untyped(TableType::Normal, "t").is_err(),
+                "truncated metadata of {len} bytes must be rejected"
+            );
+        }
+    }
+
     #[test]
     fn absurd_key_type_len_does_not_slice_past_the_buffer() {
         // Fixed-size prefix, matching the layout from_bytes expects.

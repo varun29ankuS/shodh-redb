@@ -5,13 +5,13 @@ on:
     - cron: "0 3 * * *" # Every day at 03:00 UTC
 
 jobs:
+  # Debug assertions are ON in every fuzz build here, deliberately -- see
+  # fuzz/Cargo.toml. This job used to set CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS
+  # to "false" to turn them off; cargo-fuzz reads no such variable, so it never
+  # did anything, and the assertions are worth keeping regardless.
   extended-fuzz:
     name: Extended Fuzzing (10 min)
     runs-on: ubuntu-latest
-    env:
-      # cargo-fuzz forces debug-assertions=true. Disable: the fuzzer feeds
-      # corrupted data and debug assertions fire on expected inconsistencies.
-      CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "false"
     steps:
       - uses: actions/checkout@v4
 

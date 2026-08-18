@@ -260,12 +260,14 @@ jobs:
             cargo +nightly fuzz run --sanitizer=none --target "$HOST_TARGET" "$target" -- -max_len=10000 -max_total_time=30 -timeout=30
           done
         env:
+          # Cleared so a RUSTFLAGS inherited from the environment cannot change
+          # what cargo-fuzz builds. cargo-fuzz appends its own flags to this.
           RUSTFLAGS: ""
-          # cargo-fuzz forces debug-assertions=true via env var override.
-          # The fuzzer feeds corrupted data; debug assertions in allocator/
-          # page_manager fire on inconsistent state that is expected during
-          # crash recovery. Disable so fuzzer tests the production path.
-          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "false"
+          # Debug assertions are ON here, deliberately. See fuzz/Cargo.toml for
+          # why. A CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "false" used to sit
+          # in this block claiming to turn them off; it never did anything --
+          # cargo-fuzz reads no such variable, it appends -Cdebug-assertions to
+          # RUSTFLAGS, and that beats any profile setting.
 
       # ── CLI smoke tests ──
       - name: CLI smoke test (Unix)

@@ -20,12 +20,22 @@ package = "shodh-redb"
 path = ".."
 features = ["std", "fuzzing"]
 
-# Fuzzer feeds corrupted data; debug assertions in the allocator and
-# page manager fire on inconsistent state that is expected during crash
-# recovery. Disable debug assertions so the fuzzer tests the production
-# code path (which handles corruption via Result/StorageError).
+# Debug assertions stay ON for fuzzing, deliberately.
+#
+# This setting used to be `false`, on the theory that the fuzzer should
+# exercise the production path. It never took effect: `cargo fuzz run` appends
+# `-Cdebug-assertions` to RUSTFLAGS (see its own --help: "equivalent to
+# cargo build --release, but with debug assertions and overflow checks
+# enabled"), and a rustc flag beats a profile setting. Passing `-O` is the only
+# way to actually disable them.
+#
+# Keeping them on is the right call anyway. A debug assertion that a crafted
+# database image can reach is a finding, not noise: it marks a place where the
+# release build carries on with the invariant already violated. That is exactly
+# how the table-type coercion bug in #340 surfaced. Setting this to `true`
+# states the intent independently of how cargo-fuzz happens to build today.
 [profile.release]
-debug-assertions = false
+debug-assertions = true
 
 # Prevent this from interfering with workspaces
 [workspace]

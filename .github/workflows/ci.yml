@@ -270,6 +270,20 @@ jobs:
           # cargo-fuzz reads no such variable, it appends -Cdebug-assertions to
           # RUSTFLAGS, and that beats any profile setting.
 
+      # Keep the reproducer. cargo-fuzz writes the failing input to
+      # fuzz/artifacts/, and without this it is discarded when the runner is
+      # torn down -- the only recovery being to scrape the base64 blob out of
+      # the log. The nightly job already uploads; PR CI did not, which is where
+      # most crashes are actually found.
+      - name: Upload fuzz artifacts
+        if: failure() && matrix.fuzz
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.os }}-${{ github.run_id }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
       # IVF-PQ recall gate. Release mode, one platform only.
       #
       # The tests are `#[ignore]`d and invoked explicitly here because a debug

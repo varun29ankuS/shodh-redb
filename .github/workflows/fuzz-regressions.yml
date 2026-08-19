@@ -1,0 +1,54 @@
+name: Fuzz Regressions
+
+# Replays every input in fuzz/regressions/ under AddressSanitizer.
+#
+# Manual trigger, because its two jobs are different: as regression coverage it
+# is cheap and deterministic, and as a diagnosis tool it is how a stack trace
+# gets captured for a hang that cannot be reproduced locally -- cargo-fuzz does
+# not link on Windows MSVC, so a Linux runner is the only option available.
+on:
+  workflow_dispatch:
+
+jobs:
+  replay:
+    name: Replay known fuzz inputs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.1
+
+      # cargo-fuzz defaults --target to the triple it was built for, and the
+      # installed binary is musl-linked. See the same fix in nightly.yml.
+      - name: Resolve host target
+        run: echo "HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')" >> "$GITHUB_ENV"
+
+      - name: Replay
+        run: |
+          shopt -s nullglob
+          status=0
+          for dir in fuzz/regressions/*/; do
+            target=$(basename "$dir")
+            for input in "$dir"*; do
+              name=$(basename "$input")
+              echo "::group::$target $name"
+              # AddressSanitizer so a hang or crash prints a stack. -timeout=30
+              # bounds a hang: libFuzzer reports rather than running to the
+              # 1200s default.
+              if cargo +nightly fuzz run --sanitizer=address \
+                   --target "$HOST_TARGET" "$target" "$input" -- -timeout=30; then
+                echo "$target $name: ok"
+              else
+                echo "::error::$target failed on $name"
+                status=1
+              fi
+              echo "::endgroup::"
+            done
+          done
+          exit $status

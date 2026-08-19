@@ -114,6 +114,17 @@ impl BtreeBitmap {
                     crate::StorageError::Corrupted("BtreeBitmap: failed to read height".into())
                 })?,
         );
+        // `new()` always pushes at least the leaf level, so a bitmap written by
+        // this crate has height >= 1. A crafted image can still claim 0, and
+        // every accessor -- count_unset, has_unset, get, len, clear -- indexes
+        // `get_level(self.get_height() - 1)`. With no levels that subtraction
+        // wraps to u32::MAX and trips the bounds assert in get_level. Reject it
+        // here: an empty bitmap has no meaningful leaf level to read.
+        if height == 0 {
+            return Err(crate::StorageError::Corrupted(
+                "BtreeBitmap: height of 0 has no leaf level".into(),
+            ));
+        }
 
         let mut metadata = END_OFFSETS;
         let mut data_start = END_OFFSETS + (height as usize) * size_of::<u32>();
@@ -453,6 +464,35 @@ mod test {
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
+
+    /// Height is read from disk. `new()` always builds at least the leaf
+    /// level, so 0 never occurs in a bitmap this crate wrote -- but a crafted
+    /// image can claim it, and then every accessor computes
+    /// `get_level(self.get_height() - 1)`, which wraps to `u32::MAX`:
+    ///
+    /// ```text
+    /// panicked at bitmap.rs:59: assertion failed: i < self.get_height()
+    /// ```
+    ///
+    /// Found by the `fuzz_db_image` target (input
+    /// `[213, 105, 105, 105, 105, 224, 0, 234, 224]`).
+    #[test]
+    fn zero_height_is_rejected() {
+        // A well-formed header whose height is 0, with an offset table and
+        // payload that are otherwise entirely plausible.
+        let mut data = 0u32.to_le_bytes().to_vec();
+        data.extend_from_slice(&[0u8; 32]);
+        assert!(
+            BtreeBitmap::from_bytes(&data).is_err(),
+            "a bitmap with no levels must be rejected at the parse boundary"
+        );
+
+        // A real bitmap still round-trips, so the guard is not over-broad.
+        let bitmap = BtreeBitmap::new(64, 64);
+        let bytes = bitmap.to_vec().unwrap();
+        let parsed = BtreeBitmap::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.len(), bitmap.len());
+    }
 
     /// `len` is read from disk but the word count comes from the buffer size.
     /// A `len` larger than the words present must be rejected: `set`/`clear`

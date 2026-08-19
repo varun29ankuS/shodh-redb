@@ -1286,6 +1286,31 @@ impl<'b> LeafMutator<'b> {
         } else {
             0
         };
+
+        // Every offset above is derived from the leaf's on-disk pointer arrays,
+        // and the three `copy_within` calls below assume they are ordered:
+        // key data precedes value data, and both precede the end of the last
+        // value. A corrupted leaf can break that, and `copy_within` panics on a
+        // reversed range rather than returning anything:
+        //
+        //     slice index starts at 4066 but ends at 1280
+        //
+        // Found by `fuzz_db_image` on input [255, 9, 225, 14], reached through
+        // the commit that `Database::drop` performs -- so a corrupt file could
+        // panic a process that was only closing the database. Check the chain
+        // once here instead of at each copy.
+        let pointer_end = 4 + key_ptr_size * num_pairs + value_ptr_size * i;
+        if pointer_end > shift_key_start
+            || shift_key_start > shift_value_start
+            || shift_value_start > last_value_end
+            || last_value_end > self.page.len()
+        {
+            return Err(StorageError::Corrupted(format!(
+                "Leaf page offsets are not ordered: pointers end {pointer_end}, key start                  {shift_key_start}, value start {shift_value_start}, last value end                  {last_value_end}, page length {}",
+                self.page.len()
+            )));
+        }
+
         if !overwrite {
             for j in 0..i {
                 self.update_key_end(j, (key_ptr_size + value_ptr_size).try_into().unwrap());

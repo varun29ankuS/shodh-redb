@@ -13,9 +13,9 @@ use crate::observer::DatabaseObserver;
 #[cfg(feature = "metrics")]
 use crate::observer::DbMetrics;
 use crate::storage_traits::{ReadTable, StorageRead, StorageWrite, WriteTable};
-use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
+use crate::vector_ops::{DistanceMetric, Neighbor, dot_product, l2_normalize};
 
-use super::adc::IntAdcTable;
+use super::adc::{IntAdcTable, uses_query_residual};
 use super::cluster_blob::{ClusterBlobRef, merge_into_blob, remove_from_blob};
 use super::config::{
     FORMAT_V0_LEGACY, IndexConfig, IvfPqIndexDefinition, STATE_TRAINED, SearchParams,
@@ -837,18 +837,43 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                 None
             };
 
+            // Inner-product metrics must not use the query residual: see
+            // `uses_query_residual`. Their table is built from `q`, so it does
+            // not depend on the probed cluster and is built once here instead of
+            // per probe.
+            let residual_mode = uses_query_residual(metric);
+            let shared_adc = if residual_mode {
+                None
+            } else {
+                Some(IntAdcTable::build(q, &codebooks, metric))
+            };
             let mut query_residual = vec![0.0f32; dim];
             for &(cid, _) in &probes {
                 let c_offset = cid as usize * dim;
-                for d in 0..dim {
-                    query_residual[d] = q[d] - centroids[c_offset + d];
+                // For inner product the table accumulates `-(q . r)`, so the
+                // full negated score is that sum minus `q . c`. The constant
+                // differs per cluster and cannot be dropped: the top-K heap
+                // compares candidates across clusters.
+                let mut cluster_bias = 0.0f32;
+                if residual_mode {
+                    for d in 0..dim {
+                        query_residual[d] = q[d] - centroids[c_offset + d];
+                    }
+                } else {
+                    cluster_bias = dot_product(q, &centroids[c_offset..c_offset + dim]);
                 }
 
                 let Some(blob_data) = table.st_get(&cid)? else {
                     continue;
                 };
                 let blob = ClusterBlobRef::new(blob_data.value(), pq_len, dim)?;
-                let adc = IntAdcTable::build(&query_residual, &codebooks, metric);
+                let mut probe_adc: Option<IntAdcTable> = None;
+                let adc: &IntAdcTable = match shared_adc.as_ref() {
+                    Some(shared) => shared,
+                    None => probe_adc.get_or_insert_with(|| {
+                        IntAdcTable::build(&query_residual, &codebooks, metric)
+                    }),
+                };
 
                 let pq_block = blob.pq_codes_block();
                 let m = pq_len as usize;
@@ -867,13 +892,13 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                 // so the cutoff is seeded per cluster too.
                 let mut cutoff = heap
                     .worst_distance()
-                    .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
+                    .map_or(u32::MAX, |w| adc.cutoff_from_f32(w + cluster_bias));
                 for i in 0..blob.count() {
                     let codes = &pq_block[i as usize * m..(i as usize + 1) * m];
                     let Some(raw) = adc.approximate_distance_bounded(codes, cutoff) else {
                         continue;
                     };
-                    let dist = adc.to_f32(raw);
+                    let dist = adc.to_f32(raw) - cluster_bias;
                     let vid = blob.vector_id(i);
 
                     // Vectors without metadata pass the filter -- absence
@@ -889,7 +914,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                     // Only a successful push can lower the k-th best distance.
                     cutoff = heap
                         .worst_distance()
-                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
+                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w + cluster_bias));
                 }
             }
         }
@@ -1329,18 +1354,43 @@ impl ReadOnlyIvfPqIndex {
                 None
             };
 
+            // Inner-product metrics must not use the query residual: see
+            // `uses_query_residual`. Their table is built from `q`, so it does
+            // not depend on the probed cluster and is built once here instead of
+            // per probe.
+            let residual_mode = uses_query_residual(metric);
+            let shared_adc = if residual_mode {
+                None
+            } else {
+                Some(IntAdcTable::build(q, &self.codebooks, metric))
+            };
             let mut query_residual = vec![0.0f32; dim];
             for &(cid, _) in &probes {
                 let c_offset = cid as usize * dim;
-                for d in 0..dim {
-                    query_residual[d] = q[d] - self.centroids[c_offset + d];
+                // For inner product the table accumulates `-(q . r)`, so the
+                // full negated score is that sum minus `q . c`. The constant
+                // differs per cluster and cannot be dropped: the top-K heap
+                // compares candidates across clusters.
+                let mut cluster_bias = 0.0f32;
+                if residual_mode {
+                    for d in 0..dim {
+                        query_residual[d] = q[d] - self.centroids[c_offset + d];
+                    }
+                } else {
+                    cluster_bias = dot_product(q, &self.centroids[c_offset..c_offset + dim]);
                 }
 
                 let Some(blob_data) = table.st_get(&cid)? else {
                     continue;
                 };
                 let blob = ClusterBlobRef::new(blob_data.value(), pq_len, dim)?;
-                let adc = IntAdcTable::build(&query_residual, &self.codebooks, metric);
+                let mut probe_adc: Option<IntAdcTable> = None;
+                let adc: &IntAdcTable = match shared_adc.as_ref() {
+                    Some(shared) => shared,
+                    None => probe_adc.get_or_insert_with(|| {
+                        IntAdcTable::build(&query_residual, &self.codebooks, metric)
+                    }),
+                };
 
                 let pq_block = blob.pq_codes_block();
                 let m = pq_len as usize;
@@ -1359,13 +1409,13 @@ impl ReadOnlyIvfPqIndex {
                 // so the cutoff is seeded per cluster too.
                 let mut cutoff = heap
                     .worst_distance()
-                    .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
+                    .map_or(u32::MAX, |w| adc.cutoff_from_f32(w + cluster_bias));
                 for i in 0..blob.count() {
                     let codes = &pq_block[i as usize * m..(i as usize + 1) * m];
                     let Some(raw) = adc.approximate_distance_bounded(codes, cutoff) else {
                         continue;
                     };
-                    let dist = adc.to_f32(raw);
+                    let dist = adc.to_f32(raw) - cluster_bias;
                     let vid = blob.vector_id(i);
 
                     // Vectors without metadata pass the filter -- absence
@@ -1381,7 +1431,7 @@ impl ReadOnlyIvfPqIndex {
                     // Only a successful push can lower the k-th best distance.
                     cutoff = heap
                         .worst_distance()
-                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w));
+                        .map_or(u32::MAX, |w| adc.cutoff_from_f32(w + cluster_bias));
                 }
             }
         }

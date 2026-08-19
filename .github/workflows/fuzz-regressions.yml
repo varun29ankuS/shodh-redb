@@ -29,6 +29,27 @@ jobs:
       - name: Resolve host target
         run: echo "HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')" >> "$GITHUB_ENV"
 
+      # Without a symbolizer AddressSanitizer prints raw addresses, which is
+      # useless for diagnosis -- the whole point of running under ASan here.
+      # rustup ships one with llvm-tools; fall back to the distro package.
+      - name: Locate llvm-symbolizer
+        run: |
+          rustup component add llvm-tools --toolchain nightly || true
+          sym=$(find "$(rustc +nightly --print sysroot)" -name 'llvm-symbolizer' -type f 2>/dev/null | head -1)
+          if [ -z "$sym" ]; then
+            sym=$(command -v llvm-symbolizer || true)
+          fi
+          if [ -z "$sym" ]; then
+            sym=$(ls /usr/lib/llvm-*/bin/llvm-symbolizer 2>/dev/null | head -1)
+          fi
+          if [ -z "$sym" ]; then
+            echo "::error::no llvm-symbolizer found; stacks would be unsymbolized"
+            exit 1
+          fi
+          echo "using $sym"
+          echo "ASAN_SYMBOLIZER_PATH=$sym" >> "$GITHUB_ENV"
+          echo "ASAN_OPTIONS=symbolize=1:print_stacktrace=1" >> "$GITHUB_ENV"
+
       - name: Replay
         run: |
           shopt -s nullglob

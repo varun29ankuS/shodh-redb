@@ -595,3 +595,258 @@ fn metadata_filter_search() {
         assert!(r.key > 50, "filtered result id {} should be > 50", r.key);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Discriminating recall harness
+//
+// The tests above run at dim 8 with 4 clusters and nprobe 4. Since nprobe
+// equals the cluster count they probe every cluster, and they store raw
+// vectors and re-rank, so quantization error is corrected away. They measure
+// recall 1.000 and cannot fail: they are end-to-end smoke tests, not a recall
+// gate. The harness below is the gate.
+//
+// Three things make it discriminating:
+//   1. nprobe << num_clusters, so IVF pruning can actually lose neighbours.
+//   2. No raw vectors stored at all, so PQ is the only thing standing between
+//      the query and the answer. `rerank: false` alone is not enough -- an
+//      index that stores raw vectors still pays for them.
+//   3. Clustered data. Uniform-random vectors are the wrong input: in high
+//      dimensions every point is near-equidistant from every other, so recall
+//      collapses and turns noisy, which makes a useless gate.
+// ---------------------------------------------------------------------------
+
+/// Deterministic PRNG. Reproducibility is the whole point: a recall threshold
+/// is only meaningful if the data behind it is identical on every run and
+/// every platform.
+struct Prng(u64);
+
+impl Prng {
+    fn new(seed: u64) -> Self {
+        // Any nonzero state works; 0 would stick at 0 for a pure LCG.
+        Self(seed | 1)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0
+    }
+
+    /// Uniform in [0, 1).
+    fn next_f32(&mut self) -> f32 {
+        // Take the high bits: the low bits of an LCG have short periods.
+        ((self.next_u64() >> 40) as f32) / ((1u64 << 24) as f32)
+    }
+
+    /// Standard normal via Box-Muller. Only the first of the pair is used;
+    /// the second is discarded to keep the call site simple.
+    fn next_normal(&mut self) -> f32 {
+        // Clamp away from 0 so ln() stays finite.
+        let u1 = self.next_f32().max(f32::MIN_POSITIVE);
+        let u2 = self.next_f32();
+        (-2.0 * u1.ln()).sqrt() * (core::f32::consts::TAU * u2).cos()
+    }
+}
+
+/// Gaussian mixture: `num_centers` latent clusters drawn uniformly from
+/// [-1, 1]^dim, with each vector drawn from one center plus isotropic noise of
+/// standard deviation `spread`.
+///
+/// `spread` is the knob that sets how hard the search is. Too small and every
+/// true neighbour of a query lands in the same IVF cluster, so recall is 1.000
+/// whatever the quantizer does. Too large and the mixture degenerates towards
+/// uniform, where high-dimensional distances concentrate and recall becomes
+/// noise. `num_centers` is deliberately larger than the index's cluster count
+/// so the IVF partition cannot line up exactly with the latent structure --
+/// that mismatch is what real data looks like.
+fn gaussian_mixture(
+    n: u64,
+    dim: usize,
+    num_centers: usize,
+    spread: f32,
+    decay: f32,
+    seed: u64,
+) -> Vec<(u64, Vec<f32>)> {
+    let mut rng = Prng::new(seed);
+
+    // Per-dimension scale following a power law, which is what the spectrum of
+    // a real embedding corpus looks like: a few directions carry most of the
+    // variance and the tail is near-flat. `decay = 0` gives isotropic noise --
+    // full intrinsic dimensionality, which is the pathological case for product
+    // quantization, since PQ earns its accuracy from correlated structure.
+    // Benchmarking only that case understates the index against real data.
+    let scale: Vec<f32> = (0..dim)
+        .map(|d| ((d + 1) as f32).powf(-decay / 2.0))
+        .collect();
+
+    let mut centers = Vec::with_capacity(num_centers);
+    for _ in 0..num_centers {
+        let c: Vec<f32> = (0..dim)
+            .map(|d| (rng.next_f32() * 2.0 - 1.0) * scale[d])
+            .collect();
+        centers.push(c);
+    }
+
+    (0..n)
+        .map(|id| {
+            let center = &centers[(rng.next_u64() as usize) % num_centers];
+            let v = (0..dim)
+                .map(|d| center[d] + rng.next_normal() * spread * scale[d])
+                .collect();
+            (id, v)
+        })
+        .collect()
+}
+
+/// Fast tier geometry. dim 128 with 16 sub-quantizers gives 8 floats per
+/// sub-vector, a normal production shape, and compresses 512 bytes of f32 down
+/// to 16 bytes. nprobe 4 of 64 clusters means a query sees one sixteenth of the
+/// index. No `with_raw_vectors`: the quantizer gets no safety net.
+const FAST_DIM: usize = 128;
+const FAST_CLUSTERS: u32 = 256;
+const FAST_SUBVECTORS: u32 = 32;
+const FAST_NPROBE: u32 = 4;
+const FAST_N: u64 = 20_000;
+/// Latent clusters in the generated data. Deliberately above `FAST_CLUSTERS`
+/// so the IVF partition cannot align exactly with the data's own structure.
+const FAST_CENTERS: usize = 1;
+/// Training subsample. k-means is O(n * clusters * dim * iters) and scalar
+/// here, so training on the full corpus dominates the runtime budget for no
+/// accuracy gain. Production systems subsample for the same reason.
+const FAST_TRAIN_SAMPLE: usize = 8_000;
+const FAST_TRAIN_ITERS: usize = 10;
+
+/// Build an index that stores no raw vectors, training on a subsample.
+fn setup_pq_only_index(
+    def: &IvfPqIndexDefinition,
+    vectors: &[(u64, Vec<f32>)],
+    train_sample: usize,
+    train_iters: usize,
+) -> (tempfile::NamedTempFile, Database) {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_ivfpq_index(def).unwrap();
+        idx.train(
+            vectors
+                .iter()
+                .take(train_sample)
+                .map(|(id, v)| (*id, v.clone())),
+            train_iters,
+        )
+        .unwrap();
+        for (id, vec) in vectors {
+            idx.insert(*id, vec).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+    (tmpfile, db)
+}
+
+/// Search params with re-ranking off, so recall reflects PQ plus IVF alone.
+fn pq_only_params(k: usize, nprobe: u32) -> SearchParams {
+    SearchParams {
+        nprobe,
+        candidates: k * 10,
+        k,
+        rerank: false,
+        diversity: DiversityConfig { lambda: 0.0 },
+        filter: None,
+    }
+}
+
+/// Mean recall@k over `num_queries` queries drawn from the corpus itself.
+fn measure_recall(
+    db: &Database,
+    def: &IvfPqIndexDefinition,
+    vectors: &[(u64, Vec<f32>)],
+    metric: DistanceMetric,
+    k: usize,
+    nprobe: u32,
+    num_queries: usize,
+) -> f64 {
+    let read_txn = db.begin_read().unwrap();
+    let idx = read_txn.open_ivfpq_index(def).unwrap();
+    let stride = vectors.len() / num_queries;
+    let mut total = 0.0f64;
+    for q in 0..num_queries {
+        let query = &vectors[q * stride].1;
+        let gt = brute_force_knn(query, vectors, k, metric);
+        let results = idx
+            .search(&read_txn, query, &pq_only_params(k, nprobe))
+            .unwrap();
+        let ids: Vec<u64> = results.iter().map(|r| r.key).collect();
+        total += recall(&ids, &gt);
+    }
+    total / num_queries as f64
+}
+
+const FAST_EUC: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
+    "fast_euc",
+    FAST_DIM as u32,
+    FAST_CLUSTERS,
+    FAST_SUBVECTORS,
+    DistanceMetric::EuclideanSq,
+)
+.with_nprobe(FAST_NPROBE);
+
+/// Temporary calibration probe. Removed before the PR.
+#[test]
+#[ignore]
+fn calibrate_fast_tier() {
+    let metrics: [(&str, DistanceMetric); 4] = [
+        ("euclidean", DistanceMetric::EuclideanSq),
+        ("cosine", DistanceMetric::Cosine),
+        ("dot_product", DistanceMetric::DotProduct),
+        ("manhattan", DistanceMetric::Manhattan),
+    ];
+    for (name, metric) in metrics {
+        let mut all = Vec::new();
+        for seed in [1u64, 2, 3, 4, 5] {
+            let label: &'static str = match (name, seed) {
+                ("euclidean", 1) => "se1",
+                ("euclidean", 2) => "se2",
+                ("euclidean", 3) => "se3",
+                ("euclidean", 4) => "se4",
+                ("euclidean", _) => "se5",
+                ("cosine", 1) => "sc1",
+                ("cosine", 2) => "sc2",
+                ("cosine", 3) => "sc3",
+                ("cosine", 4) => "sc4",
+                ("cosine", _) => "sc5",
+                ("dot_product", 1) => "sd1",
+                ("dot_product", 2) => "sd2",
+                ("dot_product", 3) => "sd3",
+                ("dot_product", 4) => "sd4",
+                ("dot_product", _) => "sd5",
+                (_, 1) => "sm1",
+                (_, 2) => "sm2",
+                (_, 3) => "sm3",
+                (_, 4) => "sm4",
+                (_, _) => "sm5",
+            };
+            let vectors = gaussian_mixture(FAST_N, FAST_DIM, FAST_CENTERS, 0.5, 1.0, seed);
+            let def = IvfPqIndexDefinition::new(
+                label,
+                FAST_DIM as u32,
+                FAST_CLUSTERS,
+                FAST_SUBVECTORS,
+                metric,
+            )
+            .with_nprobe(FAST_NPROBE);
+            let (_tmp, db) = setup_pq_only_index(&def, &vectors, FAST_N as usize, FAST_TRAIN_ITERS);
+            let r = measure_recall(&db, &def, &vectors, metric, 10, FAST_NPROBE, 20);
+            all.push(r);
+        }
+        let min = all.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = all.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mean = all.iter().sum::<f64>() / all.len() as f64;
+        println!(
+            "{name:12} min={min:.4} mean={mean:.4} max={max:.4} spread={:.4}",
+            max - min
+        );
+    }
+}

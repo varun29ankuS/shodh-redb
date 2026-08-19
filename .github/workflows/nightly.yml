@@ -3,6 +3,10 @@ name: Nightly
 on:
   schedule:
     - cron: "0 3 * * *" # Every day at 03:00 UTC
+  # Manual trigger. Without this the only way to find out whether a change to
+  # this workflow works is to wait for 03:00 UTC, which is how it stayed broken
+  # for three months.
+  workflow_dispatch:
 
 jobs:
   # Debug assertions are ON in every fuzz build here, deliberately -- see
@@ -10,7 +14,7 @@ jobs:
   # to "false" to turn them off; cargo-fuzz reads no such variable, so it never
   # did anything, and the assertions are worth keeping regardless.
   extended-fuzz:
-    name: Extended Fuzzing (10 min)
+    name: Extended Fuzzing
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,38 +43,53 @@ jobs:
         with:
           tool: cargo-fuzz@0.13.1,cargo-deny@0.19.0
 
+      # cargo-fuzz defaults --target to the triple it was itself built for, and
+      # taiki-e/install-action ships a musl-linked binary. Without an explicit
+      # --target every step below tried to build for x86_64-unknown-linux-musl,
+      # whose std the runner does not have, and the job died at
+      # "could not compile cfg-if" before a single input was fuzzed. That is why
+      # this workflow failed 100 nightlies in a row. ci.yml already resolves the
+      # host triple this way; nightly never got the same fix.
+      - name: Resolve host target
+        run: echo "HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')" >> "$GITHUB_ENV"
+
       - name: Fuzz redb core (5 minutes)
-        run: cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=10000 -max_total_time=300
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_redb -- -max_len=10000 -max_total_time=300
 
       - name: Fuzz crafted database images (5 minutes)
-        run: cargo fuzz run --sanitizer=none fuzz_db_image -- -max_len=4096 -max_total_time=300
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_db_image -- -max_len=4096 -max_total_time=300
 
       - name: Fuzz vector ops (90s)
-        run: cargo fuzz run --sanitizer=none fuzz_vector_ops -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_vector_ops -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz quantization (90s)
-        run: cargo fuzz run --sanitizer=none fuzz_quantization -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_quantization -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz blob types (60s)
-        run: cargo fuzz run --sanitizer=none fuzz_blob_types -- -max_len=10000 -max_total_time=60
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_blob_types -- -max_len=10000 -max_total_time=60
 
       - name: Fuzz IVF-PQ kmeans (90s)
-        run: cargo fuzz run --sanitizer=none fuzz_ivfpq_kmeans -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_ivfpq_kmeans -- -max_len=10000 -max_total_time=90
+
+      # Every [[bin]] in fuzz/Cargo.toml must appear in this job or in ci.yml.
+      # fuzz_ivfpq_index was in neither, so it had never been run at all.
+      - name: Fuzz IVF-PQ index (90s)
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_ivfpq_index -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz CDC deser (90s)
-        run: cargo fuzz run --sanitizer=none fuzz_cdc_deser -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_cdc_deser -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz cluster blob (90s)
-        run: cargo fuzz run --sanitizer=none fuzz_cluster_blob -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_cluster_blob -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz incremental deser (90s)
-        run: cargo fuzz run --sanitizer=none fuzz_incremental_deser -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_incremental_deser -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz merge ops (90s)
-        run: cargo fuzz run --sanitizer=none fuzz_merge_ops -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_merge_ops -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz PQ codebook (90s)
-        run: cargo fuzz run --sanitizer=none fuzz_pq_codebook -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_pq_codebook -- -max_len=10000 -max_total_time=90
 
       - name: Upload corpus on failure
         if: failure()

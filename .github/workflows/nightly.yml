@@ -54,45 +54,80 @@ jobs:
         run: echo "HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')" >> "$GITHUB_ENV"
 
       - name: Fuzz redb core (5 minutes)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_redb -- -max_len=10000 -max_total_time=300
 
       - name: Fuzz crafted database images (5 minutes)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_db_image -- -max_len=4096 -max_total_time=300
 
       - name: Fuzz vector ops (90s)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_vector_ops -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz quantization (90s)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_quantization -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz blob types (60s)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_blob_types -- -max_len=10000 -max_total_time=60
 
       - name: Fuzz IVF-PQ kmeans (90s)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_ivfpq_kmeans -- -max_len=10000 -max_total_time=90
 
       # Every [[bin]] in fuzz/Cargo.toml must appear in this job or in ci.yml.
       # fuzz_ivfpq_index was in neither, so it had never been run at all.
       - name: Fuzz IVF-PQ index (90s)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_ivfpq_index -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz CDC deser (90s)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_cdc_deser -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz cluster blob (90s)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_cluster_blob -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz incremental deser (90s)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_incremental_deser -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz merge ops (90s)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_merge_ops -- -max_len=10000 -max_total_time=90
 
       - name: Fuzz PQ codebook (90s)
+        continue-on-error: true
         run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_pq_codebook -- -max_len=10000 -max_total_time=90
 
-      - name: Upload corpus on failure
-        if: failure()
+      # Every fuzz step above runs with `continue-on-error`, so one target
+      # cannot skip the other eleven -- which is exactly what happened the first
+      # time this job built successfully: `fuzz_redb` hung and the remaining
+      # eleven targets never executed, giving zero coverage from them.
+      #
+      # The job's verdict comes from the artifacts instead. cargo-fuzz writes a
+      # crash-* or timeout-* file only when a target actually fails, so their
+      # presence is the signal. Deliberately NOT tolerant of timeouts: a hang is
+      # a defect, and treating it as noise is how the fuzz_redb hang survived in
+      # PR CI for months behind an "expected on slow runners" warning.
+      - name: Check fuzz artifacts
+        run: |
+          shopt -s nullglob
+          found=(fuzz/artifacts/*/crash-* fuzz/artifacts/*/timeout-* fuzz/artifacts/*/oom-*)
+          if [ ${#found[@]} -gt 0 ]; then
+            echo "::error::fuzzing produced ${#found[@]} failure artifact(s)"
+            for f in "${found[@]}"; do
+              echo "  $f"
+            done
+            exit 1
+          fi
+          echo "no crash, timeout, or OOM artifacts"
+
+      - name: Upload corpus and artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-artifacts-${{ github.run_id }}

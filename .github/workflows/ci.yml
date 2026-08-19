@@ -141,6 +141,7 @@ jobs:
             fuzz: true
             wasi: true
             python: true
+            recall: true
           - name: Linux ARM64
             os: ubuntu-24.04-arm
             fuzz: true
@@ -268,6 +269,20 @@ jobs:
           # in this block claiming to turn them off; it never did anything --
           # cargo-fuzz reads no such variable, it appends -Cdebug-assertions to
           # RUSTFLAGS, and that beats any profile setting.
+
+      # IVF-PQ recall gate. Release mode, one platform only.
+      #
+      # The tests are `#[ignore]`d and invoked explicitly here because a debug
+      # build of this scalar float path is roughly 21x slower (151s vs 7s to
+      # build one index at the gate geometry). Left un-ignored they would run
+      # inside every debug test job and add about ten minutes to each, for no
+      # signal a single release run does not already give.
+      #
+      # `--skip deep_` leaves out the realistic-geometry tier, which is a
+      # by-hand measuring stick for quantization changes rather than a gate.
+      - name: IVF-PQ recall gate
+        if: matrix.recall
+        run: cargo test --release --test ivfpq_recall_tests -- --ignored --nocapture --skip deep_
 
       # ── CLI smoke tests ──
       - name: CLI smoke test (Unix)

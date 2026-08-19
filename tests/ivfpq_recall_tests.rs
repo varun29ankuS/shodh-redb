@@ -119,8 +119,11 @@ fn make_vectors(n: u64, dim: usize, seed_offset: u64) -> Vec<(u64, Vec<f32>)> {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Train 200 vectors in 8D with Euclidean distance, search top-5, verify
-/// recall >= 0.95 averaged over multiple queries (measured 1.000).
+/// Smoke test, not a recall gate. 200 vectors at dim 8 with
+/// `nprobe == num_clusters`, raw vectors stored and re-ranking on, so it
+/// probes everything and repairs quantization error exactly: it measures
+/// 1.000 and cannot fail. It verifies that train-then-search works end to
+/// end for this metric. The real gate is `gate_recall_euclidean`.
 #[test]
 fn train_and_search_euclidean() {
     let vectors = make_vectors(200, 8, 10000);
@@ -150,8 +153,8 @@ fn train_and_search_euclidean() {
     );
 }
 
-/// Train 200 vectors in 8D with cosine distance, search top-5, verify
-/// recall threshold set just below the measured value.
+/// Smoke test, not a recall gate -- see `train_and_search_euclidean`.
+/// The real gate is `gate_recall_cosine`.
 #[test]
 fn train_and_search_cosine() {
     let vectors = make_vectors(200, 8, 20000);
@@ -181,8 +184,13 @@ fn train_and_search_cosine() {
     );
 }
 
-/// Train 200 vectors in 8D with dot product distance, search top-5, verify
-/// recall threshold set just below the measured value.
+/// Smoke test, not a recall gate -- see `train_and_search_euclidean`.
+/// The real gate is `gate_recall_dot_product`.
+///
+/// The 0.760 in the assertion message below was measured BEFORE the
+/// inner-product residual fix, when this metric was returning near-random
+/// results at realistic settings. It survived here only because this test
+/// probes every cluster and re-ranks a shortlist covering half the corpus.
 #[test]
 fn train_and_search_dot_product() {
     let vectors = make_vectors(200, 8, 30000);
@@ -212,8 +220,8 @@ fn train_and_search_dot_product() {
     );
 }
 
-/// Train 200 vectors in 8D with Manhattan distance, search top-5, verify
-/// recall threshold set just below the measured value.
+/// Smoke test, not a recall gate -- see `train_and_search_euclidean`.
+/// The real gate is `gate_recall_manhattan`.
 #[test]
 fn train_and_search_manhattan() {
     let vectors = make_vectors(200, 8, 40000);
@@ -712,10 +720,6 @@ const FAST_N: u64 = 20_000;
 /// Latent clusters in the generated data. Deliberately above `FAST_CLUSTERS`
 /// so the IVF partition cannot align exactly with the data's own structure.
 const FAST_CENTERS: usize = 1;
-/// Training subsample. k-means is O(n * clusters * dim * iters) and scalar
-/// here, so training on the full corpus dominates the runtime budget for no
-/// accuracy gain. Production systems subsample for the same reason.
-const FAST_TRAIN_SAMPLE: usize = 8_000;
 const FAST_TRAIN_ITERS: usize = 10;
 
 /// Build an index that stores no raw vectors, training on a subsample.
@@ -784,69 +788,204 @@ fn measure_recall(
     total / num_queries as f64
 }
 
-const FAST_EUC: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
-    "fast_euc",
-    FAST_DIM as u32,
-    FAST_CLUSTERS,
-    FAST_SUBVECTORS,
-    DistanceMetric::EuclideanSq,
-)
-.with_nprobe(FAST_NPROBE);
+// ---------------------------------------------------------------------------
+// Fast tier: the recall gate
+//
+// Every test below is `#[ignore]`d and run by a dedicated release-mode CI step:
+//
+//     cargo test --release --test ivfpq_recall_tests -- --ignored --nocapture
+//
+// Not because they are optional, but because debug builds are roughly 21x
+// slower on this scalar float path (151s vs 7s to build one index at this
+// geometry). Left un-ignored they would run inside every debug test job --
+// about six of them -- and add roughly ten minutes to each. One release-mode
+// step gives the same signal in about thirty seconds total.
+//
+// Thresholds are the minimum across five seeds, less a deliberately generous
+// margin. At recall 1.000 cross-platform float drift is invisible; in this band
+// it is not (FMA and autovectorisation differences change k-means convergence)
+// and the four-platform spread has never been measured. Tighten these once CI
+// data exists across all four platforms. Never loosen them.
+// ---------------------------------------------------------------------------
 
-/// Temporary calibration probe. Removed before the PR.
+/// The seed whose measurements set the thresholds below.
+const GATE_SEED: u64 = 1;
+
+fn gate_recall(label: &'static str, metric: DistanceMetric, subvectors: u32, nprobe: u32) -> f64 {
+    let vectors = gaussian_mixture(FAST_N, FAST_DIM, FAST_CENTERS, 0.5, 1.0, GATE_SEED);
+    let def = IvfPqIndexDefinition::new(label, FAST_DIM as u32, FAST_CLUSTERS, subvectors, metric)
+        .with_nprobe(nprobe);
+    let (_tmp, db) = setup_pq_only_index(&def, &vectors, FAST_N as usize, FAST_TRAIN_ITERS);
+    measure_recall(&db, &def, &vectors, metric, 10, nprobe, 20)
+}
+
+/// Euclidean is the reference metric: its residual path is mathematically
+/// exact, so it sets the level the other three are judged against.
 #[test]
 #[ignore]
-fn calibrate_fast_tier() {
-    let metrics: [(&str, DistanceMetric); 4] = [
-        ("euclidean", DistanceMetric::EuclideanSq),
-        ("cosine", DistanceMetric::Cosine),
-        ("dot_product", DistanceMetric::DotProduct),
-        ("manhattan", DistanceMetric::Manhattan),
+fn gate_recall_euclidean() {
+    let r = gate_recall(
+        "gate_euc",
+        DistanceMetric::EuclideanSq,
+        FAST_SUBVECTORS,
+        FAST_NPROBE,
+    );
+    assert!(
+        r >= 0.35,
+        "euclidean recall@10 = {r:.4}, expected >= 0.35 (5-seed min 0.405)"
+    );
+}
+
+/// Cosine and dot product both run through the negated dot-product
+/// accumulation. Before the inner-product fix these measured 0.278 and 0.037
+/// -- dot_product barely above the 0.0005 chance rate -- because search built
+/// the ADC table from `q - c`, which is not distance-preserving for inner
+/// product. These thresholds fail loudly if that ever regresses.
+#[test]
+#[ignore]
+fn gate_recall_cosine() {
+    let r = gate_recall(
+        "gate_cos",
+        DistanceMetric::Cosine,
+        FAST_SUBVECTORS,
+        FAST_NPROBE,
+    );
+    assert!(
+        r >= 0.25,
+        "cosine recall@10 = {r:.4}, expected >= 0.25 (5-seed min 0.310, was 0.278 pre-fix)"
+    );
+}
+
+#[test]
+#[ignore]
+fn gate_recall_dot_product() {
+    let r = gate_recall(
+        "gate_dot",
+        DistanceMetric::DotProduct,
+        FAST_SUBVECTORS,
+        FAST_NPROBE,
+    );
+    assert!(
+        r >= 0.25,
+        "dot_product recall@10 = {r:.4}, expected >= 0.25 (5-seed min 0.325, was 0.037 pre-fix)"
+    );
+}
+
+#[test]
+#[ignore]
+fn gate_recall_manhattan() {
+    let r = gate_recall(
+        "gate_man",
+        DistanceMetric::Manhattan,
+        FAST_SUBVECTORS,
+        FAST_NPROBE,
+    );
+    assert!(
+        r >= 0.25,
+        "manhattan recall@10 = {r:.4}, expected >= 0.25 (5-seed min 0.310)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Monotonicity invariants
+//
+// Stronger gates than the absolute thresholds above, because they do not depend
+// on a calibrated level and so cannot drift with the platform. Both are
+// properties the algorithm must satisfy on any machine: probing more clusters
+// cannot lose a neighbour that fewer clusters found, and spending more bits per
+// vector cannot make the quantizer less accurate.
+//
+// Measured gaps are wide -- 0.38 to 0.645 across nprobe 1 to 16, and 0.41 to
+// 0.70 across m 16 to 32 -- so these are asserted strictly. A gap that size
+// cannot be flipped by float noise; a failure here means something is broken.
+// ---------------------------------------------------------------------------
+
+/// More probes cannot mean fewer neighbours found. This is the assertion that
+/// actually exercises IVF rather than PQ, and it only has teeth because the
+/// corpus is a continuum (`FAST_CENTERS = 1`): with one latent blob per IVF
+/// cluster the partition lands on the blobs, every query's neighbours sit in
+/// its own cell, and nprobe stops mattering at all.
+#[test]
+#[ignore]
+fn recall_is_monotonic_in_nprobe() {
+    let low = gate_recall("mono_p_lo", DistanceMetric::EuclideanSq, FAST_SUBVECTORS, 1);
+    let high = gate_recall(
+        "mono_p_hi",
+        DistanceMetric::EuclideanSq,
+        FAST_SUBVECTORS,
+        16,
+    );
+    assert!(
+        high >= low,
+        "recall must not fall as nprobe rises: nprobe=1 gave {low:.4}, nprobe=16 gave {high:.4}"
+    );
+}
+
+/// More bits per vector cannot mean a worse quantizer. Fails if codebook
+/// training or the ADC accumulation mishandles the sub-vector count.
+#[test]
+#[ignore]
+fn recall_is_monotonic_in_bit_budget() {
+    let low = gate_recall("mono_m_lo", DistanceMetric::EuclideanSq, 16, FAST_NPROBE);
+    let high = gate_recall("mono_m_hi", DistanceMetric::EuclideanSq, 32, FAST_NPROBE);
+    assert!(
+        high >= low,
+        "recall must not fall as the bit budget rises: m=16 gave {low:.4}, m=32 gave {high:.4}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Deep tier: realistic geometry, run by hand
+//
+// dim 384 is a real embedding width (all-MiniLM-L6-v2). 512 clusters over 50k
+// vectors is about 2.3x sqrt(n), inside the usual 1-4x range and proportionally
+// close to BigANN's 16384 lists over 100M vectors. k-means trains on a
+// subsample because full-corpus training dominates the cost for no accuracy
+// gain; production systems subsample for the same reason.
+//
+// Deliberately not wired into CI -- it is the measuring stick for changes to the
+// quantization path, not a gate. Run it when touching that path:
+//
+//     cargo test --release --test ivfpq_recall_tests deep_ -- --ignored --nocapture
+// ---------------------------------------------------------------------------
+
+const DEEP_DIM: usize = 384;
+const DEEP_N: u64 = 50_000;
+const DEEP_CLUSTERS: u32 = 512;
+const DEEP_SUBVECTORS: u32 = 48;
+const DEEP_NPROBE: u32 = 16;
+const DEEP_TRAIN_SAMPLE: usize = 25_000;
+
+#[test]
+#[ignore]
+fn deep_recall_table() {
+    let vectors = gaussian_mixture(DEEP_N, DEEP_DIM, 1, 0.5, 1.0, GATE_SEED);
+    let metrics: [(&'static str, DistanceMetric); 4] = [
+        ("deep_euc", DistanceMetric::EuclideanSq),
+        ("deep_cos", DistanceMetric::Cosine),
+        ("deep_dot", DistanceMetric::DotProduct),
+        ("deep_man", DistanceMetric::Manhattan),
     ];
-    for (name, metric) in metrics {
-        let mut all = Vec::new();
-        for seed in [1u64, 2, 3, 4, 5] {
-            let label: &'static str = match (name, seed) {
-                ("euclidean", 1) => "se1",
-                ("euclidean", 2) => "se2",
-                ("euclidean", 3) => "se3",
-                ("euclidean", 4) => "se4",
-                ("euclidean", _) => "se5",
-                ("cosine", 1) => "sc1",
-                ("cosine", 2) => "sc2",
-                ("cosine", 3) => "sc3",
-                ("cosine", 4) => "sc4",
-                ("cosine", _) => "sc5",
-                ("dot_product", 1) => "sd1",
-                ("dot_product", 2) => "sd2",
-                ("dot_product", 3) => "sd3",
-                ("dot_product", 4) => "sd4",
-                ("dot_product", _) => "sd5",
-                (_, 1) => "sm1",
-                (_, 2) => "sm2",
-                (_, 3) => "sm3",
-                (_, 4) => "sm4",
-                (_, _) => "sm5",
-            };
-            let vectors = gaussian_mixture(FAST_N, FAST_DIM, FAST_CENTERS, 0.5, 1.0, seed);
-            let def = IvfPqIndexDefinition::new(
-                label,
-                FAST_DIM as u32,
-                FAST_CLUSTERS,
-                FAST_SUBVECTORS,
-                metric,
-            )
-            .with_nprobe(FAST_NPROBE);
-            let (_tmp, db) = setup_pq_only_index(&def, &vectors, FAST_N as usize, FAST_TRAIN_ITERS);
-            let r = measure_recall(&db, &def, &vectors, metric, 10, FAST_NPROBE, 20);
-            all.push(r);
-        }
-        let min = all.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = all.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let mean = all.iter().sum::<f64>() / all.len() as f64;
-        println!(
-            "{name:12} min={min:.4} mean={mean:.4} max={max:.4} spread={:.4}",
-            max - min
+    println!(
+        "dim={DEEP_DIM} n={DEEP_N} clusters={DEEP_CLUSTERS} m={DEEP_SUBVECTORS} nprobe={DEEP_NPROBE}"
+    );
+    for (label, metric) in metrics {
+        let def = IvfPqIndexDefinition::new(
+            label,
+            DEEP_DIM as u32,
+            DEEP_CLUSTERS,
+            DEEP_SUBVECTORS,
+            metric,
+        )
+        .with_nprobe(DEEP_NPROBE);
+        let start = std::time::Instant::now();
+        let (_tmp, db) = setup_pq_only_index(&def, &vectors, DEEP_TRAIN_SAMPLE, FAST_TRAIN_ITERS);
+        let build_s = start.elapsed().as_secs_f64();
+        let r = measure_recall(&db, &def, &vectors, metric, 10, DEEP_NPROBE, 20);
+        println!("{label:10} recall@10={r:.4} build={build_s:.1}s");
+        assert!(
+            r >= 0.10,
+            "{label} recall@10 = {r:.4} is implausibly low even for the deep tier"
         );
     }
 }

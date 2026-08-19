@@ -153,6 +153,36 @@ impl BtreeBitmap {
             metadata += size_of::<u32>();
         }
 
+        // The levels form a 64-way tree: each level is the parent summary of
+        // the one below it, so `parent.len() == ceil(child.len() / 64)`, and the
+        // root fits in a single 64-bit group. `new()` and `resize()` both
+        // maintain that; a crafted image need not.
+        //
+        // It matters because `resize()` asserts `get_level(0).len() <= 64` in
+        // release builds, and `find_first_unset` walks parent to child assuming
+        // each entry addresses 64 children. A level count inconsistent with the
+        // leaf capacity turns the first file growth into a panic, and a tree
+        // walk into a lookup of entries that were never summarised.
+        for i in (1..heights.len()).rev() {
+            let child = heights[i].len();
+            let expected_parent = child.div_ceil(64);
+            let actual_parent = heights[i - 1].len();
+            if actual_parent != expected_parent {
+                return Err(crate::StorageError::Corrupted(alloc::format!(
+                    "BtreeBitmap: level {} has {actual_parent} entries, expected {expected_parent}                      to summarise {child} entries at level {i}",
+                    i - 1
+                )));
+            }
+        }
+        if let Some(root) = heights.first()
+            && root.len() > 64
+        {
+            return Err(crate::StorageError::Corrupted(alloc::format!(
+                "BtreeBitmap: root level has {} entries, which exceeds one 64-bit group",
+                root.len()
+            )));
+        }
+
         Ok(Self { heights })
     }
 
@@ -464,6 +494,67 @@ mod test {
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
+
+    /// Build a serialized `BtreeBitmap` from per-level lengths, root first.
+    /// Mirrors `to_vec`: height, then one absolute end offset per level, then
+    /// each level as `[len: u32][words: u64...]`.
+    fn build_levels(lens: &[u32]) -> Vec<u8> {
+        let height = u32::try_from(lens.len()).unwrap();
+        let mut bodies: Vec<Vec<u8>> = Vec::new();
+        for &len in lens {
+            let words = (len as usize).div_ceil(64).max(1);
+            let mut body = len.to_le_bytes().to_vec();
+            body.extend(core::iter::repeat_n(0u8, words * 8));
+            bodies.push(body);
+        }
+        let mut out = height.to_le_bytes().to_vec();
+        let mut offset = 4 + 4 * lens.len();
+        let mut ends = Vec::new();
+        for body in &bodies {
+            offset += body.len();
+            ends.push(u32::try_from(offset).unwrap());
+        }
+        for end in ends {
+            out.extend(end.to_le_bytes());
+        }
+        for body in bodies {
+            out.extend(body);
+        }
+        out
+    }
+
+    /// The levels are a 64-way tree: each is the parent summary of the one
+    /// below, so `parent.len() == ceil(child.len() / 64)` and the root fits one
+    /// 64-bit group. `new()` and `resize()` maintain that; a crafted image need
+    /// not, and nothing checked.
+    ///
+    /// It is not cosmetic. `resize()` carries a release-active
+    /// `assert!(get_level(0).len() <= 64)`, so an inconsistent level count turns
+    /// the next file growth into a panic, and `find_first_unset` walks parent to
+    /// child assuming each entry summarises exactly 64 children.
+    #[test]
+    fn inconsistent_level_sizes_are_rejected() {
+        // Consistent: 100 leaf entries need ceil(100/64) = 2 parent entries.
+        assert!(BtreeBitmap::from_bytes(&build_levels(&[2, 100])).is_ok());
+
+        // Parent too small to summarise its children.
+        assert!(BtreeBitmap::from_bytes(&build_levels(&[1, 100])).is_err());
+
+        // Parent larger than the level below warrants.
+        assert!(BtreeBitmap::from_bytes(&build_levels(&[9, 100])).is_err());
+
+        // Single level whose root cannot fit in one 64-bit group. This is the
+        // exact shape that trips the assert inside `resize`.
+        assert!(BtreeBitmap::from_bytes(&build_levels(&[100])).is_err());
+
+        // A root of exactly 64 is the largest legal one.
+        assert!(BtreeBitmap::from_bytes(&build_levels(&[64])).is_ok());
+
+        // Three levels, consistent throughout: 8192 -> 128 -> 2.
+        assert!(BtreeBitmap::from_bytes(&build_levels(&[2, 128, 8192])).is_ok());
+        // ...and the same shape with one level perturbed.
+        assert!(BtreeBitmap::from_bytes(&build_levels(&[2, 127, 8192])).is_err());
+    }
 
     /// Height is read from disk. `new()` always builds at least the leaf
     /// level, so 0 never occurs in a bitmap this crate wrote -- but a crafted

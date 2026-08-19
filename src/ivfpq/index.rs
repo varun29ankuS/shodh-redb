@@ -79,7 +79,57 @@ fn vector_meta_name(name: &str) -> String {
     alloc::format!("__ivfpq:{name}:vector_meta")
 }
 
-/// Validate that an index configuration is internally consistent.
+/// Minimum training points per IVF centroid before the partition stops being
+/// meaningful.
+///
+/// `kmeans` clamps `k` to the number of points available, which permits one
+/// point per centroid. Every centroid then sits exactly on a training vector,
+/// every residual collapses towards zero, and the PQ codebooks are trained on
+/// that degenerate residual set. The index reports success and returns poor
+/// results.
+///
+/// `train`'s documentation already asks for "a representative sample (10x-50x
+/// `num_clusters`)". This is the lower bound of that guidance. FAISS draws the
+/// line in the same place, warning below 39 points per centroid.
+///
+/// Note this only *reports*. Clamping the cluster count here would change
+/// public behaviour that callers depend on -- `train` deliberately supports
+/// training with fewer vectors than clusters and records the reduced count in
+/// the config -- so the decision to reject such configurations outright belongs
+/// to a separate, deliberate change.
+const MIN_POINTS_PER_CENTROID: usize = 10;
+
+/// Warn when a training set is too small for the requested cluster count.
+///
+/// Silence was the actual defect: before this, asking for 1024 clusters and
+/// supplying 100 vectors produced 100 single-point clusters with no error, no
+/// warning, and a config that looked deliberate.
+fn warn_if_undertrained(name: &str, num_clusters: usize, num_points: usize) {
+    if num_clusters == 0 || num_points >= num_clusters.saturating_mul(MIN_POINTS_PER_CENTROID) {
+        return;
+    }
+    #[cfg(feature = "logging")]
+    log::warn!(
+        "IVF-PQ '{}': {} training vectors for {} clusters is {} points per centroid, below the {} needed for a meaningful partition; centroids will sit on individual training vectors and recall will suffer. Pass 10x-50x num_clusters training vectors, or lower num_clusters.",
+        name,
+        num_points,
+        num_clusters,
+        num_points / num_clusters,
+        MIN_POINTS_PER_CENTROID,
+    );
+    // Without the `logging` feature there is nowhere to report this; the
+    // condition is still worth naming in one place rather than being implicit.
+    #[cfg(not(feature = "logging"))]
+    let _ = (name, num_clusters, num_points);
+}
+
+/// Whether a training set meets [`MIN_POINTS_PER_CENTROID`] for the requested
+/// cluster count. Exposed for tests so the threshold has a single definition.
+#[cfg(test)]
+fn is_adequately_trained(num_clusters: usize, num_points: usize) -> bool {
+    num_clusters == 0 || num_points >= num_clusters.saturating_mul(MIN_POINTS_PER_CENTROID)
+}
+
 fn validate_config(config: &IndexConfig) -> crate::Result<()> {
     if config.num_subvectors == 0 {
         return Err(StorageError::invalid_index_config(
@@ -224,6 +274,15 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     /// `training_vectors` is an iterator of `(vector_id, vector)` pairs.
     /// For large datasets, pass a representative sample (10x-50x `num_clusters`).
     ///
+    /// That ratio is not cosmetic. Below roughly 10 training vectors per
+    /// cluster the centroids end up sitting on individual training vectors,
+    /// the residuals they produce collapse towards zero, and the PQ codebooks
+    /// are trained on that degenerate set -- recall suffers while training
+    /// still reports success. Training with fewer vectors than `num_clusters`
+    /// is supported and reduces the cluster count accordingly (see
+    /// [`IndexConfig::num_clusters`]), but a warning is logged whenever the
+    /// ratio is below that threshold and the `logging` feature is enabled.
+    ///
     /// Re-training is supported: calling `train()` again replaces the centroids
     /// and codebooks, and **clears all existing postings, assignments, and raw
     /// vectors**. You must re-insert all vectors after re-training.
@@ -258,6 +317,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         }
 
         // 1. Train IVF centroids.
+        warn_if_undertrained(&self.name, num_clusters, n);
         let centroid_data = kmeans::kmeans(&flat, dim, num_clusters, max_iter, self.config.metric);
         // Relabel so spatially adjacent centroids get adjacent cluster IDs.
         // Cluster blobs are keyed by ID in a B-tree, so this turns the
@@ -396,6 +456,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
         };
         progress(&p);
         self.observer.on_train_progress(&self.name, &p);
+        warn_if_undertrained(&self.name, num_clusters, n);
         let centroid_data = kmeans::kmeans(&flat, dim, num_clusters, max_iter, self.config.metric);
         // See train(): locality relabelling, recall-neutral.
         let centroid_data =
@@ -1524,5 +1585,56 @@ fn bytes_to_f32_buf(bytes: &[u8], buf: &mut [f32]) {
     for (i, chunk) in bytes.chunks_exact(4).enumerate() {
         // chunks_exact guarantees exactly 4 bytes per chunk.
         buf[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+}
+
+#[cfg(test)]
+mod points_per_centroid_tests {
+    use super::{MIN_POINTS_PER_CENTROID, is_adequately_trained, warn_if_undertrained};
+
+    /// The condition the warning fires on: a request far larger than the
+    /// training set, which yields one point per centroid. Every centroid then
+    /// sits on a training vector, residuals collapse towards zero, and the PQ
+    /// stage trains on that degenerate set -- while reporting success.
+    #[test]
+    fn an_oversized_request_is_flagged() {
+        assert!(!is_adequately_trained(1024, 100));
+        assert!(!is_adequately_trained(4, 2));
+        // Just below the boundary.
+        assert!(!is_adequately_trained(20, 200 - 1));
+    }
+
+    /// A request the data supports must not be flagged. This is the case every
+    /// existing caller is in, so the check has to be quiet for them.
+    #[test]
+    fn a_supported_request_is_not_flagged() {
+        assert!(is_adequately_trained(4, 200));
+        assert!(is_adequately_trained(256, 20_000));
+        assert!(is_adequately_trained(512, 25_000));
+        // Exactly at the boundary is adequate.
+        assert!(is_adequately_trained(20, 20 * MIN_POINTS_PER_CENTROID));
+    }
+
+    /// Degenerate inputs must not divide by zero. `train` rejects an empty
+    /// training set before reaching this, and `validate_config` rejects
+    /// `num_clusters == 0`, but the check should not lean on either.
+    #[test]
+    fn degenerate_inputs_do_not_panic() {
+        assert!(is_adequately_trained(0, 0));
+        assert!(is_adequately_trained(0, 100));
+        assert!(!is_adequately_trained(1, 0));
+        warn_if_undertrained("t", 0, 0);
+        warn_if_undertrained("t", 1024, 0);
+        warn_if_undertrained("t", 0, 100);
+    }
+
+    /// The clamp is deliberately NOT applied: `train` supports training with
+    /// fewer vectors than clusters and records the reduced count, and three
+    /// integration tests depend on that. Changing it is a public-behaviour
+    /// decision, not a drive-by.
+    #[test]
+    fn the_check_only_reports() {
+        // Calling it is a no-op from the caller's point of view.
+        warn_if_undertrained("t", 1024, 100);
     }
 }

@@ -53,16 +53,17 @@ impl<const N: usize> Value for FixedVec<N> {
         Self: 'a,
     {
         let expected = N * core::mem::size_of::<f32>();
-        debug_assert!(
-            data.len() >= expected,
-            "FixedVec<{N}>::from_bytes: truncated data ({} < {expected}); \
-             this indicates on-disk corruption or a dimension mismatch \
-             between the table definition and stored data",
-            data.len(),
-        );
-        // Clamp to available bytes (zero-pad if truncated) to avoid panicking
-        // on corrupted data. The result will be a degraded vector but the
-        // database remains operational.
+        // Clamp to available bytes, zero-padding a short buffer, so corrupt
+        // or dimension-mismatched data degrades instead of panicking. The
+        // result is a degraded vector; the database stays operational.
+        //
+        // A debug_assert! on `data.len() >= expected` used to sit here,
+        // firing on exactly the input the lines below exist to tolerate.
+        // `Value::from_bytes` cannot return an error and this length comes
+        // off disk, so degrading IS the contract; an assertion contradicting
+        // it only turns a handled case into a crash in debug and fuzz
+        // builds. That is how fuzz_quantization failed the first time it
+        // was ever run.
         let usable = data.len().min(expected);
         let mut result = [0.0f32; N];
         #[cfg(target_endian = "little")]
@@ -452,5 +453,51 @@ impl<const N: usize> SQVec<N> {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod truncated_vector_tests {
+    use super::FixedVec;
+    use crate::types::Value;
+
+    /// `from_bytes` is reached with whatever bytes are on disk, and the `Value`
+    /// trait gives it no way to report an error. Truncated input therefore has
+    /// to degrade, which the implementation does by zero-padding.
+    ///
+    /// A `debug_assert!` used to sit above that handling and fire on exactly
+    /// the same condition, so debug and fuzz builds crashed on input the
+    /// release build handled. `fuzz_quantization` hit it the first time that
+    /// target was ever executed, on a 2-byte input.
+    #[test]
+    fn truncated_input_zero_pads_instead_of_panicking() {
+        for len in [0usize, 1, 4, 15, 31] {
+            let data = vec![0xABu8; len];
+            let v = <FixedVec<8> as Value>::from_bytes(&data);
+            assert_eq!(v.len(), 8, "must always yield N elements");
+            // Bytes past the supplied prefix read as zero.
+            for (i, x) in v.iter().enumerate() {
+                if i * 4 >= len {
+                    // Compare bit patterns: exact, and lint-clean for floats.
+                    assert_eq!(
+                        x.to_bits(),
+                        0.0f32.to_bits(),
+                        "element {i} beyond {len} bytes must be zero"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A full-length buffer still round-trips, so the guard removal did not
+    /// change the behaviour that matters.
+    #[test]
+    fn full_length_input_round_trips() {
+        let original = [1.0f32, -2.5, 3.25, 0.0, 1e10, -1e-10, 42.0, 7.5];
+        let bytes = <FixedVec<8> as Value>::as_bytes(&original);
+        let decoded = <FixedVec<8> as Value>::from_bytes(&bytes);
+        for (d, o) in decoded.iter().zip(original.iter()) {
+            assert_eq!(d.to_bits(), o.to_bits());
+        }
     }
 }

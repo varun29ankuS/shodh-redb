@@ -326,6 +326,29 @@ fn subvector_distance(query_sub: &[f32], centroid: &[f32], metric: DistanceMetri
     }
 }
 
+/// Whether the ADC table must be built from the query residual `q - c` rather
+/// than from the raw query `q`.
+///
+/// Residual quantization is distance-preserving only for metrics that are a
+/// function of the difference `q - x`. Both squared Euclidean and L1 satisfy
+/// `f(q - (c + r)) == f((q - c) - r)`, so subtracting the coarse centroid from
+/// the query is exact.
+///
+/// Inner product does not: `q . (c + r) == q . c + q . r`. Building the table
+/// from `q - c` computes `(q - c) . r`, which is neither term -- it drops
+/// `q . c` entirely and uses the wrong left operand. For those metrics the
+/// table is built from `q`, which also makes it independent of the probed
+/// cluster, and the per-cluster constant `q . c` is applied to each candidate
+/// score. Cosine is included because it is routed through the same negated
+/// dot-product accumulation once both sides are L2-normalised.
+#[inline]
+pub(crate) const fn uses_query_residual(metric: DistanceMetric) -> bool {
+    match metric {
+        DistanceMetric::EuclideanSq | DistanceMetric::Manhattan => true,
+        DistanceMetric::DotProduct | DistanceMetric::Cosine => false,
+    }
+}
+
 /// Distance between two equal-length vectors under `metric`.
 ///
 /// Thin wrapper exposing [`subvector_distance`] to `kmeans`, which uses the

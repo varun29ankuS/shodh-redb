@@ -2,8 +2,10 @@ use crate::compat::Arc;
 use crate::compat::HashSet;
 #[cfg(debug_assertions)]
 use crate::compat::{HashMap, Mutex};
+use crate::error::StorageError;
 use crate::tree_store::page_store::cached_file::WritablePage;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
+use alloc::format;
 #[cfg(test)]
 use alloc::vec::Vec;
 use core::cmp::Ordering;
@@ -152,20 +154,61 @@ impl PageNumber {
         pages
     }
 
+    /// Byte range this page occupies in the file.
+    ///
+    /// `page_index` and `page_order` both come off disk, so the range is only
+    /// meaningful if the page actually fits inside its own region. The index is
+    /// masked to 20 bits on decode, which at a 4 KiB page size still permits a
+    /// regional offset of nearly 4 GiB -- far past the end of a small region.
+    ///
+    /// This was a `debug_assert!(regional_start < region_size)`, so release
+    /// builds computed the address anyway and read whatever lived there,
+    /// which for an out-of-region offset is another region's data. Report the
+    /// corruption instead. The check covers the page's end as well as its
+    /// start: a page may begin inside the region and still extend past it.
     pub(crate) fn address_range(
         &self,
         data_section_offset: u64,
         region_size: u64,
         region_pages_start: u64,
         page_size: u32,
-    ) -> Range<u64> {
-        let regional_start =
-            region_pages_start + u64::from(self.page_index) * self.page_size_bytes(page_size);
-        debug_assert!(regional_start < region_size);
-        let region_base = u64::from(self.region) * region_size;
-        let start = data_section_offset + region_base + regional_start;
-        let end = start + self.page_size_bytes(page_size);
-        start..end
+    ) -> Result<Range<u64>, StorageError> {
+        let page_bytes = self.page_size_bytes(page_size);
+        let regional_start = u64::from(self.page_index)
+            .checked_mul(page_bytes)
+            .and_then(|offset| region_pages_start.checked_add(offset))
+            .ok_or_else(|| {
+                StorageError::Corrupted(format!(
+                    "page {self:?}: regional offset overflows u64 at page size {page_size}"
+                ))
+            })?;
+        let regional_end = regional_start.checked_add(page_bytes).ok_or_else(|| {
+            StorageError::Corrupted(format!(
+                "page {self:?}: regional end overflows u64 at page size {page_size}"
+            ))
+        })?;
+        if regional_end > region_size {
+            return Err(StorageError::Corrupted(format!(
+                "page {self:?}: occupies {regional_start}..{regional_end} which does not fit in a region of {region_size} bytes"
+            )));
+        }
+        let region_base = u64::from(self.region)
+            .checked_mul(region_size)
+            .ok_or_else(|| {
+                StorageError::Corrupted(format!(
+                    "page {self:?}: region base overflows u64 at region size {region_size}"
+                ))
+            })?;
+        let start = data_section_offset
+            .checked_add(region_base)
+            .and_then(|base| base.checked_add(regional_start))
+            .ok_or_else(|| {
+                StorageError::Corrupted(format!("page {self:?}: absolute offset overflows u64"))
+            })?;
+        let end = start.checked_add(page_bytes).ok_or_else(|| {
+            StorageError::Corrupted(format!("page {self:?}: absolute end overflows u64"))
+        })?;
+        Ok(start..end)
     }
 
     pub(crate) fn page_size_bytes(&self, page_size: u32) -> u64 {
@@ -337,6 +380,7 @@ impl PageTrackerPolicy {
 #[cfg(test)]
 mod test {
     use crate::tree_store::PageNumber;
+    use crate::tree_store::page_store::base::MAX_PAGE_INDEX;
 
     #[test]
     fn last_page() {
@@ -346,11 +390,57 @@ mod test {
         let region_header_size = 2u64.pow(16);
         let last_page_index = pages_per_region - 1;
         let page_number = PageNumber::new(1, last_page_index.try_into().unwrap(), 0);
-        page_number.address_range(
-            4096,
-            region_data_size + region_header_size,
-            region_header_size,
-            page_size.try_into().unwrap(),
+        page_number
+            .address_range(
+                4096,
+                region_data_size + region_header_size,
+                region_header_size,
+                page_size.try_into().unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// `page_index` is read off disk and masked only to 20 bits, which at a
+    /// 4 KiB page size still permits a regional offset of nearly 4 GiB -- far
+    /// past the end of a small region. This was a
+    /// `debug_assert!(regional_start < region_size)`, so release builds went on
+    /// to compute an address inside a *different* region and read it.
+    ///
+    /// Found by the `fuzz_db_image` target:
+    ///
+    /// ```text
+    /// panicked at base.rs:164: assertion failed: regional_start < region_size
+    /// ```
+    #[test]
+    fn page_outside_its_region_is_rejected() {
+        let page_size = 4096u32;
+        // 1 MiB, the region size the fuzzer's generated configs reach.
+        let region_size = 1024 * 1024u64;
+        let region_header = 4096u64;
+        let pages_per_region = (region_size - region_header) / u64::from(page_size);
+
+        // Far past the region end.
+        let far = PageNumber::new(0, MAX_PAGE_INDEX, 0);
+        assert!(
+            far.address_range(4096, region_size, region_header, page_size)
+                .is_err()
+        );
+
+        // Starts inside the region but extends past its end -- checking only
+        // the start would let this through.
+        let straddling = PageNumber::new(0, u32::try_from(pages_per_region).unwrap(), 0);
+        assert!(
+            straddling
+                .address_range(4096, region_size, region_header, page_size)
+                .is_err()
+        );
+
+        // The last page that genuinely fits is still accepted, so the guard is
+        // not off by one.
+        let last = PageNumber::new(0, u32::try_from(pages_per_region - 1).unwrap(), 0);
+        assert!(
+            last.address_range(4096, region_size, region_header, page_size)
+                .is_ok()
         );
     }
 

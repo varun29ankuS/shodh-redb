@@ -1343,7 +1343,7 @@ impl TransactionalMemory {
                 self.region_size,
                 self.region_header_with_padding_size,
                 self.page_size,
-            );
+            )?;
             let len: usize = (address.end - address.start).try_into().unwrap();
             self.storage.invalidate_cache(address.start, len);
             self.storage.cancel_pending_write(address.start, len);
@@ -1374,7 +1374,7 @@ impl TransactionalMemory {
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
-        );
+        )?;
         let len: usize = (range.end - range.start).try_into().unwrap();
         let mem = self.storage.read(range.start, len, hint)?;
 
@@ -1422,7 +1422,7 @@ impl TransactionalMemory {
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
-        );
+        )?;
         let len: usize = (address_range.end - address_range.start)
             .try_into()
             .unwrap();
@@ -1569,7 +1569,7 @@ impl TransactionalMemory {
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
-        );
+        )?;
         let len: usize = (address_range.end - address_range.start)
             .try_into()
             .unwrap();
@@ -1648,7 +1648,7 @@ impl TransactionalMemory {
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
-        );
+        )?;
         let len: usize = (address_range.end - address_range.start)
             .try_into()
             .unwrap();

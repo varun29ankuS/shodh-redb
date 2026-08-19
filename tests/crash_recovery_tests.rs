@@ -1192,3 +1192,68 @@ fn resealed_slot_with_zero_length_does_not_underflow() {
         let _ = db.verify_integrity(VerifyLevel::Pages);
     }
 }
+
+/// A corrupted leaf page can carry pointer offsets that are not ordered -- key
+/// data appearing to start after value data. `LeafMutator::insert` performs
+/// three `copy_within` calls over those offsets, and `copy_within` panics on a
+/// reversed range rather than returning an error:
+///
+/// ```text
+/// slice index starts at 4066 but ends at 1280
+/// ```
+///
+/// Found by `fuzz_db_image` on macOS, input `[255, 9, 225, 14]`. What made it
+/// worth fixing rather than merely noting: the panic is reached through the
+/// commit that `Database::drop` performs, so simply closing a database opened
+/// on a corrupt file could panic the process. `Drop` guards against unwinding
+/// while already panicking, but not against a fresh panic.
+///
+/// This drives the same byte the fuzzer did: one edit at `0xE109 % len`,
+/// deliberately without resealing the commit slots.
+///
+/// Release-only, deliberately. A debug build carries an additional detector,
+/// `debug_assert!(self.allocated_pages.lock().insert(page_number))` in
+/// `allocate_helper`, which fires on this input because the corrupted
+/// allocator state leads the allocator to hand out a page it already tracks.
+/// That assertion is doing its job -- reporting inconsistent on-disk state --
+/// and silencing it would remove a real detector to make a test pass. The
+/// guarantee this test encodes is the production one: a release build must not
+/// panic. The fuzzer exercises the same path, since that assertion is compiled
+/// out under `cfg(fuzzing)`.
+#[test]
+#[cfg(not(debug_assertions))]
+fn corrupt_leaf_offsets_do_not_panic_on_close() {
+    let src = create_tempfile();
+    {
+        let db = Database::create(src.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE).unwrap();
+            // Enough entries to force interior pages, matching the fuzz target.
+            for i in 0..256u64 {
+                t.insert(&i, [i as u8; 64].as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    let mut image = std::fs::read(src.path()).unwrap();
+    let offset = 0xE109usize % image.len();
+    image[offset] = 14;
+
+    let dst = create_tempfile();
+    std::fs::write(dst.path(), &image).unwrap();
+
+    // Any outcome except a panic is acceptable, including a clean open failure.
+    let Ok(db) = Database::builder().create(dst.path()) else {
+        return;
+    };
+    if let Ok(txn) = db.begin_read()
+        && let Ok(table) = txn.open_table(TABLE)
+    {
+        let _ = table.get(&0u64);
+        let _ = table.get(&255u64);
+    }
+    // The panic was on drop, not during the read, so this is the assertion.
+    drop(db);
+}

@@ -18,6 +18,28 @@ pub struct IndexConfig {
     pub num_clusters: u32,
     /// Number of PQ sub-vectors. `dim` must be divisible by this.
     /// Each sub-vector is `dim / num_subvectors` floats.
+    ///
+    /// This is the compression/recall dial, and the useful way to read it is
+    /// **bits per dimension**: each sub-vector becomes one byte, so the rate is
+    /// `8 * num_subvectors / dim`. Measured recall@10 at dim 128, 256 clusters,
+    /// nprobe at the default, no re-ranking:
+    ///
+    /// | `num_subvectors` | bits/dim | bytes/vector | recall@10 |
+    /// |---|---|---|---|
+    /// | `dim / 8` | 1 | `dim / 8` | low -- needs re-ranking |
+    /// | `dim / 4` | 2 | `dim / 4` | ~0.74 |
+    /// | `dim / 2` | 4 | `dim / 2` | ~0.90 |
+    ///
+    /// So `num_subvectors = dim / 2` is the setting that reaches roughly 90%
+    /// recall on its own. Below that, plan on `store_raw_vectors` and
+    /// re-ranking to make up the difference -- which costs `4 * dim` bytes per
+    /// vector, far more than the codes themselves, so it is a real trade rather
+    /// than a free upgrade.
+    ///
+    /// Recall also depends on the data: these figures come from a synthetic
+    /// corpus with a deliberately flat spectrum, which is the hard case for
+    /// product quantization. Real embeddings, whose variance concentrates in a
+    /// few directions, do better at the same bit rate.
     pub num_subvectors: u32,
     /// Codewords per sub-quantizer. Always 256 (u8 codes).
     pub num_codewords: u16,
@@ -159,10 +181,25 @@ impl SearchParams {
 /// ```rust,ignore
 /// use shodh_redb::{DistanceMetric, IvfPqIndexDefinition};
 ///
-/// const INDEX: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
+/// // 96 sub-vectors over 768 dimensions is 1 bit per dimension: 96 bytes per
+/// // vector, a 32x compression. At that rate the codes alone do not carry
+/// // enough information for high recall, so this configuration stores raw
+/// // vectors and re-ranks -- which is what `with_raw_vectors` is paying for.
+/// const COMPACT: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
 ///     "embeddings", 768, 256, 96, DistanceMetric::EuclideanSq,
-/// ).with_raw_vectors().with_nprobe(16);
+/// ).with_raw_vectors();
+///
+/// // 384 sub-vectors is 4 bits per dimension: 384 bytes per vector, 8x
+/// // compression, and roughly 90% recall without re-ranking. Larger codes,
+/// // but no `4 * dim` bytes of raw vectors and no second pass at query time.
+/// const STANDALONE: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
+///     "embeddings", 768, 256, 384, DistanceMetric::EuclideanSq,
+/// );
 /// ```
+///
+/// `nprobe` defaults to `sqrt(num_clusters)`, which is where recall stops
+/// improving in measurement; set it explicitly with `with_nprobe` only to trade
+/// query time against recall deliberately.
 pub struct IvfPqIndexDefinition {
     name: &'static str,
     dim: u32,

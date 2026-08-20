@@ -319,7 +319,13 @@ impl Page for PageMut {
     }
 }
 
-#[cfg(debug_assertions)]
+// Paired with the `open_dirty_pages` inserts in `page_manager`, which are gated
+// `not(fuzzing)` because the page the allocator hands out is chosen from a free
+// bitmap read off disk. This impl must carry the same gate: with the inserts
+// compiled out, the remove here finds nothing and the assertion fires -- an
+// artifact of the gating rather than a real defect. The body is only that
+// assertion, so removing the impl under fuzzing drops no behaviour.
+#[cfg(all(debug_assertions, not(fuzzing)))]
 impl Drop for PageMut {
     fn drop(&mut self) {
         assert!(self.open_pages.lock().remove(&self.page_number));

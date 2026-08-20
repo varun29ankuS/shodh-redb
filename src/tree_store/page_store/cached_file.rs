@@ -623,6 +623,24 @@ impl PagedCachedFile {
         };
 
         let data = if let Some(removed) = lock.take_value(offset) {
+            // The read-cache branch above rejects a length mismatch; this one
+            // did not, and reused whatever length the buffered entry happened
+            // to have. A page buffered at one order and then handed out at the
+            // same offset with a larger order came back short, so the caller
+            // received a page smaller than it asked for:
+            //
+            //     assertion failed: mem.mem().len() >= allocation_size
+            //
+            // In release that assertion is absent and the undersized page is
+            // used, truncating writes that should have landed in it. Report the
+            // inconsistency rather than returning a page that does not match
+            // the request. Found by fuzz_redb once it stopped deadlocking.
+            if removed.len() != len {
+                return Err(StorageError::Internal(alloc::format!(
+                    "write: write-buffer inconsistency at offset {offset}, buffered {} bytes but {len} requested",
+                    removed.len()
+                )));
+            }
             #[cfg(feature = "cache_metrics")]
             self.writes_hits.fetch_add(1, Ordering::AcqRel);
             removed

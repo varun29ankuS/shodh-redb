@@ -307,6 +307,16 @@ impl DatabaseHeader {
                 "Database header region_max_data_pages exceeds the addressable maximum".to_string(),
             )));
         }
+        // Region header pages are pages inside a region, so they are bounded by
+        // the same addressability limit as its data pages. This codebase always
+        // writes `NO_HEADER` (zero) -- the allocator state lives in a system
+        // table, not in per-region headers -- but bounding is enough, and does
+        // not assume no file in the wild carries a non-zero value.
+        if u64::from(region_header_pages) > u64::from(MAX_PAGE_INDEX) + 1 {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "Database header region_header_pages exceeds the addressable maximum".to_string(),
+            )));
+        }
         if full_regions > MAX_REGIONS {
             return Err(DatabaseError::Storage(StorageError::Corrupted(
                 "Database header region count exceeds the addressable maximum".to_string(),

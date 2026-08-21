@@ -681,10 +681,18 @@ mod header_validation_test {
                 "max_order {bogus} must be rejected"
             );
         }
-        // The largest legal value is still accepted.
+        // A legal `max_order` that disagrees with the rest of the buffer must
+        // still be an error, not a panic. The offset table was written for 9
+        // orders; claiming 21 makes `from_bytes` read past it and hand garbage
+        // lengths to `BtreeBitmap::from_bytes`. That is how the 32-bit
+        // multiply overflow in bitmap.rs was found -- on wasm32/WASI `usize`
+        // is 32 bits, so `height * 4` wrapped where it cannot on x86-64.
         let mut bytes = serialized();
         bytes[0] = MAX_MAX_PAGE_ORDER;
-        let _ = BuddyAllocator::from_bytes(&bytes);
+        assert!(
+            BuddyAllocator::from_bytes(&bytes).is_err(),
+            "a max_order inconsistent with the offset table must be rejected"
+        );
     }
 
     /// `num_pages` is stored separately from the bitmaps it describes, so a

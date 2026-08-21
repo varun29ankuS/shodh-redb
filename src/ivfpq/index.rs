@@ -130,6 +130,18 @@ fn is_adequately_trained(num_clusters: usize, num_points: usize) -> bool {
     num_clusters == 0 || num_points >= num_clusters.saturating_mul(MIN_POINTS_PER_CENTROID)
 }
 
+/// Largest component magnitude for which `dim * (2 * limit)^2 <= f32::MAX`,
+/// i.e. the point beyond which a squared Euclidean distance between two
+/// vectors of this dimension can overflow to infinity.
+fn magnitude_limit(dim: usize) -> f32 {
+    // A zero-dimension vector is rejected elsewhere; guard the divide anyway.
+    let dim = dim.max(1);
+    #[allow(clippy::cast_precision_loss)]
+    let dim_f = dim as f32;
+    // `f32::sqrt` is std-only; this is the crate's portable implementation.
+    crate::vector_ops::sqrt_f32(f32::MAX / dim_f) / 2.0
+}
+
 fn validate_config(config: &IndexConfig) -> crate::Result<()> {
     if config.num_subvectors == 0 {
         return Err(StorageError::invalid_index_config(
@@ -997,12 +1009,38 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// Validate that a vector contains only finite values.
+    /// Validate that a vector is finite and small enough for distances between
+    /// vectors to stay representable.
+    ///
+    /// Checking `is_finite()` alone is not enough. Squared Euclidean distance
+    /// sums `(a - b)^2` over `dim` dimensions, so two perfectly finite vectors
+    /// whose components differ by 3e38 produce `inf`, and at high dimension the
+    /// true value is not representable in f32 at any precision -- 1536
+    /// dimensions of 1e38 is about 1e79. An `inf` distance then flows into the
+    /// top-K heap, where every comparison against it is meaningless, and into
+    /// `IntAdcTable`'s min/max affine quantization, where it poisons the scale
+    /// for every other candidate.
+    ///
+    /// The bound is derived from the worst case: `dim * (2 * limit)^2` must stay
+    /// below `f32::MAX`, so `limit = sqrt(f32::MAX / dim) / 2`. That is around
+    /// 2.3e17 at 1536 dimensions -- astronomically larger than any real
+    /// embedding, so this rejects nothing legitimate while making "distances are
+    /// finite" an invariant the index can actually rely on.
+    ///
+    /// Found by `fuzz_ivfpq_index`, which asserted that a search never returns
+    /// a non-finite distance, and independently by `fuzz_ivfpq_kmeans`.
     fn validate_finite(vector: &[f32], name: &str) -> crate::Result<()> {
+        let limit = magnitude_limit(vector.len());
         for (i, &v) in vector.iter().enumerate() {
             if !v.is_finite() {
                 return Err(StorageError::invalid_index_config(alloc::format!(
                     "IVF-PQ '{name}': vector contains non-finite value ({v}) at index {i}",
+                )));
+            }
+            if v.abs() > limit {
+                return Err(StorageError::invalid_index_config(alloc::format!(
+                    "IVF-PQ '{name}': component {v} at index {i} exceeds the magnitude                      limit {limit:e} for {} dimensions; squared distances would overflow                      f32 and make search results meaningless",
+                    vector.len(),
                 )));
             }
         }
@@ -1686,5 +1724,57 @@ mod points_per_centroid_tests {
     fn the_check_only_reports() {
         // Calling it is a no-op from the caller's point of view.
         warn_if_undertrained("t", 1024, 100);
+    }
+}
+
+#[cfg(test)]
+mod magnitude_limit_tests {
+    use super::magnitude_limit;
+
+    /// The bound must admit anything a real embedding could contain. Model
+    /// outputs are normalised or at most single digits; this allows 17 orders
+    /// of magnitude more than that.
+    #[test]
+    fn real_embedding_magnitudes_are_accepted() {
+        for dim in [8usize, 128, 384, 768, 1536, 4096] {
+            let limit = magnitude_limit(dim);
+            assert!(
+                limit > 1e15,
+                "dim {dim}: limit {limit:e} is too strict for legitimate data"
+            );
+        }
+    }
+
+    /// And it must actually prevent the overflow it exists for: the worst-case
+    /// squared distance at the limit has to stay representable.
+    #[test]
+    fn the_limit_keeps_squared_distances_representable() {
+        for dim in [1usize, 8, 128, 384, 768, 1536, 4096, 65536] {
+            let limit = magnitude_limit(dim);
+            // Worst case: every component differs by 2 * limit.
+            let diff = 2.0f32 * limit;
+            #[allow(clippy::cast_precision_loss)]
+            let worst = (dim as f32) * diff * diff;
+            assert!(
+                worst.is_finite(),
+                "dim {dim}: worst-case squared distance overflowed at limit {limit:e}"
+            );
+        }
+    }
+
+    /// A value just past the limit is what the validator rejects; confirm the
+    /// overflow it is guarding against is real rather than theoretical.
+    #[test]
+    fn just_past_the_limit_does_overflow() {
+        let dim = 1536usize;
+        let limit = magnitude_limit(dim);
+        // 3e38 is finite but far beyond the limit -- the case the fuzzer found.
+        let huge = 3.0e38f32;
+        assert!(huge.is_finite());
+        assert!(huge > limit);
+        assert!(
+            !(huge * huge).is_finite(),
+            "squaring a value past the limit must overflow, otherwise the bound is pointless"
+        );
     }
 }

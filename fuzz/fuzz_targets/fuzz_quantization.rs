@@ -60,12 +60,24 @@ fuzz_target!(|op: FuzzOp| {
             if v.iter().all(|x| x.is_finite()) {
                 let range = sq.max_val - sq.min_val;
                 if range > 0.0 {
+                    // 8-bit quantization has 255 intervals, so the worst
+                    // rounding error is half an interval: range / 510.
                     let max_error = range / 510.0;
+                    // The comparison also has to absorb the f32 rounding in
+                    // quantize/dequantize itself, which is proportional to the
+                    // magnitudes involved -- not a fixed quantity. A flat
+                    // `1e-6` is right near 1.0 and meaningless at 1e38, where a
+                    // single representable step already exceeds it; this
+                    // assertion failed at range 2.55e38 on an overshoot of
+                    // 0.0035%, which is f32 noise rather than a quantizer
+                    // defect. Scale the slack with the range and keep the
+                    // absolute floor for tiny ranges.
+                    let tolerance = max_error + 16.0 * f32::EPSILON * range + 1e-6;
                     for (i, (&orig, &rest)) in v.iter().zip(restored.iter()).enumerate() {
                         let err = (orig - rest).abs();
                         assert!(
-                            err <= max_error + 1e-6,
-                            "dim {i}: error {err} exceeds bound {max_error}"
+                            err <= tolerance,
+                            "dim {i}: error {err} exceeds bound {max_error} (tolerance {tolerance})"
                         );
                     }
                 }

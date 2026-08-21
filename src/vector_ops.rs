@@ -14,7 +14,7 @@ mod simd_x86;
 /// On `no_std` (e.g. wasm32 without wasi), uses a bit-level Newton's method
 /// implementation that converges in a fixed number of iterations.
 #[inline]
-fn sqrt_f32(x: f32) -> f32 {
+pub(crate) fn sqrt_f32(x: f32) -> f32 {
     #[cfg(feature = "std")]
     {
         x.sqrt()

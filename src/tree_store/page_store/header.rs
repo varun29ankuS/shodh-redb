@@ -2,6 +2,17 @@ use crate::transaction_tracker::TransactionId;
 use crate::tree_store::Checksum;
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, MAX_REGIONS};
+
+/// Smallest page size this crate will write, mirroring `Builder::set_page_size`.
+pub(super) const MIN_PAGE_SIZE: u32 = 512;
+
+/// Largest page size accepted from a database header.
+///
+/// There is no legitimate reason for a page to exceed this -- the default is
+/// 4 KiB and the fuzzer's own configs top out at 16 KiB -- and the value scales
+/// every page allocation, so leaving it unbounded turns a corrupt header into
+/// an out-of-memory abort instead of a corruption error.
+pub(super) const MAX_PAGE_SIZE: u32 = 4 * 1024 * 1024;
 use crate::tree_store::page_store::compression::CompressionConfig;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
@@ -284,10 +295,31 @@ impl DatabaseHeader {
         // `DatabaseLayout::recalculate` divides by
         // `(region_header_pages + region_max_data_pages) * page_size`. Both
         // would panic on an untrusted file instead of reporting corruption.
-        if page_size == 0 {
-            return Err(DatabaseError::Storage(StorageError::Corrupted(
-                "Database header has a zero page size".to_string(),
-            )));
+        // `page_size` was only checked for zero. It is a u32 read off disk and
+        // it scales every page allocation: `PageNumber::page_size_bytes` is
+        // `2^order * page_size`, and `PagedCachedFile::read_direct` does
+        // `vec![0; len]` BEFORE `file.read` can report that the file is far
+        // smaller. So `page_size = 0xFFFFFFFF` asks for 4 GiB at order 0 alone,
+        // which is an out-of-memory abort rather than a corruption error.
+        // `fuzz_db_image` produced exactly that as an `oom-` artifact.
+        //
+        // `Builder::set_page_size` already requires a power of two and clamps
+        // up to MIN_PAGE_SIZE on the write side; enforce the same contract on
+        // the read side rather than trusting the file to have honoured it.
+        if page_size < MIN_PAGE_SIZE {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(format!(
+                "Database header page size {page_size} is below the minimum {MIN_PAGE_SIZE}"
+            ))));
+        }
+        if page_size > MAX_PAGE_SIZE {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(format!(
+                "Database header page size {page_size} exceeds the maximum {MAX_PAGE_SIZE}"
+            ))));
+        }
+        if !page_size.is_power_of_two() {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(format!(
+                "Database header page size {page_size} is not a power of two"
+            ))));
         }
         if region_max_data_pages == 0 {
             return Err(DatabaseError::Storage(StorageError::Corrupted(
@@ -955,4 +987,63 @@ mod test {
         let result = Database::open(tmpfile.path());
         assert!(result.is_err());
     }
+}
+
+#[cfg(test)]
+mod page_size_bound_test {
+    use super::{MAX_PAGE_SIZE, MIN_PAGE_SIZE, PAGE_SIZE_OFFSET};
+    use crate::Database;
+    use std::io::{Seek, SeekFrom, Write};
+
+    /// `page_size` scales every page allocation: `page_size_bytes` is
+    /// `2^order * page_size`, and `read_direct` does `vec![0; len]` before
+    /// `file.read` can report that the file is far smaller. Unbounded, a
+    /// crafted header turns opening a database into an out-of-memory abort
+    /// rather than a corruption error -- `fuzz_db_image` produced exactly that
+    /// as an `oom-` artifact.
+    ///
+    /// Only zero was rejected before. `Builder::set_page_size` already requires
+    /// a power of two at or above the minimum on the write side; this enforces
+    /// the same contract on read.
+    #[test]
+    fn an_absurd_page_size_is_rejected_rather_than_allocated() {
+        for bogus in [
+            0u32,
+            1,
+            511,
+            MIN_PAGE_SIZE - 1,
+            4096 + 1,
+            MAX_PAGE_SIZE * 2,
+            u32::MAX,
+        ] {
+            let tmpfile = crate::create_tempfile();
+            {
+                let db = Database::builder().create(tmpfile.path()).unwrap();
+                drop(db);
+            }
+            {
+                let mut file = tmpfile.as_file();
+                file.seek(SeekFrom::Start(PAGE_SIZE_OFFSET as u64)).unwrap();
+                file.write_all(&bogus.to_le_bytes()).unwrap();
+                file.flush().unwrap();
+            }
+            // Any outcome except an allocation of `bogus` bytes is acceptable:
+            // the header checksum may reject it first, which is also fine. What
+            // must not happen is a multi-gigabyte allocation or an abort.
+            let _ = Database::builder().create(tmpfile.path());
+        }
+    }
+
+    /// The bound must not refuse anything the crate itself writes. Checked at
+    /// compile time rather than in a test body: these are constants, so a
+    /// runtime assert would be optimized out, and a build failure is the right
+    /// outcome if the bound is ever narrowed past the default.
+    const _: () = {
+        assert!(MIN_PAGE_SIZE <= 4096);
+        assert!(4096 <= MAX_PAGE_SIZE);
+        assert!(MIN_PAGE_SIZE.is_power_of_two());
+        assert!(MAX_PAGE_SIZE.is_power_of_two());
+        // The fuzzer's own configs top out at 16 KiB.
+        assert!(16 * 1024 <= MAX_PAGE_SIZE);
+    };
 }

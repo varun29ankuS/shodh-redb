@@ -210,6 +210,45 @@ pub struct IvfPqIndexDefinition {
     default_nprobe: u32,
 }
 
+/// Default number of clusters to probe, derived from the partition size.
+///
+/// This was a flat `10` regardless of `num_clusters`, which means very
+/// different things at different scales: 16% of a 64-cluster index, but 0.24%
+/// of a 4096-cluster one. The larger the index, the more the fixed default
+/// under-probed it -- precisely where recall matters most.
+///
+/// `sqrt(num_clusters)` is the standard heuristic and it matches measurement.
+/// On a 256-cluster index at dim 128, recall@10 rises steeply to nprobe 16 and
+/// then flattens: 4 -> 0.410, 16 -> 0.575, 32 -> 0.580. The knee is at 16,
+/// which is exactly `sqrt(256)`. Probing beyond it costs query time for
+/// hundredths of a point of recall.
+///
+/// Callers who want a different trade-off set it explicitly with
+/// [`IvfPqIndexDefinition::with_nprobe`] or per-query via [`SearchParams`].
+#[must_use]
+pub const fn default_nprobe_for(num_clusters: u32) -> u32 {
+    if num_clusters == 0 {
+        return 1;
+    }
+    // Integer sqrt by bit-halving; `u32::isqrt` is not const-stable on the MSRV.
+    let mut root = 0u32;
+    let mut bit = 1u32 << 30;
+    let mut n = num_clusters;
+    while bit > n {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if n >= root + bit {
+            n -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    if root == 0 { 1 } else { root }
+}
+
 impl IvfPqIndexDefinition {
     /// Create a new IVF-PQ index definition.
     ///
@@ -228,7 +267,7 @@ impl IvfPqIndexDefinition {
             num_subvectors,
             metric,
             store_raw_vectors: false,
-            default_nprobe: 10,
+            default_nprobe: default_nprobe_for(num_clusters),
         }
     }
 
@@ -281,5 +320,72 @@ impl fmt::Debug for IvfPqIndexDefinition {
             self.name, self.dim, self.num_clusters, self.num_subvectors, self.metric,
         )?;
         write!(f, ")")
+    }
+}
+
+#[cfg(test)]
+mod default_nprobe_tests {
+    use super::{IvfPqIndexDefinition, default_nprobe_for};
+    use crate::vector_ops::DistanceMetric;
+
+    /// The measured knee. On a 256-cluster index at dim 128, recall@10 goes
+    /// 4 -> 0.410, 16 -> 0.575, 32 -> 0.580: it flattens at 16, and
+    /// `sqrt(256) == 16`.
+    #[test]
+    fn matches_the_measured_knee_at_256_clusters() {
+        assert_eq!(default_nprobe_for(256), 16);
+    }
+
+    /// The old flat default of 10 meant wildly different coverage at different
+    /// scales. These are the cases it got worst: a large partition barely
+    /// probed at all.
+    #[test]
+    fn scales_with_the_partition() {
+        assert_eq!(default_nprobe_for(64), 8);
+        assert_eq!(default_nprobe_for(1024), 32);
+        assert_eq!(default_nprobe_for(4096), 64);
+        assert_eq!(default_nprobe_for(16384), 128);
+    }
+
+    /// Non-square inputs floor, which is the conservative direction: probing
+    /// one cluster fewer costs a little recall, one more costs query time.
+    #[test]
+    fn non_squares_floor() {
+        assert_eq!(default_nprobe_for(255), 15);
+        assert_eq!(default_nprobe_for(257), 16);
+        assert_eq!(default_nprobe_for(100), 10);
+        assert_eq!(default_nprobe_for(99), 9);
+    }
+
+    /// Never zero: a zero nprobe would probe nothing and return no results.
+    /// `num_clusters == 0` is rejected by `validate_config`, but this must not
+    /// depend on that.
+    #[test]
+    fn never_returns_zero() {
+        assert_eq!(default_nprobe_for(0), 1);
+        assert_eq!(default_nprobe_for(1), 1);
+        assert_eq!(default_nprobe_for(2), 1);
+        assert_eq!(default_nprobe_for(3), 1);
+        assert_eq!(default_nprobe_for(4), 2);
+    }
+
+    /// The largest input must not overflow the bit-halving loop.
+    #[test]
+    fn handles_the_maximum() {
+        assert_eq!(default_nprobe_for(u32::MAX), 65535);
+    }
+
+    /// A definition picks the derived value up, and an explicit `with_nprobe`
+    /// still overrides it.
+    #[test]
+    fn definition_uses_the_derived_default() {
+        const DERIVED: IvfPqIndexDefinition =
+            IvfPqIndexDefinition::new("t", 128, 256, 32, DistanceMetric::EuclideanSq);
+        const EXPLICIT: IvfPqIndexDefinition =
+            IvfPqIndexDefinition::new("t", 128, 256, 32, DistanceMetric::EuclideanSq)
+                .with_nprobe(3);
+
+        assert_eq!(DERIVED.to_config().default_nprobe, 16);
+        assert_eq!(EXPLICIT.to_config().default_nprobe, 3);
     }
 }

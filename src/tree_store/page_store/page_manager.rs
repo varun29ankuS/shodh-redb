@@ -904,6 +904,25 @@ impl TransactionalMemory {
     /// mirror header that must not be counted as part of the B-tree layout.
     fn effective_btree_file_len(storage: &PagedCachedFile, blob_region_offset: u64) -> Result<u64> {
         if blob_region_offset > 0 {
+            // The offset comes from the primary commit slot of the database
+            // header, which a crafted file controls completely, while callers
+            // treat this value as the true length of the B-tree portion of the
+            // file. Validate that it lies within the file. The lower bound is
+            // DB_HEADER_SIZE because that constant is the size of the
+            // super-header occupying the first bytes of every database file
+            // (magic number, god byte, layout fields, and both commit slots),
+            // so a blob region cannot legitimately begin before its end.
+            let raw_len = storage.raw_file_len()?;
+            if blob_region_offset < DB_HEADER_SIZE as u64 {
+                return Err(StorageError::Corrupted(alloc::format!(
+                    "blob region offset {blob_region_offset} is smaller than the {DB_HEADER_SIZE} byte database super-header"
+                )));
+            }
+            if blob_region_offset > raw_len {
+                return Err(StorageError::Corrupted(alloc::format!(
+                    "blob region offset {blob_region_offset} exceeds the {raw_len} byte file"
+                )));
+            }
             return Ok(blob_region_offset);
         }
         let raw_len = storage.raw_file_len()?;
@@ -1985,8 +2004,11 @@ impl TransactionalMemory {
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::page_store::page_manager::INITIAL_REGIONS;
-    use crate::{Database, TableDefinition};
+    use crate::backends::InMemoryBackend;
+    use crate::tree_store::page_store::cached_file::PagedCachedFile;
+    use crate::tree_store::page_store::header::DB_HEADER_SIZE;
+    use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, TransactionalMemory};
+    use crate::{Database, StorageBackend, StorageError, TableDefinition};
 
     // Test that the region tracker expansion code works, by adding more data than fits into the initial max regions
     #[test]
@@ -2036,5 +2058,56 @@ mod test {
 
         let mut db = Database::open(tmpfile).unwrap();
         assert!(db.check_integrity().unwrap());
+    }
+
+    // A blob_region_offset read from a crafted primary commit slot must be
+    // rejected when it points outside the valid range
+    #[test]
+    fn blob_region_offset_outside_valid_range() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(2 * DB_HEADER_SIZE as u64).unwrap();
+        let storage =
+            PagedCachedFile::new(Box::new(backend), DB_HEADER_SIZE as u64, 0, 0, None).unwrap();
+
+        // Offset past the end of the file
+        let too_large = 3 * DB_HEADER_SIZE as u64;
+        match TransactionalMemory::effective_btree_file_len(&storage, too_large) {
+            Err(StorageError::Corrupted(message)) => {
+                let expected_offset = alloc::format!("blob region offset {too_large}");
+                let expected_len = alloc::format!("exceeds the {} byte file", 2 * DB_HEADER_SIZE);
+                assert!(message.contains(&expected_offset));
+                assert!(message.contains(&expected_len));
+            }
+            other => panic!("expected StorageError::Corrupted, got {other:?}"),
+        }
+
+        // Offset inside the database super-header
+        let too_small = DB_HEADER_SIZE as u64 - 1;
+        match TransactionalMemory::effective_btree_file_len(&storage, too_small) {
+            Err(StorageError::Corrupted(message)) => {
+                let expected_offset = alloc::format!("blob region offset {too_small}");
+                let expected_header =
+                    alloc::format!("smaller than the {DB_HEADER_SIZE} byte database super-header");
+                assert!(message.contains(&expected_offset));
+                assert!(message.contains(&expected_header));
+            }
+            other => panic!("expected StorageError::Corrupted, got {other:?}"),
+        }
+
+        // Over-rejection control. Every offset in between is legitimate, and
+        // the two endpoints are the ones an off-by-one would break: a blob
+        // region starting immediately after the super-header, and one at EOF,
+        // which is a blob region of zero length rather than an invalid file.
+        for offset in [
+            DB_HEADER_SIZE as u64,
+            DB_HEADER_SIZE as u64 + 1,
+            2 * DB_HEADER_SIZE as u64,
+        ] {
+            assert_eq!(
+                TransactionalMemory::effective_btree_file_len(&storage, offset).unwrap(),
+                offset,
+                "a blob region offset inside the file must be accepted"
+            );
+        }
     }
 }

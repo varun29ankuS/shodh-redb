@@ -997,31 +997,40 @@ impl TransactionalMemory {
         }
 
         for i in 0..num_regions {
-            let region_bytes = state.allocators.region_allocators[i as usize].to_vec()?;
-            if tree
-                .get(&AllocatorStateKey::Region(i))?
-                .unwrap()
-                .value()
-                .len()
-                < region_bytes.len()
-            {
+            // `num_regions` matches the header, checked above, but the loaded
+            // allocator state is separate data that a corrupt file can leave
+            // shorter. Indexing it directly panicked.
+            let Some(allocator) = state.allocators.region_allocators.get(i as usize) else {
+                return Ok(false);
+            };
+            let region_bytes = allocator.to_vec()?;
+            // A reservation that is missing entirely is the same situation as
+            // one that is too small: the state cannot be written in place, so
+            // the caller falls back. `reserve_allocator_state` should have
+            // created this key, but on a corrupt file it may not have, and
+            // unwrapping turned that into a panic:
+            //   page_manager.rs:1003: called `Option::unwrap()` on a `None` value
+            let Some(reserved) = tree.get(&AllocatorStateKey::Region(i))? else {
+                return Ok(false);
+            };
+            if reserved.value().len() < region_bytes.len() {
                 // The allocator state grew too much since we reserved space
                 return Ok(false);
             }
+            drop(reserved);
             tree.insert_inplace(&AllocatorStateKey::Region(i), &region_bytes.as_ref())?;
         }
 
         let region_tracker_bytes = state.allocators.region_tracker.to_vec()?;
-        if tree
-            .get(&AllocatorStateKey::RegionTracker)?
-            .unwrap()
-            .value()
-            .len()
-            < region_tracker_bytes.len()
-        {
+        // Same as the per-region reservation above: absent means fall back.
+        let Some(reserved) = tree.get(&AllocatorStateKey::RegionTracker)? else {
+            return Ok(false);
+        };
+        if reserved.value().len() < region_tracker_bytes.len() {
             // The allocator state grew too much since we reserved space
             return Ok(false);
         }
+        drop(reserved);
         tree.insert_inplace(
             &AllocatorStateKey::RegionTracker,
             &region_tracker_bytes.as_ref(),

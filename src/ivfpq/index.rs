@@ -358,6 +358,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             if vec.len() != dim {
                 return Err(StorageError::dimension_mismatch(&self.name, dim, vec.len()));
             }
+            // Before normalizing, not after: `l2_normalize` computes a norm by
+            // summing squares, which overflows on the same inputs.
+            validate_finite(&vec, &self.name)?;
             if self.config.metric == DistanceMetric::Cosine {
                 l2_normalize(&mut vec);
             }
@@ -488,6 +491,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             if vec.len() != dim {
                 return Err(StorageError::dimension_mismatch(&self.name, dim, vec.len()));
             }
+            // Before normalizing, not after: `l2_normalize` computes a norm by
+            // summing squares, which overflows on the same inputs.
+            validate_finite(&vec, &self.name)?;
             if self.config.metric == DistanceMetric::Cosine {
                 l2_normalize(&mut vec);
             }

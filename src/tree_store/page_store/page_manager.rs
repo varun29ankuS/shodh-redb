@@ -1070,7 +1070,22 @@ impl TransactionalMemory {
         for region in
             tree.range(&(AllocatorStateKey::Region(0)..=AllocatorStateKey::Region(u32::MAX)))?
         {
-            region_allocators.push(BuddyAllocator::from_bytes(region?.value())?);
+            let allocator = BuddyAllocator::from_bytes(region?.value())?;
+            // Validate before anything can allocate from it. A region whose
+            // free bitmaps overlap would hand the same page out twice; the
+            // allocator state table is a redundant cache of what the tree
+            // already encodes, so the answer is to discard it and rebuild
+            // rather than to refuse the file.
+            if let Err(error) = allocator.check_free_orders_disjoint() {
+                #[cfg(feature = "logging")]
+                warn!("Discarding the saved allocator state: {error}");
+                // Without the `logging` feature there is nowhere to report the
+                // detail; the recovery path is taken either way.
+                #[cfg(not(feature = "logging"))]
+                let _ = error;
+                return Err(StorageError::RecoveryRequired);
+            }
+            region_allocators.push(allocator);
         }
 
         let region_tracker = RegionTracker::from_bytes(
@@ -1677,9 +1692,11 @@ impl TransactionalMemory {
         // defect in the tracking. Asserting it there only reports that the
         // input was corrupt, which the fuzzer already knows.
         //
-        // The real fix is to reject an inconsistent allocator state when it is
-        // loaded, so a corrupt free list cannot produce a double allocation at
-        // all. Tracked separately.
+        // `load_allocator_state` now rejects a free list whose orders overlap,
+        // so a saved state cannot produce a double allocation. What is left
+        // for this assertion to catch is a bitmap corrupted in ways that
+        // validation cannot see -- which is still a statement about the input,
+        // not about the tracking.
         #[cfg(all(debug_assertions, not(fuzzing)))]
         {
             debug_assert!(self.open_dirty_pages.lock().insert(page_number));

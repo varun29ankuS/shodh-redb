@@ -216,6 +216,117 @@ impl BuddyAllocator {
         })
     }
 
+    // A page must be free at exactly one order -- see the type comment above.
+    // Nothing enforces that on the way in: `from_bytes` reads the free bitmaps
+    // straight off disk and checks only their framing. If the same physical
+    // page is free at two orders, the allocator hands it out twice, and the
+    // second caller gets a `PageMut` over bytes the first one is still
+    // writing. A debug build trips the `open_dirty_pages` assertion in
+    // `allocate_helper`; a release build has no assertion there and corrupts
+    // the database silently. So this has to be checked before anything is
+    // allocated from the state, not after.
+    //
+    // Each free block is expanded to order-0 granularity and accumulated. A
+    // bit that is already claimed means two blocks cover the same page. Every
+    // iteration of the inner loop either claims fresh bits or returns, so the
+    // total work is bounded by `self.len` however large the on-disk orders
+    // claim to be -- a crafted image cannot turn this into a long scan.
+    pub(crate) fn check_free_orders_disjoint(&self) -> Result<(), crate::StorageError> {
+        let mut claimed = vec![0u64; (self.len as usize).div_ceil(64)];
+        let len = u64::from(self.len);
+
+        for (order, bitmap) in self.free.iter().enumerate() {
+            let order = u32::try_from(order).map_err(|_| {
+                crate::StorageError::Corrupted(alloc::format!(
+                    "BuddyAllocator: order {order} is out of range"
+                ))
+            })?;
+            // A block at this order spans 2^order pages. Past order 63 the
+            // span is unrepresentable, and anything at or above order 32
+            // already exceeds the u32 page space, so no free bit at such an
+            // order can name a real block. Saturating keeps the range check
+            // below as the single place that rejects them.
+            let block_pages = 1u64.checked_shl(order).unwrap_or(u64::MAX);
+            let bitmap_len = u64::from(bitmap.len());
+
+            for (word_index, word) in bitmap.leaf_words().iter().enumerate() {
+                let first_bit = (word_index as u64) * 64;
+                if first_bit >= bitmap_len {
+                    break;
+                }
+                // Bits past the bitmap's length are padding. `to_vec` leaves
+                // them set, but a crafted image can zero them to invent free
+                // pages, so mask them back to allocated rather than trusting
+                // what is on disk.
+                let live = bitmap_len - first_bit;
+                let mask = if live >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << live) - 1
+                };
+                // A clear bit is a free page.
+                let mut free_bits = !word & mask;
+
+                while free_bits != 0 {
+                    let bit = free_bits.trailing_zeros();
+                    free_bits &= free_bits - 1;
+                    let page = first_bit + u64::from(bit);
+
+                    let start = page.checked_mul(block_pages);
+                    let end = start.and_then(|start| start.checked_add(block_pages));
+                    let (Some(start), Some(end)) = (start, end) else {
+                        return Err(crate::StorageError::Corrupted(alloc::format!(
+                            "BuddyAllocator: free page {page} at order {order} overflows the page space"
+                        )));
+                    };
+                    if end > len {
+                        return Err(crate::StorageError::Corrupted(alloc::format!(
+                            "BuddyAllocator: free block {start}..{end} at order {order} extends past the {len} pages in the region"
+                        )));
+                    }
+                    Self::claim_pages(&mut claimed, start, end, order)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Marks `start..end` in the order-0 accumulator, rejecting any page that
+    // some earlier block already claimed. Whole words at a time, so the cost
+    // is proportional to the pages covered divided by 64 rather than to the
+    // block count.
+    fn claim_pages(
+        claimed: &mut [u64],
+        start: u64,
+        end: u64,
+        order: u32,
+    ) -> Result<(), crate::StorageError> {
+        let mut bit = start;
+        while bit < end {
+            // `end <= self.len` was checked by the caller and `claimed` holds
+            // one word per 64 pages, so this index is in bounds.
+            let word = (bit / 64) as usize;
+            let offset = bit % 64;
+            let span = min(64 - offset, end - bit);
+            let mask = if span == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << span) - 1) << offset
+            };
+
+            if claimed[word] & mask != 0 {
+                return Err(crate::StorageError::Corrupted(alloc::format!(
+                    "BuddyAllocator: free block {start}..{end} at order {order} overlaps a page that is already free at another order"
+                )));
+            }
+            claimed[word] |= mask;
+            bit += span;
+        }
+
+        Ok(())
+    }
+
     #[inline]
     pub(crate) fn highest_free_order(&self) -> Option<u8> {
         (0..=self.max_order)
@@ -712,5 +823,88 @@ mod header_validation_test {
         let mut bytes = serialized();
         bytes[4..8].copy_from_slice(&256u32.to_le_bytes());
         assert!(BuddyAllocator::from_bytes(&bytes).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod disjoint_free_test {
+    use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
+
+    // The greedy decomposition in `new()` legitimately leaves blocks free at
+    // several different orders at once; only *overlapping* blocks are illegal.
+    // Sizes that are not powers of two are the ones that exercise that, since
+    // they cannot be covered by a single top-order block.
+    #[test]
+    fn legal_states_survive_a_round_trip() {
+        for num_pages in [1u32, 2, 3, 63, 64, 65, 100, 255, 1000, 4096] {
+            let allocator = BuddyAllocator::new(num_pages, num_pages);
+            allocator
+                .check_free_orders_disjoint()
+                .unwrap_or_else(|error| panic!("fresh {num_pages}-page region: {error:?}"));
+
+            let bytes = allocator.to_vec().unwrap();
+            let reloaded = BuddyAllocator::from_bytes(&bytes).unwrap();
+            reloaded
+                .check_free_orders_disjoint()
+                .unwrap_or_else(|error| panic!("reloaded {num_pages}-page region: {error:?}"));
+        }
+    }
+
+    // A partially allocated region splits high-order blocks into lower-order
+    // ones, which is the state most of a database's lifetime is spent in.
+    #[test]
+    fn a_partially_allocated_region_is_still_disjoint() {
+        let mut allocator = BuddyAllocator::new(1000, 1000);
+        for order in [0u8, 3, 0, 5, 2, 7, 0] {
+            allocator.alloc(order).unwrap().unwrap();
+        }
+        allocator.check_free_orders_disjoint().unwrap();
+
+        let bytes = allocator.to_vec().unwrap();
+        BuddyAllocator::from_bytes(&bytes)
+            .unwrap()
+            .check_free_orders_disjoint()
+            .unwrap();
+    }
+
+    // The state behind the double-allocation reports: page 0 is free as a
+    // single page *and* as part of a larger block. Allocating twice from this
+    // hands out two `PageMut` views over the same bytes.
+    #[test]
+    fn a_page_free_at_two_orders_is_rejected() {
+        let mut allocator = BuddyAllocator::new(256, 256);
+        // Take the whole region, then hand back page 0 at two different orders.
+        let page = allocator.alloc(allocator.get_max_order()).unwrap().unwrap();
+        assert_eq!(page, 0);
+        allocator.check_free_orders_disjoint().unwrap();
+
+        allocator.free[0].clear(0).unwrap();
+        allocator.check_free_orders_disjoint().unwrap();
+        allocator.free[4].clear(0).unwrap();
+
+        let error = allocator.check_free_orders_disjoint().unwrap_err();
+        assert!(
+            format!("{error:?}").contains("already free at another order"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    // The overlap need not start at the same page: an order-4 block covers
+    // sixteen order-0 pages, so a single page free anywhere inside it collides.
+    #[test]
+    fn an_overlap_inside_a_larger_block_is_rejected() {
+        let mut allocator = BuddyAllocator::new(256, 256);
+        allocator.alloc(allocator.get_max_order()).unwrap().unwrap();
+
+        allocator.free[4].clear(1).unwrap();
+        allocator.check_free_orders_disjoint().unwrap();
+        // Page 19 sits inside the order-4 block covering pages 16..32.
+        allocator.free[0].clear(19).unwrap();
+
+        let error = allocator.check_free_orders_disjoint().unwrap_err();
+        assert!(
+            format!("{error:?}").contains("already free at another order"),
+            "unexpected error: {error:?}"
+        );
     }
 }

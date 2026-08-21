@@ -599,9 +599,11 @@ impl ReadOnlyDatabase {
         let mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
         // we can just load the allocator state from there. Otherwise, we need a full repair
-        if let Some(tree) = Database::get_allocator_state_table(&mem)? {
-            mem.load_allocator_state(&tree)?;
-        } else {
+        // `load_allocator_state` reports `RecoveryRequired` when the saved
+        // state is unusable -- stale, or with free lists that would hand the
+        // same page out twice. That is a rebuild request, not a broken file,
+        // but a read-only open has no way to rebuild.
+        if !Database::try_load_allocator_state(&mem)? {
             #[cfg(feature = "logging")]
             warn!(
                 "Database {:?} not shutdown cleanly. Repair required",
@@ -2103,10 +2105,9 @@ impl Database {
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
         // we can just load the allocator state from there. Otherwise, we need a full repair
-        if let Some(tree) = Self::get_allocator_state_table(&mem)? {
+        if Self::try_load_allocator_state(&mem)? {
             #[cfg(feature = "logging")]
             info!("Found valid allocator state, full repair not needed");
-            mem.load_allocator_state(&tree)?;
             #[cfg(debug_assertions)]
             Self::mark_allocated_page_for_debug(&mut mem)?;
         } else {
@@ -2198,6 +2199,23 @@ impl Database {
         }
 
         Ok(db)
+    }
+
+    // Loads the saved allocator state if there is a usable one, reporting
+    // whether it was used. A `RecoveryRequired` result means the state is
+    // present but cannot be trusted: it is a redundant cache of what the tree
+    // already encodes, so the caller rebuilds from the tree instead of
+    // failing the open. Any other error is a real storage failure and
+    // propagates.
+    fn try_load_allocator_state(mem: &Arc<TransactionalMemory>) -> Result<bool> {
+        let Some(tree) = Self::get_allocator_state_table(mem)? else {
+            return Ok(false);
+        };
+        match mem.load_allocator_state(&tree) {
+            Ok(()) => Ok(true),
+            Err(StorageError::RecoveryRequired) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     fn get_allocator_state_table(

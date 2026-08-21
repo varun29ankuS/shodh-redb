@@ -55,6 +55,14 @@ impl BtreeBitmap {
         }
     }
 
+    // Leaf-level words, in ascending bit order: bit `b` is word `b / 64`,
+    // mask `1 << (b % 64)`. A set bit is an allocated page. Bits at or past
+    // `len()` are padding and carry no meaning, so a caller scanning words
+    // must mask the final partial word itself.
+    pub(crate) fn leaf_words(&self) -> &[u64] {
+        self.get_level(self.get_height() - 1).words()
+    }
+
     fn get_level(&self, i: u32) -> &U64GroupedBitmap {
         assert!(i < self.get_height());
         &self.heights[i as usize]
@@ -396,6 +404,10 @@ impl U64GroupedBitmap {
         }
 
         Ok(Self { len, data })
+    }
+
+    pub fn words(&self) -> &[u64] {
+        &self.data
     }
 
     fn data_index_of(bit: u32) -> (usize, usize) {

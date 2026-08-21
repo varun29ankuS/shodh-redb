@@ -142,6 +142,50 @@ fn magnitude_limit(dim: usize) -> f32 {
     crate::vector_ops::sqrt_f32(f32::MAX / dim_f) / 2.0
 }
 
+/// Validate that a vector is finite and small enough for distances between
+/// vectors to stay representable.
+///
+/// Checking `is_finite()` alone is not enough. Squared Euclidean distance
+/// sums `(a - b)^2` over `dim` dimensions, so two perfectly finite vectors
+/// whose components differ by 3e38 produce `inf`, and at high dimension the
+/// true value is not representable in f32 at any precision -- 1536
+/// dimensions of 1e38 is about 1e79. An `inf` distance then flows into the
+/// top-K heap, where every comparison against it is meaningless, and into
+/// `IntAdcTable`'s min/max affine quantization, where it poisons the scale
+/// for every other candidate.
+///
+/// The bound is derived from the worst case: `dim * (2 * limit)^2` must stay
+/// below `f32::MAX`, so `limit = sqrt(f32::MAX / dim) / 2`. That is around
+/// 2.3e17 at 1536 dimensions -- astronomically larger than any real
+/// embedding, so this rejects nothing legitimate while making "distances are
+/// finite" an invariant the index can actually rely on.
+///
+/// This applies to queries as well as to stored vectors. Bounding only what
+/// is inserted is not enough: a distance is computed between a stored vector
+/// and a query, so an unbounded query overflows against perfectly valid data.
+/// `ReadOnlyIvfPqIndex` and `IvfPqIndex` are separate types, which is why
+/// this is a free function rather than an associated one.
+///
+/// Found by `fuzz_ivfpq_index`, which asserted that a search never returns
+/// a non-finite distance, and independently by `fuzz_ivfpq_kmeans`.
+fn validate_finite(vector: &[f32], name: &str) -> crate::Result<()> {
+    let limit = magnitude_limit(vector.len());
+    for (i, &v) in vector.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(StorageError::invalid_index_config(alloc::format!(
+                "IVF-PQ '{name}': vector contains non-finite value ({v}) at index {i}",
+            )));
+        }
+        if v.abs() > limit {
+            return Err(StorageError::invalid_index_config(alloc::format!(
+                "IVF-PQ '{name}': component {v} at index {i} exceeds the magnitude limit                  {limit:e} for {} dimensions; squared distances would overflow f32 and                  make search results meaningless",
+                vector.len(),
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_config(config: &IndexConfig) -> crate::Result<()> {
     if config.num_subvectors == 0 {
         return Err(StorageError::invalid_index_config(
@@ -314,6 +358,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             if vec.len() != dim {
                 return Err(StorageError::dimension_mismatch(&self.name, dim, vec.len()));
             }
+            // Before normalizing, not after: `l2_normalize` computes a norm by
+            // summing squares, which overflows on the same inputs.
+            validate_finite(&vec, &self.name)?;
             if self.config.metric == DistanceMetric::Cosine {
                 l2_normalize(&mut vec);
             }
@@ -444,6 +491,9 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             if vec.len() != dim {
                 return Err(StorageError::dimension_mismatch(&self.name, dim, vec.len()));
             }
+            // Before normalizing, not after: `l2_normalize` computes a norm by
+            // summing squares, which overflows on the same inputs.
+            validate_finite(&vec, &self.name)?;
             if self.config.metric == DistanceMetric::Cosine {
                 l2_normalize(&mut vec);
             }
@@ -571,7 +621,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                 vector.len(),
             ));
         }
-        Self::validate_finite(vector, &self.name)?;
+        validate_finite(vector, &self.name)?;
 
         let vec_owned;
         let vec_ref = if self.config.metric == DistanceMetric::Cosine {
@@ -700,7 +750,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
             if vec.len() != dim {
                 return Err(StorageError::dimension_mismatch(&self.name, dim, vec.len()));
             }
-            Self::validate_finite(&vec, &self.name)?;
+            validate_finite(&vec, &self.name)?;
             if metric == DistanceMetric::Cosine {
                 l2_normalize(&mut vec);
             }
@@ -860,6 +910,7 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
                 query.len(),
             ));
         }
+        validate_finite(query, &self.name)?;
 
         let centroids = self.load_centroids()?;
         let codebooks = self.load_codebooks()?;
@@ -1008,44 +1059,6 @@ impl<'txn, T: StorageWrite> IvfPqIndex<'txn, T> {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
-
-    /// Validate that a vector is finite and small enough for distances between
-    /// vectors to stay representable.
-    ///
-    /// Checking `is_finite()` alone is not enough. Squared Euclidean distance
-    /// sums `(a - b)^2` over `dim` dimensions, so two perfectly finite vectors
-    /// whose components differ by 3e38 produce `inf`, and at high dimension the
-    /// true value is not representable in f32 at any precision -- 1536
-    /// dimensions of 1e38 is about 1e79. An `inf` distance then flows into the
-    /// top-K heap, where every comparison against it is meaningless, and into
-    /// `IntAdcTable`'s min/max affine quantization, where it poisons the scale
-    /// for every other candidate.
-    ///
-    /// The bound is derived from the worst case: `dim * (2 * limit)^2` must stay
-    /// below `f32::MAX`, so `limit = sqrt(f32::MAX / dim) / 2`. That is around
-    /// 2.3e17 at 1536 dimensions -- astronomically larger than any real
-    /// embedding, so this rejects nothing legitimate while making "distances are
-    /// finite" an invariant the index can actually rely on.
-    ///
-    /// Found by `fuzz_ivfpq_index`, which asserted that a search never returns
-    /// a non-finite distance, and independently by `fuzz_ivfpq_kmeans`.
-    fn validate_finite(vector: &[f32], name: &str) -> crate::Result<()> {
-        let limit = magnitude_limit(vector.len());
-        for (i, &v) in vector.iter().enumerate() {
-            if !v.is_finite() {
-                return Err(StorageError::invalid_index_config(alloc::format!(
-                    "IVF-PQ '{name}': vector contains non-finite value ({v}) at index {i}",
-                )));
-            }
-            if v.abs() > limit {
-                return Err(StorageError::invalid_index_config(alloc::format!(
-                    "IVF-PQ '{name}': component {v} at index {i} exceeds the magnitude                      limit {limit:e} for {} dimensions; squared distances would overflow                      f32 and make search results meaningless",
-                    vector.len(),
-                )));
-            }
-        }
-        Ok(())
-    }
 
     /// Remove stale data from a previous training cycle.
     ///
@@ -1406,6 +1419,7 @@ impl ReadOnlyIvfPqIndex {
                 query.len(),
             ));
         }
+        validate_finite(query, &self.name)?;
 
         let query_owned;
         let q = if self.config.metric == DistanceMetric::Cosine {

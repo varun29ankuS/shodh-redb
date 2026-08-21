@@ -14,6 +14,7 @@
 //! If flags == 0x00: the value is stored raw (no envelope overhead).
 //! The flags byte is self-describing: decompression never needs config.
 
+use crate::tree_store::page_store::base::MAX_VALUE_LENGTH;
 use crate::{Result, StorageError};
 use alloc::borrow::Cow;
 use alloc::format;
@@ -178,10 +179,46 @@ pub(crate) fn decompress_value(data: &[u8]) -> Result<Cow<'_, [u8]>> {
     let original_size = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
     let compressed_data = &data[VALUE_ENVELOPE_SIZE..];
 
+    // `original_size` is five bytes off disk and it is a *capacity*: zstd
+    // hands it straight to `Vec::with_capacity`, which allocates before any
+    // byte of the compressed stream is examined and so before the stream can
+    // be found to be too short. A crafted envelope of 0xFFFFFFFF asks for 4GiB
+    // and aborts the process.
+    //
+    // `zstd::bulk::decompress` looks like it defends against this -- it takes
+    // `min(upper_bound(data), capacity)` -- but `upper_bound` returns `None`
+    // unless zstd's `experimental` feature is on, which it is not here, so the
+    // capacity is used verbatim.
+    //
+    // The bound is not a guess about compression ratios. `original_size` is
+    // the pre-compression length of a value, and the write path already
+    // refuses any value longer than `MAX_VALUE_LENGTH` (`table.rs` and
+    // `multimap_table.rs`). Enforcing the same limit on the way back in
+    // rejects nothing this database could have written.
+    if original_size > MAX_VALUE_LENGTH {
+        return Err(StorageError::Corrupted(format!(
+            "compressed value claims {original_size} bytes, above the {MAX_VALUE_LENGTH}-byte maximum value length"
+        )));
+    }
+
     let algo_bits = flags & 0x06; // bits 1-2
     match algo_bits {
         #[cfg(feature = "compression_lz4")]
         0x02 => {
+            // LZ4 carries its own length prefix and allocates from that, not
+            // from `original_size`, so bounding `original_size` alone leaves
+            // this path open. The two have to agree, and checking it here
+            // rather than after decompressing is what keeps the allocation
+            // bounded.
+            let (prefixed_size, _) =
+                lz4_flex::block::uncompressed_size(compressed_data).map_err(|e| {
+                    StorageError::Corrupted(format!("LZ4 value has no valid length prefix: {e}"))
+                })?;
+            if prefixed_size != original_size {
+                return Err(StorageError::Corrupted(format!(
+                    "LZ4 value length prefix says {prefixed_size} bytes but the envelope says {original_size}"
+                )));
+            }
             let decompressed =
                 lz4_flex::decompress_size_prepended(compressed_data).map_err(|e| {
                     StorageError::Corrupted(format!("LZ4 value decompression failed: {e}"))
@@ -289,5 +326,66 @@ mod tests {
         let result = decompress_value(&[]).unwrap();
         assert!(matches!(result, Cow::Borrowed(_)));
         assert!(result.is_empty());
+    }
+    /// A crafted envelope must not be able to name its own allocation size.
+    ///
+    /// `original_size` is five bytes off disk and zstd passes it straight to
+    /// `Vec::with_capacity`, so 0xFFFFFFFF asks for 4GiB before a single byte
+    /// of the (here, three-byte) payload is looked at. That is an abort, not
+    /// an error return. The bound is `MAX_VALUE_LENGTH`, which the write path
+    /// already enforces, so nothing this database could have written is
+    /// refused.
+    #[test]
+    fn an_envelope_claiming_more_than_the_maximum_value_length_is_rejected() {
+        for algo in [0x02u8, 0x04u8] {
+            let mut envelope = alloc::vec![VALUE_FLAG_COMPRESSED | algo];
+            envelope.extend_from_slice(&u32::MAX.to_le_bytes());
+            envelope.extend_from_slice(&[0u8, 0, 0]);
+
+            let error = decompress_value(&envelope).unwrap_err();
+            assert!(
+                format!("{error:?}").contains("maximum value length"),
+                "algo {algo:#04x}: unexpected error {error:?}"
+            );
+        }
+    }
+
+    /// LZ4 allocates from its own length prefix rather than from
+    /// `original_size`, so the envelope bound alone does not cover it. The two
+    /// have to agree, and the check has to happen before decompression.
+    #[cfg(feature = "compression_lz4")]
+    #[test]
+    fn an_lz4_length_prefix_disagreeing_with_the_envelope_is_rejected() {
+        let data = make_compressible_value(4096);
+        let mut envelope = compress_value(&data, CompressionConfig::Lz4);
+        assert_eq!(envelope[0] & 0x06, 0x02, "expected an LZ4 value");
+
+        // Round trips before tampering, so the fixture is sound.
+        assert_eq!(decompress_value(&envelope).unwrap().as_ref(), &data[..]);
+
+        // Overwrite LZ4's own 4-byte prefix, which sits after the envelope.
+        let prefix = VALUE_ENVELOPE_SIZE;
+        envelope[prefix..prefix + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let error = decompress_value(&envelope).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("length prefix"),
+            "unexpected error {error:?}"
+        );
+    }
+
+    /// The bound must not reject a value the database would actually store.
+    #[test]
+    fn an_ordinary_compressed_value_still_round_trips() {
+        let data = make_compressible_value(64 * 1024);
+        for config in [
+            #[cfg(feature = "compression_lz4")]
+            CompressionConfig::Lz4,
+            #[cfg(feature = "compression_zstd")]
+            CompressionConfig::Zstd { level: 3 },
+        ] {
+            let envelope = compress_value(&data, config);
+            assert_eq!(decompress_value(&envelope).unwrap().as_ref(), &data[..]);
+        }
     }
 }

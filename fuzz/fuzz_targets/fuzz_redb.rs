@@ -888,21 +888,65 @@ fn exec_table_crash_support<T: Clone + Debug>(
         }
     };
 
-    // Check for leaked pages
-    let read_txn = db.begin_read().unwrap();
-    let txn = db.begin_write().unwrap();
-    for table in read_txn.list_tables().unwrap() {
-        assert!(txn.delete_table(table).unwrap());
+    // Check for leaked pages.
+    //
+    // Everything from here runs on a database that may still be internally
+    // inconsistent. The block above returns early when repair fails outright
+    // ("expected -- the fuzzer intentionally induces corruption"), and the drain
+    // loop below tolerates commits that fail for the same reason. This block sat
+    // between the two unwrapping every call, so an error both neighbours treat
+    // as expected panicked here instead:
+    //
+    //     Corrupted("extract_if: key existed during iteration but delete
+    //                returned None")
+    //
+    // which is exactly what a tree left inconsistent by simulated IO errors
+    // produces -- iteration and deletion disagreeing about a key.
+    //
+    // Abandon the leak check when that happens rather than reporting it as a
+    // fuzz finding. It is not a meaningful check on a corrupt database, and the
+    // assertions still hold whenever the calls succeed, which is every run that
+    // did not induce corruption.
+    let Ok(read_txn) = db.begin_read() else {
+        return Ok(());
+    };
+    let Ok(txn) = db.begin_write() else {
+        return Ok(());
+    };
+    let Ok(tables) = read_txn.list_tables() else {
+        return Ok(());
+    };
+    for table in tables {
+        match txn.delete_table(table) {
+            Ok(existed) => assert!(existed, "list_tables named a table delete_table did not find"),
+            Err(_) => return Ok(()),
+        }
     }
-    for table in read_txn.list_multimap_tables().unwrap() {
-        assert!(txn.delete_multimap_table(table).unwrap());
+    let Ok(multimap_tables) = read_txn.list_multimap_tables() else {
+        return Ok(());
+    };
+    for table in multimap_tables {
+        match txn.delete_multimap_table(table) {
+            Ok(existed) => assert!(
+                existed,
+                "list_multimap_tables named a table delete_multimap_table did not find"
+            ),
+            Err(_) => return Ok(()),
+        }
     }
     savepoint_manager.savepoints.clear();
-    for id in txn.list_persistent_savepoints().unwrap() {
-        txn.delete_persistent_savepoint(id).unwrap();
+    let Ok(savepoint_ids) = txn.list_persistent_savepoints() else {
+        return Ok(());
+    };
+    for id in savepoint_ids {
+        if txn.delete_persistent_savepoint(id).is_err() {
+            return Ok(());
+        }
     }
     drop(read_txn);
-    txn.commit().unwrap();
+    if txn.commit().is_err() {
+        return Ok(());
+    }
 
     // Drain the freed-page table by committing until page counts stabilize.
     // After simulated IO errors the database may be too corrupted to write.

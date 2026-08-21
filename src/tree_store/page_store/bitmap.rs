@@ -127,7 +127,21 @@ impl BtreeBitmap {
         }
 
         let mut metadata = END_OFFSETS;
-        let mut data_start = END_OFFSETS + (height as usize) * size_of::<u32>();
+        // `height` comes off disk, and `usize` is 32 bits on wasm32/WASI and
+        // Cortex-M. `height * 4` therefore overflows there for a large value,
+        // where on x86-64 it cannot -- so this panicked only under WASI:
+        //   bitmap.rs:130: attempt to multiply with overflow
+        // Reject rather than wrap: a height whose offset table cannot even be
+        // addressed is corrupt by definition.
+        let Some(data_start) = (height as usize)
+            .checked_mul(size_of::<u32>())
+            .and_then(|table| END_OFFSETS.checked_add(table))
+        else {
+            return Err(crate::StorageError::Corrupted(alloc::format!(
+                "BtreeBitmap: height {height} overflows the offset table size"
+            )));
+        };
+        let mut data_start = data_start;
 
         let mut heights = vec![];
         for _ in 0..height {

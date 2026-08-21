@@ -128,6 +128,17 @@ impl BuddyAllocator {
             ));
         }
         let max_order = data[MAX_ORDER_OFFSET];
+        // `max_order` is a u8 read straight off disk. `new()` derives it via
+        // `calculate_usable_order`, which clamps to MAX_MAX_PAGE_ORDER, so a
+        // larger value cannot come from this crate -- but nothing rejected one,
+        // and it sizes both the offset table and the `free` vector. Every
+        // `0..=self.max_order` loop and every `free[order]` index downstream
+        // then works from a bound the rest of the page store does not share.
+        if max_order > MAX_MAX_PAGE_ORDER {
+            return Err(crate::StorageError::Corrupted(alloc::format!(
+                "BuddyAllocator: max_order {max_order} exceeds the maximum {MAX_MAX_PAGE_ORDER}"
+            )));
+        }
         let num_pages = u32::from_le_bytes(
             data[NUM_PAGES_OFFSET..(NUM_PAGES_OFFSET + size_of::<u32>())]
                 .try_into()
@@ -165,6 +176,37 @@ impl BuddyAllocator {
             free.push(BtreeBitmap::from_bytes(&data[data_start..data_end])?);
             data_start = data_end;
             metadata += size_of::<u32>();
+        }
+
+        // `num_pages` is stored separately from the bitmaps it describes, so a
+        // crafted file can disagree with them. `new()` builds order 0 with
+        // exactly `num_pages` entries and halves for each higher order, so the
+        // chain is checkable. Without this, `len()` reports a count the leaf
+        // bitmap cannot back, and callers iterating `0..len()` read past it.
+        match free.first() {
+            Some(order_zero) if order_zero.len() == num_pages => {}
+            Some(order_zero) => {
+                return Err(crate::StorageError::Corrupted(alloc::format!(
+                    "BuddyAllocator: num_pages {num_pages} does not match the order-0 bitmap                      length {}",
+                    order_zero.len()
+                )));
+            }
+            None => {
+                return Err(crate::StorageError::Corrupted(
+                    "BuddyAllocator: no order-0 bitmap".into(),
+                ));
+            }
+        }
+        for order in 1..free.len() {
+            let expected = next_higher_order(free[order - 1].len());
+            if free[order].len() != expected {
+                return Err(crate::StorageError::Corrupted(alloc::format!(
+                    "BuddyAllocator: order {order} has {} entries, expected {expected} to cover                      order {} with {} entries",
+                    free[order].len(),
+                    order - 1,
+                    free[order - 1].len()
+                )));
+            }
         }
 
         Ok(Self {
@@ -601,5 +643,74 @@ mod test {
         let buddy_state_bytes = free_state_bytes + allocated_state_bytes + 21 * 2 * 4 + 8;
 
         assert!((allocator.to_vec().unwrap().len() as u64) <= buddy_state_bytes);
+    }
+}
+
+#[cfg(test)]
+mod header_validation_test {
+    use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
+    use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
+
+    /// Serialized layout: `[max_order: u8][pad; 3][len: u32][offsets][bitmaps]`.
+    fn serialized() -> Vec<u8> {
+        BuddyAllocator::new(256, 256).to_vec().unwrap()
+    }
+
+    /// A real allocator still round-trips, so the new checks are not
+    /// over-broad. This is the assertion that matters most: the whole suite
+    /// passing is what shows nothing legitimate is rejected.
+    #[test]
+    fn a_real_allocator_round_trips() {
+        let bytes = serialized();
+        let parsed = BuddyAllocator::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.len(), 256);
+        assert_eq!(parsed.get_max_order(), MAX_MAX_PAGE_ORDER.min(8));
+    }
+
+    /// `max_order` is a u8 read straight off disk. `new()` derives it through
+    /// `calculate_usable_order`, which clamps to `MAX_MAX_PAGE_ORDER`, so a
+    /// larger value cannot come from this crate -- but nothing rejected one,
+    /// and it sizes both the offset table and the `free` vector.
+    #[test]
+    fn an_out_of_range_max_order_is_rejected() {
+        for bogus in [MAX_MAX_PAGE_ORDER + 1, 64, 255] {
+            let mut bytes = serialized();
+            bytes[0] = bogus;
+            assert!(
+                BuddyAllocator::from_bytes(&bytes).is_err(),
+                "max_order {bogus} must be rejected"
+            );
+        }
+        // A legal `max_order` that disagrees with the rest of the buffer must
+        // still be an error, not a panic. The offset table was written for 9
+        // orders; claiming 21 makes `from_bytes` read past it and hand garbage
+        // lengths to `BtreeBitmap::from_bytes`. That is how the 32-bit
+        // multiply overflow in bitmap.rs was found -- on wasm32/WASI `usize`
+        // is 32 bits, so `height * 4` wrapped where it cannot on x86-64.
+        let mut bytes = serialized();
+        bytes[0] = MAX_MAX_PAGE_ORDER;
+        assert!(
+            BuddyAllocator::from_bytes(&bytes).is_err(),
+            "a max_order inconsistent with the offset table must be rejected"
+        );
+    }
+
+    /// `num_pages` is stored separately from the bitmaps it describes, so a
+    /// crafted file can disagree with them. Order 0 must have exactly
+    /// `num_pages` entries.
+    #[test]
+    fn a_num_pages_disagreeing_with_the_bitmaps_is_rejected() {
+        for bogus in [0u32, 1, 255, 257, u32::MAX] {
+            let mut bytes = serialized();
+            bytes[4..8].copy_from_slice(&bogus.to_le_bytes());
+            assert!(
+                BuddyAllocator::from_bytes(&bytes).is_err(),
+                "num_pages {bogus} against a 256-page bitmap must be rejected"
+            );
+        }
+        // The true value is accepted.
+        let mut bytes = serialized();
+        bytes[4..8].copy_from_slice(&256u32.to_le_bytes());
+        assert!(BuddyAllocator::from_bytes(&bytes).is_ok());
     }
 }

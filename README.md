@@ -326,3 +326,7 @@ Core B-tree page store and crash recovery derived from [redb](https://github.com
 [Apache License, Version 2.0](LICENSE)
 
 Copyright 2025-2026 Varun Sharma
+
+Derived from [redb](https://github.com/cberner/redb), Copyright 2018-2026
+Christopher Berner, which is dual-licensed MIT OR Apache-2.0. shodh-redb is
+distributed under Apache-2.0, as that dual licence permits.

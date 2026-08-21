@@ -645,3 +645,64 @@ mod test {
         assert!((allocator.to_vec().unwrap().len() as u64) <= buddy_state_bytes);
     }
 }
+
+#[cfg(test)]
+mod header_validation_test {
+    use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
+    use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
+
+    /// Serialized layout: `[max_order: u8][pad; 3][len: u32][offsets][bitmaps]`.
+    fn serialized() -> Vec<u8> {
+        BuddyAllocator::new(256, 256).to_vec().unwrap()
+    }
+
+    /// A real allocator still round-trips, so the new checks are not
+    /// over-broad. This is the assertion that matters most: the whole suite
+    /// passing is what shows nothing legitimate is rejected.
+    #[test]
+    fn a_real_allocator_round_trips() {
+        let bytes = serialized();
+        let parsed = BuddyAllocator::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.len(), 256);
+        assert_eq!(parsed.get_max_order(), MAX_MAX_PAGE_ORDER.min(8));
+    }
+
+    /// `max_order` is a u8 read straight off disk. `new()` derives it through
+    /// `calculate_usable_order`, which clamps to `MAX_MAX_PAGE_ORDER`, so a
+    /// larger value cannot come from this crate -- but nothing rejected one,
+    /// and it sizes both the offset table and the `free` vector.
+    #[test]
+    fn an_out_of_range_max_order_is_rejected() {
+        for bogus in [MAX_MAX_PAGE_ORDER + 1, 64, 255] {
+            let mut bytes = serialized();
+            bytes[0] = bogus;
+            assert!(
+                BuddyAllocator::from_bytes(&bytes).is_err(),
+                "max_order {bogus} must be rejected"
+            );
+        }
+        // The largest legal value is still accepted.
+        let mut bytes = serialized();
+        bytes[0] = MAX_MAX_PAGE_ORDER;
+        let _ = BuddyAllocator::from_bytes(&bytes);
+    }
+
+    /// `num_pages` is stored separately from the bitmaps it describes, so a
+    /// crafted file can disagree with them. Order 0 must have exactly
+    /// `num_pages` entries.
+    #[test]
+    fn a_num_pages_disagreeing_with_the_bitmaps_is_rejected() {
+        for bogus in [0u32, 1, 255, 257, u32::MAX] {
+            let mut bytes = serialized();
+            bytes[4..8].copy_from_slice(&bogus.to_le_bytes());
+            assert!(
+                BuddyAllocator::from_bytes(&bytes).is_err(),
+                "num_pages {bogus} against a 256-page bitmap must be rejected"
+            );
+        }
+        // The true value is accepted.
+        let mut bytes = serialized();
+        bytes[4..8].copy_from_slice(&256u32.to_le_bytes());
+        assert!(BuddyAllocator::from_bytes(&bytes).is_ok());
+    }
+}

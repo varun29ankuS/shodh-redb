@@ -382,6 +382,13 @@ impl TransactionalMemory {
             )
             .into());
         }
+        // The header has been fully resolved at this point (intact primary
+        // slot, fallback secondary, or EOF mirror). This is where
+        // header-controlled blob metadata first enters the engine, so the
+        // blob region recorded in either commit slot is validated against the
+        // real file once here; later readers inherit the verdict.
+        Self::validate_blob_regions(&storage, &header, repair_info)?;
+
         // The blob region (if any) is appended after the B-tree region.
         // blob_region_offset marks where the B-tree region ends and blobs begin.
         // Exclude the EOF mirror (if present) from the B-tree file length.
@@ -520,6 +527,10 @@ impl TransactionalMemory {
         }
 
         let mut header_valid = !repair_info.primary_corrupted;
+
+        // Same ingestion-time validation as `new()`: the verify path must not
+        // compute layouts from a blob region that runs past the file either.
+        Self::validate_blob_regions(&storage, &header, repair_info)?;
 
         // Exclude EOF mirror from the effective file length used for layout calculations
         let blob_region_offset = header.primary_slot().blob_region_offset;
@@ -751,6 +762,10 @@ impl TransactionalMemory {
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
         let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+        // The re-parsed header is installed as engine state below, so its
+        // blob regions get the same ingestion-time validation as in `new()`.
+        Self::validate_blob_regions(&self.storage, &header, repair_info)?;
+
         // Note: recovery_required is typically true here because this is called
         // from check_integrity() after the database is already open and a write
         // transaction has begun (which sets recovery_required).
@@ -933,6 +948,92 @@ impl TransactionalMemory {
             }
         }
         Ok(raw_len)
+    }
+    /// Validate one commit slot's blob region against the real file.
+    ///
+    /// The blob region is the half-open range
+    /// `[blob_region_offset, blob_region_offset + blob_region_length)` and
+    /// must lie within the actual file. The offset bounds repeat the check in
+    /// `effective_btree_file_len` so both commit slots get the same
+    /// treatment: that function only ever sees the primary slot, while the
+    /// secondary slot can become authoritative later through
+    /// `swap_primary_slot` during repair and commit.
+    fn validate_blob_region(
+        storage: &PagedCachedFile,
+        blob_region_offset: u64,
+        blob_region_length: u64,
+    ) -> Result {
+        // A zero offset is the established "no blob region" sentinel. Every
+        // consumer gates on the offset (`effective_btree_file_len`,
+        // `get_blob_state`, the relocation check in `grow`) and never reads
+        // the length on its own, so a non-zero length paired with a zero
+        // offset is inert metadata rather than a dereferenceable range. It is
+        // accepted unchanged.
+        if blob_region_offset == 0 {
+            return Ok(());
+        }
+        let raw_len = storage.raw_file_len()?;
+        if blob_region_offset < DB_HEADER_SIZE as u64 {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "blob region offset {blob_region_offset} is smaller than the {DB_HEADER_SIZE} byte database super-header"
+            )));
+        }
+        if blob_region_offset > raw_len {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "blob region offset {blob_region_offset} exceeds the {raw_len} byte file"
+            )));
+        }
+        // The sum can wrap a u64: an offset near the file end plus a length
+        // near 2^64 wraps back below raw_len, which an unchecked comparison
+        // would accept as a region inside the file.
+        let Some(region_end) = blob_region_offset.checked_add(blob_region_length) else {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "blob region length {blob_region_length} at offset {blob_region_offset} overflows u64"
+            )));
+        };
+        if region_end > raw_len {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "blob region length {blob_region_length} at offset {blob_region_offset} ends at {region_end}, exceeding the {raw_len} byte file"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validate the blob regions recorded in both commit slots of a freshly
+    /// parsed database header.
+    ///
+    /// Called exactly where a header read from disk first enters the engine,
+    /// before it drives layout decisions or is installed as state, so every
+    /// later reader of `blob_region_length` inherits this verdict instead of
+    /// re-checking it at each use.
+    ///
+    /// A slot whose checksum did not verify is skipped. That is not a
+    /// weakening: a torn commit slot is a normal crash outcome and the whole
+    /// two-slot design exists to survive it. `pick_primary_for_repair`
+    /// already keys off exactly these flags -- it swaps to the secondary only
+    /// `if secondary_newer && !repair_info.secondary_corrupted`, and under
+    /// two-phase commit it refuses to look at the secondary at all. Rejecting
+    /// the database because a slot the engine has already decided not to
+    /// trust contains garbage would turn a recoverable crash into an
+    /// unopenable file. A slot only carries blob metadata from V5 onwards,
+    /// and a database reaches V5 only once the blob store is in use, so this
+    /// is reachable by any blob-using database that crashes mid-commit.
+    fn validate_blob_regions(
+        storage: &PagedCachedFile,
+        header: &DatabaseHeader,
+        repair_info: HeaderRepairInfo,
+    ) -> Result {
+        let slots = [
+            (header.primary_slot(), repair_info.primary_corrupted),
+            (header.secondary_slot(), repair_info.secondary_corrupted),
+        ];
+        for (slot, corrupted) in slots {
+            if corrupted {
+                continue;
+            }
+            Self::validate_blob_region(storage, slot.blob_region_offset, slot.blob_region_length)?;
+        }
+        Ok(())
     }
 
     /// Write a redundant copy of the database header at the end of the data region.
@@ -1988,9 +2089,14 @@ impl TransactionalMemory {
 #[cfg(test)]
 mod test {
     use crate::backends::InMemoryBackend;
+    use crate::transaction_tracker::TransactionId;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
-    use crate::tree_store::page_store::header::DB_HEADER_SIZE;
-    use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, TransactionalMemory};
+    use crate::tree_store::page_store::compression::CompressionConfig;
+    use crate::tree_store::page_store::header::{DB_HEADER_SIZE, DatabaseHeader, HeaderRepairInfo};
+    use crate::tree_store::page_store::layout::DatabaseLayout;
+    use crate::tree_store::page_store::page_manager::{
+        INITIAL_REGIONS, NO_HEADER, TransactionalMemory,
+    };
     use crate::{Database, StorageBackend, StorageError, TableDefinition};
 
     // Test that the region tracker expansion code works, by adding more data than fits into the initial max regions
@@ -2091,6 +2197,171 @@ mod test {
                 offset,
                 "a blob region offset inside the file must be accepted"
             );
+        }
+    }
+
+    // A commit slot that failed its checksum holds arbitrary bytes. The engine
+    // is designed to survive that -- `pick_primary_for_repair` recovers from
+    // the other slot -- so validation must skip it rather than refuse to open
+    // a file that is still recoverable.
+    #[test]
+    fn a_corrupted_slot_is_not_validated() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(2 * DB_HEADER_SIZE as u64).unwrap();
+        let storage =
+            PagedCachedFile::new(Box::new(backend), DB_HEADER_SIZE as u64, 0, 0, None).unwrap();
+
+        let layout = DatabaseLayout::calculate(1024 * 1024, 4 * 1024, NO_HEADER, 1024);
+        let mut header =
+            DatabaseHeader::new(layout, TransactionId::new(0), CompressionConfig::default());
+
+        // The shape a torn secondary slot leaves behind in a V5 database.
+        header.secondary_slot_mut().blob_region_offset = u64::MAX;
+        header.secondary_slot_mut().blob_region_length = u64::MAX;
+
+        let secondary_torn = HeaderRepairInfo {
+            primary_corrupted: false,
+            secondary_corrupted: true,
+            invalid_magic_number: false,
+        };
+        TransactionalMemory::validate_blob_regions(&storage, &header, secondary_torn)
+            .expect("a slot the engine has already decided not to trust must not fail the open");
+
+        // The same bytes in a slot that DID verify are still rejected, so the
+        // skip is scoped to untrusted slots rather than disabling the check.
+        let intact = HeaderRepairInfo {
+            primary_corrupted: false,
+            secondary_corrupted: false,
+            invalid_magic_number: false,
+        };
+        assert!(TransactionalMemory::validate_blob_regions(&storage, &header, intact).is_err());
+    }
+
+    // A blob_region_length read from a crafted commit slot must be rejected
+    // when the described region would run past the end of the real file,
+    // including through u64 overflow of offset + length
+    #[test]
+    fn blob_region_length_outside_valid_range() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(2 * DB_HEADER_SIZE as u64).unwrap();
+        let storage =
+            PagedCachedFile::new(Box::new(backend), DB_HEADER_SIZE as u64, 0, 0, None).unwrap();
+
+        // The region ends one byte past EOF
+        let one_too_many = 2 * DB_HEADER_SIZE as u64 - DB_HEADER_SIZE as u64 + 1;
+        match TransactionalMemory::validate_blob_region(
+            &storage,
+            DB_HEADER_SIZE as u64,
+            one_too_many,
+        ) {
+            Err(StorageError::Corrupted(message)) => {
+                let expected_len = alloc::format!("blob region length {one_too_many}");
+                let expected_file =
+                    alloc::format!("exceeding the {} byte file", 2 * DB_HEADER_SIZE);
+                assert!(message.contains(&expected_len));
+                assert!(message.contains(&expected_file));
+            }
+            other => panic!("expected StorageError::Corrupted, got {other:?}"),
+        }
+
+        // offset + length wrapping u64 must be caught by checked arithmetic:
+        // the wrapped end would land back inside the file
+        match TransactionalMemory::validate_blob_region(&storage, DB_HEADER_SIZE as u64, u64::MAX) {
+            Err(StorageError::Corrupted(message)) => {
+                assert!(message.contains("overflows u64"));
+            }
+            other => panic!("expected StorageError::Corrupted, got {other:?}"),
+        }
+
+        // Over-rejection control. A region ending exactly at EOF is the
+        // largest legitimate shape; smaller ones must pass untouched.
+        assert!(
+            TransactionalMemory::validate_blob_region(
+                &storage,
+                DB_HEADER_SIZE as u64,
+                DB_HEADER_SIZE as u64,
+            )
+            .is_ok(),
+            "a blob region ending exactly at EOF must be accepted"
+        );
+    }
+
+    // A zero blob_region_offset is the "no blob region" sentinel: every
+    // consumer gates on the offset, so a length stored next to it is inert
+    // and must not be rejected
+    #[test]
+    fn blob_region_zero_offset_with_length_is_inert() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(2 * DB_HEADER_SIZE as u64).unwrap();
+        let storage =
+            PagedCachedFile::new(Box::new(backend), DB_HEADER_SIZE as u64, 0, 0, None).unwrap();
+
+        for length in [0u64, 1, u64::MAX] {
+            assert!(
+                TransactionalMemory::validate_blob_region(&storage, 0, length).is_ok(),
+                "a zero offset claims no blob region, so any length is inert"
+            );
+        }
+
+        // Zero-length regions at an interior offset and exactly at EOF are
+        // legitimate endpoints as well
+        assert!(
+            TransactionalMemory::validate_blob_region(&storage, DB_HEADER_SIZE as u64, 0).is_ok()
+        );
+        assert!(
+            TransactionalMemory::validate_blob_region(&storage, 2 * DB_HEADER_SIZE as u64, 0)
+                .is_ok()
+        );
+    }
+
+    // Both commit slots are validated: the secondary slot can become
+    // authoritative through swap_primary_slot during repair and commit, so a
+    // crafted value there is as dangerous as one in the primary slot
+    #[test]
+    fn blob_region_validated_in_both_commit_slots() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(2 * DB_HEADER_SIZE as u64).unwrap();
+        let storage =
+            PagedCachedFile::new(Box::new(backend), DB_HEADER_SIZE as u64, 0, 0, None).unwrap();
+
+        let layout = DatabaseLayout::calculate(
+            1024 * 1024,
+            4 * 1024,
+            NO_HEADER,
+            1024, // page size; the layout content is irrelevant to validation
+        );
+        let mut header =
+            DatabaseHeader::new(layout, TransactionId::new(0), CompressionConfig::default());
+
+        // Both slots verified their checksum, so both get validated.
+        let intact = HeaderRepairInfo {
+            primary_corrupted: false,
+            secondary_corrupted: false,
+            invalid_magic_number: false,
+        };
+
+        // A clean header passes
+        TransactionalMemory::validate_blob_regions(&storage, &header, intact).unwrap();
+
+        // A crafted secondary slot is rejected
+        header.secondary_slot_mut().blob_region_offset = DB_HEADER_SIZE as u64;
+        header.secondary_slot_mut().blob_region_length = u64::MAX;
+        match TransactionalMemory::validate_blob_regions(&storage, &header, intact) {
+            Err(StorageError::Corrupted(message)) => assert!(message.contains("overflows u64")),
+            other => panic!("expected StorageError::Corrupted, got {other:?}"),
+        }
+
+        // A crafted primary slot is rejected while the secondary stays clean
+        header.secondary_slot_mut().blob_region_length = 0;
+        header.swap_primary_slot();
+        header.secondary_slot_mut().blob_region_offset = 3 * DB_HEADER_SIZE as u64;
+        header.secondary_slot_mut().blob_region_length = 0;
+        match TransactionalMemory::validate_blob_regions(&storage, &header, intact) {
+            Err(StorageError::Corrupted(message)) => {
+                let expected = alloc::format!("blob region offset {}", 3 * DB_HEADER_SIZE);
+                assert!(message.contains(&expected));
+            }
+            other => panic!("expected StorageError::Corrupted, got {other:?}"),
         }
     }
 }

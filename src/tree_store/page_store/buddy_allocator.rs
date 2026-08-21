@@ -128,6 +128,17 @@ impl BuddyAllocator {
             ));
         }
         let max_order = data[MAX_ORDER_OFFSET];
+        // `max_order` is a u8 read straight off disk. `new()` derives it via
+        // `calculate_usable_order`, which clamps to MAX_MAX_PAGE_ORDER, so a
+        // larger value cannot come from this crate -- but nothing rejected one,
+        // and it sizes both the offset table and the `free` vector. Every
+        // `0..=self.max_order` loop and every `free[order]` index downstream
+        // then works from a bound the rest of the page store does not share.
+        if max_order > MAX_MAX_PAGE_ORDER {
+            return Err(crate::StorageError::Corrupted(alloc::format!(
+                "BuddyAllocator: max_order {max_order} exceeds the maximum {MAX_MAX_PAGE_ORDER}"
+            )));
+        }
         let num_pages = u32::from_le_bytes(
             data[NUM_PAGES_OFFSET..(NUM_PAGES_OFFSET + size_of::<u32>())]
                 .try_into()
@@ -165,6 +176,37 @@ impl BuddyAllocator {
             free.push(BtreeBitmap::from_bytes(&data[data_start..data_end])?);
             data_start = data_end;
             metadata += size_of::<u32>();
+        }
+
+        // `num_pages` is stored separately from the bitmaps it describes, so a
+        // crafted file can disagree with them. `new()` builds order 0 with
+        // exactly `num_pages` entries and halves for each higher order, so the
+        // chain is checkable. Without this, `len()` reports a count the leaf
+        // bitmap cannot back, and callers iterating `0..len()` read past it.
+        match free.first() {
+            Some(order_zero) if order_zero.len() == num_pages => {}
+            Some(order_zero) => {
+                return Err(crate::StorageError::Corrupted(alloc::format!(
+                    "BuddyAllocator: num_pages {num_pages} does not match the order-0 bitmap                      length {}",
+                    order_zero.len()
+                )));
+            }
+            None => {
+                return Err(crate::StorageError::Corrupted(
+                    "BuddyAllocator: no order-0 bitmap".into(),
+                ));
+            }
+        }
+        for order in 1..free.len() {
+            let expected = next_higher_order(free[order - 1].len());
+            if free[order].len() != expected {
+                return Err(crate::StorageError::Corrupted(alloc::format!(
+                    "BuddyAllocator: order {order} has {} entries, expected {expected} to cover                      order {} with {} entries",
+                    free[order].len(),
+                    order - 1,
+                    free[order - 1].len()
+                )));
+            }
         }
 
         Ok(Self {

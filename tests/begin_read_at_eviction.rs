@@ -30,7 +30,7 @@
 
 use shodh_redb::{Database, TableDefinition};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -82,8 +82,17 @@ fn begin_read_at_survives_retention_eviction_and_durable_freeing() {
     // DATA_FREED_TABLE entries accumulate AND process_freed_pages runs
     // every commit. Many commits in a row also blow past the retention
     // window of 3, forcing pruning of T_history.
+    // The reader used to stop after a fixed number of reads, which is
+    // uncoupled from the writer's progress -- and it is the writer that drives
+    // retention pruning. On a runner where reads are cheap and durable commits
+    // are not, the reader finished before enough snapshots existed to evict
+    // T_history, so the test failed on its own setup precondition rather than
+    // on the invariant. Publishing the writer's iteration count lets the reader
+    // wait for the scenario to actually exist.
+    let writer_iters = Arc::new(AtomicU64::new(0));
     let writer_db = db.clone();
     let writer_stop = stop.clone();
+    let writer_progress = writer_iters.clone();
     let writer = thread::spawn(move || {
         let mut iter: u64 = 0;
         let large = vec![0xCDu8; 1024];
@@ -117,6 +126,7 @@ fn begin_read_at_survives_retention_eviction_and_durable_freeing() {
             }
 
             iter += 1;
+            writer_progress.store(iter, Ordering::Relaxed);
         }
     });
 
@@ -124,9 +134,17 @@ fn begin_read_at_survives_retention_eviction_and_durable_freeing() {
     // this panics inside EntryGuard::value_checked once retention prunes
     // T_history and durable process_freed_pages reclaims a page reachable
     // from the snapshot's user_root.
+    // Retention is 3 and each writer iteration makes two durable commits, so
+    // eight iterations put sixteen snapshots past T_history: far more than
+    // enough to evict it. Waiting for that AND for the reads means the reader
+    // is still walking the historical tree while process_freed_pages runs
+    // against the freed entries, which is the window under test.
+    const MIN_READS: u64 = 200;
+    const MIN_WRITER_ITERS: u64 = 8;
+
     let start = Instant::now();
     let mut reads: u64 = 0;
-    while reads < 200 && start.elapsed() < Duration::from_secs(15) {
+    while start.elapsed() < Duration::from_secs(120) {
         let table = historical_rtxn.open_table(TABLE).unwrap();
         // Walk a range covering all originally-seeded keys; the historical
         // snapshot must still see exactly the seed values.
@@ -140,10 +158,21 @@ fn begin_read_at_survives_retention_eviction_and_durable_freeing() {
         }
         assert_eq!(count, 2_000, "historical snapshot must see all seed rows");
         reads += 1;
+        if reads >= MIN_READS && writer_iters.load(Ordering::Relaxed) >= MIN_WRITER_ITERS {
+            break;
+        }
     }
 
     stop.store(true, Ordering::Relaxed);
     writer.join().expect("writer thread panicked");
+
+    // Separate the two ways the loop can end, so a slow runner reports that
+    // rather than looking like a pruning failure.
+    let iters = writer_iters.load(Ordering::Relaxed);
+    assert!(
+        reads >= MIN_READS && iters >= MIN_WRITER_ITERS,
+        "timed out before the race window was exercised: {reads} reads (need {MIN_READS}),          {iters} writer iterations (need {MIN_WRITER_ITERS})"
+    );
 
     // Confirm retention pruning actually evicted T_history during the
     // run. If it didn't, the test failed to exercise the race window.

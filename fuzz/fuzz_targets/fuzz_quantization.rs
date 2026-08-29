@@ -63,16 +63,32 @@ fuzz_target!(|op: FuzzOp| {
                     // 8-bit quantization has 255 intervals, so the worst
                     // rounding error is half an interval: range / 510.
                     let max_error = range / 510.0;
-                    // The comparison also has to absorb the f32 rounding in
-                    // quantize/dequantize itself, which is proportional to the
-                    // magnitudes involved -- not a fixed quantity. A flat
-                    // `1e-6` is right near 1.0 and meaningless at 1e38, where a
-                    // single representable step already exceeds it; this
-                    // assertion failed at range 2.55e38 on an overshoot of
-                    // 0.0035%, which is f32 noise rather than a quantizer
-                    // defect. Scale the slack with the range and keep the
-                    // absolute floor for tiny ranges.
-                    let tolerance = max_error + 16.0 * f32::EPSILON * range + 1e-6;
+                    // Two further terms are irreducible, and both have to be
+                    // in the bound or it fires on correct output.
+                    //
+                    // `dequantize` reconstructs as `min_val + code * scale`
+                    // and rounds that sum to an f32. Representable values near
+                    // a magnitude M are spaced `ulp(M)` apart, so the final
+                    // rounding costs up to `ulp(M) / 2`, i.e. at most
+                    // `M * EPSILON / 2`. That term scales with the MAGNITUDE
+                    // of the data, not with its range: a vector clustered far
+                    // from zero, where the range is small next to `min_val`,
+                    // is dominated by it and reaches very nearly 2x
+                    // `max_error`. A range-only bound therefore asserts
+                    // something no f32 implementation can satisfy, which is
+                    // why the previous `16 * EPSILON * range` form kept
+                    // firing on correct output. Pinned by the regression test
+                    // `quantize_scalar_roundtrip_error_includes_the_representation_floor`.
+                    //
+                    // The rest is f32 rounding inside the arithmetic itself:
+                    // `255.0 / range` and `range / 255.0` are rounded
+                    // separately and are not exact reciprocals, and the
+                    // subtraction, the product and the `+ 0.5` each round.
+                    // Every one of those is bounded by `range / 2^24`, so
+                    // eight of them covers all of them with margin.
+                    let magnitude = sq.min_val.abs().max(sq.max_val.abs());
+                    let tolerance =
+                        max_error + f32::EPSILON * magnitude + 8.0 * f32::EPSILON * range + 1e-6;
                     for (i, (&orig, &rest)) in v.iter().zip(restored.iter()).enumerate() {
                         let err = (orig - rest).abs();
                         assert!(

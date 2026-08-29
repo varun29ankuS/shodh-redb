@@ -290,6 +290,64 @@ fn quantize_scalar_min_equals_max_at_boundary() {
     }
 }
 
+/// `dequantize` reconstructs a value as `min_val + code * scale`, and that
+/// addition has to be rounded to an f32. Representable f32 values near a
+/// magnitude `M` are spaced `ulp(M)` apart, so the reconstruction carries an
+/// irreducible floor of `ulp(M) / 2` on top of the half-interval quantization
+/// error. That floor is proportional to the *magnitude* of the data, not to
+/// its *range*, so a vector clustered far from zero exceeds a pure
+/// half-interval bound by an amount no implementation can remove: any
+/// reconstruction must land on a representable f32.
+///
+/// The input below is exact. Eight values spanning a range of 32.0 around
+/// 1.55e6: `1548740.875` quantizes to code 128 and reconstructs to
+/// `1548741.0`, an error of 0.125 against a half-interval of 0.0627 -- very
+/// nearly 2x, which is the worst ratio this class produces.
+///
+/// `fuzz_quantization` asserted `range / 510 + 16 * EPSILON * range`, which
+/// models the extra slack as a multiple of the range and so omits the
+/// magnitude term entirely. It therefore fired on correct output. This test
+/// pins the real bound so the harness cannot drift back to a range-only model.
+#[test]
+fn quantize_scalar_roundtrip_error_includes_the_representation_floor() {
+    let v: [f32; 8] = [
+        1548724.875,
+        1548740.875,
+        1548756.875,
+        1548724.875,
+        1548724.875,
+        1548756.875,
+        1548756.875,
+        1548724.875,
+    ];
+    let sq = shodh_redb::quantize_scalar(&v);
+    let restored = sq.dequantize();
+
+    let range = sq.max_val - sq.min_val;
+    assert_eq!(range, 32.0, "input no longer spans the intended range");
+
+    let half_interval = range / 510.0;
+    let magnitude = sq.min_val.abs().max(sq.max_val.abs());
+    let bound = half_interval + f32::EPSILON * magnitude + 8.0 * f32::EPSILON * range;
+
+    let worst = v
+        .iter()
+        .zip(restored.iter())
+        .map(|(&orig, &rest)| (orig - rest).abs())
+        .fold(0.0f32, f32::max);
+
+    // The floor is real: correct output genuinely exceeds the half interval.
+    assert!(
+        worst > half_interval,
+        "expected the magnitude term to dominate: error {worst} vs half interval {half_interval}"
+    );
+    // And it is bounded once the magnitude term is accounted for.
+    assert!(
+        worst <= bound,
+        "roundtrip error {worst} exceeds the derived bound {bound}"
+    );
+}
+
 #[test]
 fn quantize_binary_empty() {
     let v: [f32; 0] = [];

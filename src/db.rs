@@ -129,12 +129,10 @@ impl MultimapTableHandle for UntypedMultimapTableHandle {
 impl Sealed for UntypedMultimapTableHandle {}
 
 /// Lower clamp for the cache budget detected on `std` targets.
-#[cfg(feature = "std")]
 const STD_MIN_CACHE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 
 /// Upper clamp for the cache budget detected on `std` targets, and the
 /// fallback when physical memory cannot be measured.
-#[cfg(feature = "std")]
 const STD_MAX_CACHE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 
 /// Default cache budget on `no_std` targets, where physical memory cannot be
@@ -155,8 +153,19 @@ const STD_MAX_CACHE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 /// 1 MiB splits 90/10 into 900 KiB of read cache (225 pages at the 4 KiB
 /// default page size) and 100 KiB of write cache. Targets that want more, or
 /// less, should say so with [`Builder::set_cache_size`].
-#[cfg(any(not(feature = "std"), test))]
 const NO_STD_DEFAULT_CACHE_SIZE: usize = 1024 * 1024; // 1 MiB
+
+/// The `no_std` default must be conservative, not merely clamped into the same
+/// range a `std` host would accept. Checked at compile time rather than in a
+/// test: comparing two constants at runtime is a tautology the optimizer
+/// removes, and this way the invariant is enforced on every target the crate
+/// builds for, including the bare-metal ones that run no tests at all.
+const _: () = assert!(NO_STD_DEFAULT_CACHE_SIZE < STD_MIN_CACHE_SIZE);
+
+/// `detect_system_cache_size` passes these to `clamp`, which panics if the
+/// bounds are inverted. Ordering them is not obviously worth a runtime check,
+/// but it costs nothing here.
+const _: () = assert!(STD_MIN_CACHE_SIZE <= STD_MAX_CACHE_SIZE);
 
 /// Const-compatible byte-level prefix check for use in `const fn` table name validation.
 const fn const_starts_with(haystack: &[u8], needle: &[u8]) -> bool {
@@ -3530,26 +3539,6 @@ mod test {
     use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
     use std::sync::Arc;
-
-    /// The cache budget is a ceiling enforced by eviction, not a reservation:
-    /// `cached_file` evicts only once usage exceeds it. A budget above physical
-    /// RAM therefore switches eviction off entirely, and the read cache grows
-    /// until allocation fails.
-    ///
-    /// `no_std` targets cannot measure their memory, and the ones this crate
-    /// deliberately supports are tiny -- `Cargo.toml` pays for CAS-free atomics
-    /// to reach thumbv6m / Cortex-M0+ and names the RP2040, which has 264 KiB
-    /// of SRAM. Their default must therefore be conservative, which means
-    /// strictly below the floor a `std` host would accept, not merely clamped
-    /// into the same range. It used to be `STD_MAX_CACHE_SIZE`.
-    #[test]
-    fn no_std_cache_default_is_below_the_std_floor() {
-        assert!(
-            super::NO_STD_DEFAULT_CACHE_SIZE < super::STD_MIN_CACHE_SIZE,
-            "no_std default {} must be conservative, not clamped into the std range",
-            super::NO_STD_DEFAULT_CACHE_SIZE
-        );
-    }
 
     /// `set_cache_size` splits the budget 90/10 by integer division, so a
     /// default small enough to be safe must still leave both partitions able to

@@ -593,6 +593,33 @@ impl PagedCachedFile {
         }
     }
 
+    /// Return `data` when it is the sole reference to its allocation, otherwise
+    /// a fresh copy of it.
+    ///
+    /// `WritablePage::mem_mut` hands out `&mut [u8]` from inside the `Arc`,
+    /// which is sound only while no other reference exists. Both caches give
+    /// readers `Arc` clones -- `read` returns `cached.clone()` from the write
+    /// buffer and from the read cache alike -- so removing an entry from its
+    /// cache drops the cache's own reference and nothing else. A `PageImpl`
+    /// obtained before that removal still holds its clone, and the bytes it
+    /// points at are about to be mutated underneath it.
+    ///
+    /// The check is not racy. `get_mut` succeeds only when this is the sole
+    /// reference, and by the time it runs the entry has already been removed
+    /// from both caches under their locks, so no new clone can be handed out
+    /// while we decide.
+    ///
+    /// Upstream redb has the same shape here -- `Arc::get_mut(..).unwrap()` --
+    /// and panics outright on this state, so copying closes an inherited hole
+    /// rather than papering over a fork regression.
+    fn uniquely_owned(mut data: Arc<[u8]>) -> Arc<[u8]> {
+        if Arc::get_mut(&mut data).is_some() {
+            data
+        } else {
+            data.to_vec().into()
+        }
+    }
+
     // If overwrite is true, the page is initialized to zero
     // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
     pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
@@ -643,7 +670,7 @@ impl PagedCachedFile {
             }
             #[cfg(feature = "cache_metrics")]
             self.writes_hits.fetch_add(1, Ordering::AcqRel);
-            removed
+            Self::uniquely_owned(removed)
         } else {
             let previous = self.write_buffer_bytes.fetch_add(len, Ordering::AcqRel);
             // Compute how many bytes to evict: at least the overage beyond the limit.
@@ -678,14 +705,21 @@ impl PagedCachedFile {
                     self.evict_read_cache_global(total - budget);
                 }
             }
-            let result = if let Some(data) = existing {
+            let result = if overwrite {
+                // A cached entry holds the page's PREVIOUS bytes. Preferring it
+                // over the zeroed buffer, as this did, handed stale contents to
+                // a caller that had asked for a blank page -- the zeroing branch
+                // was reachable only on a cache miss. `overwrite` is passed when
+                // the header is rewritten and when the allocator hands out a
+                // fresh page, so the stale bytes were another page's data.
                 #[cfg(feature = "cache_metrics")]
                 self.writes_hits.fetch_add(1, Ordering::AcqRel);
-                data
-            } else if overwrite {
-                #[cfg(feature = "cache_metrics")]
-                self.writes_hits.fetch_add(1, Ordering::AcqRel);
+                drop(existing);
                 vec![0; len].into()
+            } else if let Some(data) = existing {
+                #[cfg(feature = "cache_metrics")]
+                self.writes_hits.fetch_add(1, Ordering::AcqRel);
+                Self::uniquely_owned(data)
             } else {
                 self.read_direct(offset, len)?.into()
             };
@@ -746,5 +780,62 @@ mod test {
         t2.join().unwrap();
         cached_file.invalidate_cache(0, 128);
         assert_eq!(cached_file.read_cache_bytes.load(Ordering::Acquire), 0);
+    }
+
+    /// `write` removes the page from the read cache and used to reuse that
+    /// allocation as the writable buffer. Removing it drops only the cache's
+    /// reference, so a reader that already holds a clone -- a live `PageImpl`
+    /// -- keeps the allocation shared, and `mem_mut` then refuses to hand out
+    /// `&mut [u8]`.
+    ///
+    /// `fuzz_redb` reached this as
+    /// `internal error: WritablePage::mem_mut() called while other Arc
+    /// references exist`. It is not a fork regression: upstream redb unwraps
+    /// the same `Arc::get_mut` and panics on the identical state.
+    #[test]
+    fn write_does_not_reuse_a_buffer_a_reader_still_holds() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(1024).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024, 128, None).unwrap();
+
+        // Populate the read cache and keep the reader's clone alive.
+        let reader = cached_file.read(0, 128, PageHint::None).unwrap();
+
+        let mut page = cached_file.write(0, 128, false).unwrap();
+        page.mem_mut()
+            .expect("the writable buffer must not be shared with a live reader");
+
+        // The reader must still see its own bytes, not the writer's scratch.
+        assert_eq!(reader.len(), 128);
+        drop(reader);
+    }
+
+    /// `overwrite` promises a zeroed page, but the cached-entry branch was
+    /// tested first and won whenever the page happened to be in the read
+    /// cache, returning the page's PREVIOUS bytes. The zeroing branch was
+    /// reachable only on a cache miss.
+    ///
+    /// This matters because `overwrite` is what the allocator passes when it
+    /// hands out a fresh page, so the stale contents belonged to whatever
+    /// occupied that page before it was freed.
+    #[test]
+    fn overwrite_zeroes_a_page_that_is_still_in_the_read_cache() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(1024).unwrap();
+        backend.write(0, &[0xAB; 128]).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024, 128, None).unwrap();
+
+        // Pull the page into the read cache so the `existing` branch is live,
+        // then drop the clone so uniqueness is not what is under test here.
+        let cached = cached_file.read(0, 128, PageHint::None).unwrap();
+        assert_eq!(cached[0], 0xAB, "backend fixture did not take");
+        drop(cached);
+
+        let mut page = cached_file.write(0, 128, true).unwrap();
+        let mem = page.mem_mut().unwrap();
+        assert!(
+            mem.iter().all(|&b| b == 0),
+            "overwrite must hand back a zeroed page, not the cached contents"
+        );
     }
 }

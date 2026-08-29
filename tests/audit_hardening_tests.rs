@@ -310,16 +310,13 @@ fn quantize_scalar_min_equals_max_at_boundary() {
 /// pins the real bound so the harness cannot drift back to a range-only model.
 #[test]
 fn quantize_scalar_roundtrip_error_includes_the_representation_floor() {
-    let v: [f32; 8] = [
-        1548724.875,
-        1548740.875,
-        1548756.875,
-        1548724.875,
-        1548724.875,
-        1548756.875,
-        1548756.875,
-        1548724.875,
-    ];
+    // Built from bits, the way the fuzz target builds its inputs, so the
+    // values are exact and no decimal literal can drift under rounding:
+    // LO = 1548724.875, MID = 1548740.875, HI = 1548756.875.
+    const LO: u32 = 0x49bd_0da7;
+    const MID: u32 = 0x49bd_0e27;
+    const HI: u32 = 0x49bd_0ea7;
+    let v: [f32; 8] = [LO, MID, HI, LO, LO, HI, HI, LO].map(f32::from_bits);
     let sq = shodh_redb::quantize_scalar(&v);
     let restored = sq.dequantize();
 

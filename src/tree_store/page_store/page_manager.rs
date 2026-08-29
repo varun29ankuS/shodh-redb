@@ -406,7 +406,7 @@ impl TransactionalMemory {
                 region_header_pages,
                 region_max_pages,
                 page_size.try_into().unwrap(),
-            ));
+            )?);
             header.pick_primary_for_repair(repair_info)?;
             if repair_info.invalid_magic_number {
                 return Err(
@@ -536,7 +536,7 @@ impl TransactionalMemory {
                 region_header_pages,
                 region_max_pages,
                 page_size.try_into().unwrap(),
-            ));
+            )?);
             // pick_primary_for_repair can return Err for both-slots-corrupted
             match header.pick_primary_for_repair(repair_info) {
                 Ok(primary_was_valid) => {
@@ -774,7 +774,7 @@ impl TransactionalMemory {
                     region_header_pages,
                     region_max_pages,
                     self.page_size,
-                ));
+                )?);
             }
             self.storage
                 .write(0, DB_HEADER_SIZE, true)?

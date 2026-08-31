@@ -72,15 +72,22 @@ impl LRUWriteCache {
         self.cache.get(key).and_then(|x| x.as_ref())
     }
 
-    fn remove(&mut self, key: u64) -> Option<Arc<[u8]>> {
-        if let Some(value) = self.cache.remove(key) {
-            debug_assert!(
-                value.is_some(),
-                "LRUWriteCache::remove() found None value for key {key}"
-            );
-            return value;
-        }
-        None
+    /// Remove `key`, reporting both whether it was present and whether its
+    /// buffer was checked out.
+    ///
+    /// - `Some(Some(buf))` -- present, holding its buffer.
+    /// - `Some(None)` -- present, but `take_value` has handed the buffer to a
+    ///   live `WritablePage`. That page is still writing, and on drop it will
+    ///   try to return the buffer to a slot that no longer exists.
+    /// - `None` -- absent.
+    ///
+    /// This used to collapse the middle case into `None` behind a
+    /// `debug_assert!(value.is_some())`, which made the caller silently skip
+    /// its byte accounting and fired under fuzzing. The state is reachable:
+    /// `cancel_pending_write` runs from the page free and rollback paths, and
+    /// a page can be freed while a `WritablePage` for it is still alive.
+    fn remove(&mut self, key: u64) -> Option<Option<Arc<[u8]>>> {
+        self.cache.remove(key)
     }
 
     fn return_value(&mut self, key: u64, value: Arc<[u8]>) {
@@ -92,12 +99,12 @@ impl LRUWriteCache {
                 prev.is_none(),
                 "LRUWriteCache::return_value() slot was not empty for key {key}"
             );
-        } else {
-            debug_assert!(
-                false,
-                "LRUWriteCache::return_value() key {key} not found in cache"
-            );
         }
+        // No entry: `cancel_pending_write` removed it while this page held the
+        // buffer, which is what happens when the page is freed mid-write.
+        // Dropping `value` is the intended outcome -- the write is being
+        // cancelled -- and its bytes have already come off `write_buffer_bytes`
+        // there, so there is nothing to undo here.
     }
 
     fn take_value(&mut self, key: u64) -> Option<Arc<[u8]>> {
@@ -553,15 +560,28 @@ impl PagedCachedFile {
     }
 
     // Discard pending writes to the given range
-    pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
+    pub(super) fn cancel_pending_write(&self, offset: u64, len: usize) {
         debug_assert_eq!(
             0,
             offset % self.page_size,
             "cancel_pending_write: offset not page-aligned"
         );
-        if let Some(removed) = self.write_buffer.lock().remove(offset) {
-            self.write_buffer_bytes
-                .fetch_sub(removed.len(), Ordering::Release);
+        match self.write_buffer.lock().remove(offset) {
+            // Present with its buffer: account with the buffer's own length.
+            Some(Some(removed)) => {
+                self.write_buffer_bytes
+                    .fetch_sub(removed.len(), Ordering::Release);
+            }
+            // Present but checked out to a live `WritablePage`. The buffer's
+            // length is not available here, which is why the caller's `len` is
+            // now used rather than ignored. Without this the bytes were never
+            // returned and `write_buffer_bytes` drifted upward for the life of
+            // the database, shrinking the effective write budget on every
+            // cancelled write and evicting more and more aggressively.
+            Some(None) => {
+                self.write_buffer_bytes.fetch_sub(len, Ordering::Release);
+            }
+            None => {}
         }
     }
 
@@ -834,6 +854,45 @@ mod test {
         // The reader must still see its own bytes, not the writer's scratch.
         assert_eq!(reader.len(), 128);
         drop(reader);
+    }
+
+    /// `page_manager::free` and the rollback loop call `cancel_pending_write`,
+    /// and a page can be freed while a `WritablePage` for it is still alive.
+    /// That left the write cache entry removed while the buffer was checked
+    /// out, which broke two invariants at once: `remove` hit
+    /// `debug_assert!(value.is_some())` (`fuzz_db_image` panicked here once
+    /// #365 removed the OOM that had been stopping it earlier), and the later
+    /// `return_value` from `Drop` hit `key not found`.
+    ///
+    /// In release, where both asserts are absent, the failure was quieter and
+    /// worse: the bytes were never returned, so `write_buffer_bytes` drifted
+    /// upward permanently and shrank the effective write budget.
+    #[test]
+    fn cancel_pending_write_while_the_page_is_checked_out() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(1024).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024, 512, None).unwrap();
+
+        let before = cached_file.write_buffer_bytes.load(Ordering::Acquire);
+
+        // Check the buffer out of the write cache.
+        let page = cached_file.write(0, 128, true).unwrap();
+        assert!(
+            cached_file.write_buffer_bytes.load(Ordering::Acquire) > before,
+            "the write should have been charged to the budget"
+        );
+
+        // Free the page while it is still held.
+        cached_file.cancel_pending_write(0, 128);
+
+        // Must not panic: the slot this page wants to return to is gone.
+        drop(page);
+
+        assert_eq!(
+            cached_file.write_buffer_bytes.load(Ordering::Acquire),
+            before,
+            "cancelling a checked-out write must return its bytes to the budget"
+        );
     }
 
     /// The read cache is keyed by offset alone, so a page freed at one order

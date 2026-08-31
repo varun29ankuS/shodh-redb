@@ -951,22 +951,40 @@ fn exec_table_crash_support<T: Clone + Debug>(
     // Drain the freed-page table by committing until page counts stabilize.
     // After simulated IO errors the database may be too corrupted to write.
     // Cap iterations to avoid timeout on corrupted data where counts oscillate.
-    if let Ok(txn) = db.begin_write() {
-        if let Ok(stats) = txn.stats() {
-            let mut prev = stats.allocated_pages();
-            for _ in 0..20 {
+    // Only one write transaction may exist at a time, and `begin_write` blocks
+    // until the live one finishes -- so every transaction here must be dropped
+    // before the next is requested. This previously read:
+    //
+    //     if let Ok(txn) = db.begin_write() {        // outer txn stays alive
+    //         if let Ok(stats) = txn.stats() {
+    //             for _ in 0..20 {
+    //                 let Ok(txn) = db.begin_write() ...   // waits forever
+    //
+    // The outer binding held the slot for the whole block, so the inner
+    // `begin_write` waited on a transaction that could not finish until the
+    // block it was nested inside had ended. That is a self-deadlock, and it hung
+    // this target indefinitely on any input reaching this code.
+    let allocated_pages = |db: &Database| -> Option<u64> {
+        let txn = db.begin_write().ok()?;
+        let pages = txn.stats().ok().map(|s| s.allocated_pages());
+        // Drop before returning: the caller's next begin_write would block.
+        drop(txn);
+        pages
+    };
+
+    if let Some(mut prev) = allocated_pages(&db) {
+        for _ in 0..20 {
+            {
                 let Ok(txn) = db.begin_write() else { break };
                 if txn.commit().is_err() {
                     break;
                 }
-                let Ok(txn) = db.begin_write() else { break };
-                let Ok(s) = txn.stats() else { break };
-                let cur = s.allocated_pages();
-                if cur == prev {
-                    break;
-                }
-                prev = cur;
             }
+            let Some(cur) = allocated_pages(&db) else { break };
+            if cur == prev {
+                break;
+            }
+            prev = cur;
         }
     }
 

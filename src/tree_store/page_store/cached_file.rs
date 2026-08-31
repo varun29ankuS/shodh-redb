@@ -48,6 +48,20 @@ impl<I: SliceIndex<[u8]>> Index<I> for WritablePage {
     }
 }
 
+/// What [`LRUWriteCache::remove`] found at a key. The three cases have to stay
+/// distinguishable: "present but checked out" needs different byte accounting
+/// from "absent", and collapsing the two is the bug this enum replaced.
+enum RemovedEntry {
+    /// Present, holding its buffer.
+    Buffered(Arc<[u8]>),
+    /// Present, but `take_value` has handed the buffer to a live
+    /// `WritablePage`. That page is still writing, and on drop it will try to
+    /// return the buffer to a slot that no longer exists.
+    CheckedOut,
+    /// No entry at this key.
+    Absent,
+}
+
 #[derive(Default)]
 struct LRUWriteCache {
     cache: LRUCache<Option<Arc<[u8]>>>,
@@ -72,22 +86,20 @@ impl LRUWriteCache {
         self.cache.get(key).and_then(|x| x.as_ref())
     }
 
-    /// Remove `key`, reporting both whether it was present and whether its
-    /// buffer was checked out.
+    /// Remove `key`, reporting whether it was present and whether its buffer
+    /// was checked out.
     ///
-    /// - `Some(Some(buf))` -- present, holding its buffer.
-    /// - `Some(None)` -- present, but `take_value` has handed the buffer to a
-    ///   live `WritablePage`. That page is still writing, and on drop it will
-    ///   try to return the buffer to a slot that no longer exists.
-    /// - `None` -- absent.
-    ///
-    /// This used to collapse the middle case into `None` behind a
-    /// `debug_assert!(value.is_some())`, which made the caller silently skip
+    /// This used to collapse [`RemovedEntry::CheckedOut`] into "absent" behind
+    /// a `debug_assert!(value.is_some())`, which made the caller silently skip
     /// its byte accounting and fired under fuzzing. The state is reachable:
     /// `cancel_pending_write` runs from the page free and rollback paths, and
     /// a page can be freed while a `WritablePage` for it is still alive.
-    fn remove(&mut self, key: u64) -> Option<Option<Arc<[u8]>>> {
-        self.cache.remove(key)
+    fn remove(&mut self, key: u64) -> RemovedEntry {
+        match self.cache.remove(key) {
+            Some(Some(buffer)) => RemovedEntry::Buffered(buffer),
+            Some(None) => RemovedEntry::CheckedOut,
+            None => RemovedEntry::Absent,
+        }
     }
 
     fn return_value(&mut self, key: u64, value: Arc<[u8]>) {
@@ -567,8 +579,8 @@ impl PagedCachedFile {
             "cancel_pending_write: offset not page-aligned"
         );
         match self.write_buffer.lock().remove(offset) {
-            // Present with its buffer: account with the buffer's own length.
-            Some(Some(removed)) => {
+            // Account with the buffer's own length.
+            RemovedEntry::Buffered(removed) => {
                 self.write_buffer_bytes
                     .fetch_sub(removed.len(), Ordering::Release);
             }
@@ -578,10 +590,10 @@ impl PagedCachedFile {
             // returned and `write_buffer_bytes` drifted upward for the life of
             // the database, shrinking the effective write budget on every
             // cancelled write and evicting more and more aggressively.
-            Some(None) => {
+            RemovedEntry::CheckedOut => {
                 self.write_buffer_bytes.fetch_sub(len, Ordering::Release);
             }
-            None => {}
+            RemovedEntry::Absent => {}
         }
     }
 

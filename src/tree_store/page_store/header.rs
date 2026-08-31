@@ -373,6 +373,45 @@ impl DatabaseHeader {
         let (slot1, slot1_corrupted) = TransactionHeader::from_bytes(
             &data[TRANSACTION_1_OFFSET..(TRANSACTION_1_OFFSET + TRANSACTION_SIZE)],
         )?;
+
+        // A slot's version is only meaningful once both have been read. One
+        // unreadable slot is a torn write and is recoverable from the other;
+        // both unreadable is a file this build cannot open, and if either
+        // names a superseded format that is an upgrade rather than damage.
+        if slot0_corrupted && slot1_corrupted {
+            for version in [slot0.version, slot1.version] {
+                if matches!(version, FILE_FORMAT_VERSION1 | FILE_FORMAT_VERSION2) {
+                    return Err(DatabaseError::UpgradeRequired(version));
+                }
+            }
+            for version in [slot0.version, slot1.version] {
+                if !matches!(
+                    version,
+                    FILE_FORMAT_VERSION3 | FILE_FORMAT_VERSION4 | FILE_FORMAT_VERSION5
+                ) {
+                    return Err(StorageError::format_error(format!(
+                        "Expected file format version <= {FILE_FORMAT_VERSION5}, found {version}",
+                    ))
+                    .into());
+                }
+            }
+        }
+        // The observed version was needed only for the triage above. Keeping
+        // it would put an unknown version byte back on disk the next time the
+        // header is written, which `to_bytes` asserts against. The slot is
+        // flagged corrupted, so nothing reads its contents and the next commit
+        // overwrites it; normalize to the oldest supported format.
+        let mut slot0 = slot0;
+        let mut slot1 = slot1;
+        for slot in [&mut slot0, &mut slot1] {
+            if !matches!(
+                slot.version,
+                FILE_FORMAT_VERSION3 | FILE_FORMAT_VERSION4 | FILE_FORMAT_VERSION5
+            ) {
+                slot.version = FILE_FORMAT_VERSION3;
+            }
+        }
+
         let (primary_corrupted, secondary_corrupted) = if primary_slot == 0 {
             (slot0_corrupted, slot1_corrupted)
         } else {
@@ -469,18 +508,23 @@ impl TransactionHeader {
     }
 
     // Returned bool indicates whether the checksum was corrupted
+    //
+    // An unreadable version byte reports `Ok((placeholder, true))` rather than
+    // an error. A commit slot is torn by any crash between the start and the
+    // end of its write, and the version byte is its first byte, so a torn slot
+    // routinely holds a version this build does not know. The two-slot design
+    // exists precisely to survive that: `pick_primary_for_repair` recovers
+    // from the other slot. Failing the parse instead made a single torn slot
+    // fail the whole open, which is data loss on a file that is intact.
+    //
+    // The caller decides what an unusable slot means once it can see both of
+    // them, since a genuine old database has an old version in *both*.
     pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, bool), DatabaseError> {
         let version = data[VERSION_OFFSET];
         match version {
-            FILE_FORMAT_VERSION1 | FILE_FORMAT_VERSION2 => {
-                return Err(DatabaseError::UpgradeRequired(version));
-            }
             FILE_FORMAT_VERSION3 | FILE_FORMAT_VERSION4 | FILE_FORMAT_VERSION5 => {}
             _ => {
-                return Err(StorageError::format_error(format!(
-                    "Expected file format version <= {FILE_FORMAT_VERSION5}, found {version}",
-                ))
-                .into());
+                return Ok((Self::new(TransactionId::new(0), version), true));
             }
         }
         let checksum = Checksum::from_le_bytes(

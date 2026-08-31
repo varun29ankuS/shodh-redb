@@ -1,5 +1,75 @@
 # redb - Changelog
 
+## 0.6.0 - 2026-09-01
+
+Hardening release. 59 commits since 0.5.0. Theme: crafted-file robustness and
+the page cache -- every allocation the header can size is now bounded, and the
+read/write cache ownership rules are enforced rather than asserted.
+
+Tag namespace: tagged `shodh-v0.6.0` (not `v0.6.0`), preserving upstream redb's
+`v0.5.0` -- `v4.x.x` tag history.
+
+### Breaking changes
+* None. Public API surface unchanged from 0.5.0.
+
+### Behaviour changes
+* **`no_std` default cache budget is now 1 MiB, was 1 GiB (#375).** The budget
+  is a ceiling enforced by eviction, not a reservation, so a budget above
+  physical RAM meant eviction never ran and the read cache grew until the
+  allocator failed. `no_std` targets that want a larger cache must now say so
+  with `Builder::set_cache_size`.
+
+### Bug fixes -- page cache
+Four defects, three of which are silent in release builds:
+* **A writable page could share its buffer with a live reader (#376).** `write`
+  reused an `Arc` removed from the read cache, but removing an entry drops only
+  the cache's reference; a `PageImpl` handed out earlier kept its clone.
+* **`overwrite` returned stale page contents (#376).** The cached-entry branch
+  won over the zeroing branch on a cache hit, so a freshly allocated page could
+  surface the bytes of whatever occupied it before it was freed.
+* **A cancelled write corrupted the byte budget (#377).** Freeing a page whose
+  buffer was checked out skipped the accounting, so `write_buffer_bytes`
+  drifted upward permanently and shrank the effective write cache for the life
+  of the database.
+* **Stale-length cache entries were treated as logic bugs (#377, #379).** Both
+  caches are keyed by offset alone, so a page freed at one order and
+  reallocated at another legitimately reuses the offset at a different length.
+  The write-buffer case truncated writes in release builds.
+
+### Bug fixes -- crafted-file robustness
+* Bound `page_size` instead of allocating whatever the header claims (#365).
+* Bound the blob region against the real file (#370).
+* Stop a compressed value envelope naming its own allocation size (#369).
+* Make layout recalculation total on untrusted input (#368).
+* Reject a free list that would allocate a page twice (#366).
+* A torn commit slot is recoverable, not fatal (#372).
+
+### Bug fixes -- vector indexing
+* Validate every vector that reaches a distance computation, including the
+  training paths (#367).
+* Correct the scalar quantization error bound (#373). The previous bound scaled
+  only with the value range and omitted the f32 representation floor, which is
+  proportional to magnitude, so it rejected correct output for data clustered
+  far from zero.
+
+### Testing and CI
+* **The fuzz corpus now persists and accumulates (#378).** It had shared a
+  cache key derived from the fuzz source, which hit exactly and so was never
+  re-saved -- every night restarted a cold search. Corpus is now cached under a
+  run-scoped key, minimised with `cargo fuzz cmin`, and budgets are raised.
+* **`thumbv6m-none-eabi` is compiled in CI (#375).** The Cortex-M0+ support the
+  manifest pays for on every build was previously never built.
+* `fuzz_redb` no longer deadlocks against its own write transaction (#356), and
+  its leaked-page check tolerates a database left corrupt by simulated IO
+  errors (#361).
+* `begin_read_at` eviction test waits for the race window instead of hoping it
+  opened (#371).
+
+### Known issues
+* `fuzz_db_image` can exceed libFuzzer's 2 GB RSS limit over a long run. This
+  is cumulative process memory, not a single allocation; the cause is not yet
+  identified.
+
 ## 0.5.0 - 2026-05-04
 
 Hardening release. 78 commits since 0.4.0. Theme: production-readiness --

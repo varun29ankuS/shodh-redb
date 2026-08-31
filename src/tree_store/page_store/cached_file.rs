@@ -707,25 +707,41 @@ impl PagedCachedFile {
             }
         };
 
-        let data = if let Some(removed) = lock.take_value(offset) {
-            // The read-cache branch above rejects a length mismatch; this one
-            // did not, and reused whatever length the buffered entry happened
-            // to have. A page buffered at one order and then handed out at the
-            // same offset with a larger order came back short, so the caller
-            // received a page smaller than it asked for:
-            //
-            //     assertion failed: mem.mem().len() >= allocation_size
-            //
-            // In release that assertion is absent and the undersized page is
-            // used, truncating writes that should have landed in it. Report the
-            // inconsistency rather than returning a page that does not match
-            // the request. Found by fuzz_redb once it stopped deadlocking.
-            if removed.len() != len {
-                return Err(StorageError::Internal(alloc::format!(
-                    "write: write-buffer inconsistency at offset {offset}, buffered {} bytes but {len} requested",
-                    removed.len()
-                )));
+        // A buffered page whose length does not match the request is stale for
+        // the same reason a cached one is: the write buffer is keyed by offset,
+        // and a page freed at one order and reallocated at another reuses the
+        // offset at a different length.
+        //
+        // Reusing it was the original bug -- the caller got a page shorter than
+        // it asked for (`assertion failed: mem.mem().len() >= allocation_size`,
+        // and in release a silently truncated write). Reporting
+        // `Internal` instead was the first correction, and it was still wrong:
+        // the state is reachable without any logic error, because the free
+        // paths that would have dropped this entry derive their length from
+        // `address_range(..)?`, which fails on corrupted input, and savepoint
+        // restore and repair replace allocator state wholesale.
+        //
+        // Discarding is safe, and the length mismatch is itself the proof. A
+        // page's length is fixed by its allocation order, so a different length
+        // at the same offset means the allocation that owned those buffered
+        // bytes is gone. There is no live write to lose -- which is the point
+        // I got wrong when this check was left alone while the read-cache one
+        // was fixed.
+        let buffered = match lock.take_value(offset) {
+            Some(removed) if removed.len() == len => Some(removed),
+            Some(removed) => {
+                // Drop the whole entry, not just its value: `take_value` leaves
+                // the slot in place, and the fresh path below inserts at this
+                // same offset, which would trip the duplicate-key assert.
+                lock.remove(offset);
+                self.write_buffer_bytes
+                    .fetch_sub(removed.len(), Ordering::AcqRel);
+                None
             }
+            None => None,
+        };
+
+        let data = if let Some(removed) = buffered {
             #[cfg(feature = "cache_metrics")]
             self.writes_hits.fetch_add(1, Ordering::AcqRel);
             Self::uniquely_owned(removed)
@@ -904,6 +920,50 @@ mod test {
             cached_file.write_buffer_bytes.load(Ordering::Acquire),
             before,
             "cancelling a checked-out write must return its bytes to the budget"
+        );
+    }
+
+    /// The write buffer is keyed by offset too, so the same stale-length case
+    /// arises there: a page buffered at one order, freed, and reallocated at
+    /// another is requested at the same offset with a different length.
+    ///
+    /// `fuzz_redb` hit this as
+    /// `Internal("write: write-buffer inconsistency at offset 5120, buffered
+    /// 1024 bytes but 4096 requested")`.
+    ///
+    /// Discarding is safe and the mismatch proves it: a page's length is fixed
+    /// by its allocation order, so a different length at the same offset means
+    /// the allocation owning those buffered bytes is gone.
+    #[test]
+    fn write_discards_a_buffered_page_of_the_wrong_length() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(16384).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 1024, 8192, 8192, None).unwrap();
+
+        // Buffer a page at one order and let it settle back into the buffer.
+        {
+            let mut small = cached_file.write(4096, 1024, true).unwrap();
+            small.mem_mut().unwrap().fill(0xEE);
+        }
+        let charged = cached_file.write_buffer_bytes.load(Ordering::Acquire);
+        assert!(charged >= 1024, "the buffered write should be charged");
+
+        // Same offset, larger order: the small entry is stale.
+        let mut big = cached_file
+            .write(4096, 4096, true)
+            .expect("a stale-length buffered page must not be fatal");
+        let mem = big.mem_mut().unwrap();
+        assert_eq!(mem.len(), 4096, "must match the requested length");
+        assert!(
+            mem.iter().all(|&b| b == 0),
+            "overwrite must not surface the discarded page's bytes"
+        );
+        drop(big);
+
+        // The discarded entry's bytes must not stay charged to the budget.
+        assert!(
+            cached_file.write_buffer_bytes.load(Ordering::Acquire) <= 4096,
+            "stale buffered bytes were left on the budget"
         );
     }
 

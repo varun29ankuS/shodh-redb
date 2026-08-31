@@ -1021,3 +1021,90 @@ fn diversity_search_write_txn_ivfpq() {
     }
     write_txn.commit().unwrap();
 }
+
+/// A query whose components are finite but enormous must be rejected on both
+/// search paths rather than producing infinite distances.
+///
+/// Bounding only what is inserted was not enough. A distance is computed
+/// between a stored vector and the query, so a query near `f32::MAX` overflows
+/// against perfectly valid stored data: every candidate scores `inf`, the
+/// top-K heap orders them arbitrarily, and the ADC table's affine scale is
+/// poisoned for the whole probe. Found by `fuzz_ivfpq_index`, which asserted
+/// that a search never returns a non-finite distance.
+#[test]
+fn an_enormous_query_is_rejected_on_both_search_paths() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let training: Vec<(u64, Vec<f32>)> = (0..8).map(|i| (i, random_vector(i + 100, 8))).collect();
+    // Finite, but its square is not: 1e38 squared overflows f32.
+    let huge = vec![1e38f32; 8];
+    let ordinary = random_vector(7, 8);
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+        idx.train(training.iter().map(|(id, v)| (*id, v.clone())), 25)
+            .unwrap();
+        for (id, vec) in &training {
+            idx.insert(*id, vec).unwrap();
+        }
+
+        assert!(huge.iter().all(|v| v.is_finite()));
+        // The write-transaction search path.
+        assert!(
+            idx.search(&huge, &SearchParams::top_k(3)).is_err(),
+            "an enormous query must not reach the distance computation"
+        );
+        // A normal query still works, so the check is not rejecting everything.
+        idx.search(&ordinary, &SearchParams::top_k(3)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    // The read-only search path is a separate type with its own entry point.
+    let read_txn = db.begin_read().unwrap();
+    let idx = read_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+    assert!(
+        idx.search(&read_txn, &huge, &SearchParams::top_k(3))
+            .is_err(),
+        "an enormous query must not reach the distance computation"
+    );
+
+    let results = idx
+        .search(&read_txn, &ordinary, &SearchParams::top_k(3))
+        .unwrap();
+    assert!(results.iter().all(|r| r.distance.is_finite()));
+}
+
+/// `train` and `train_with_progress` take vectors from the caller and never
+/// checked their magnitude, only their dimension.
+///
+/// This is a public entry point, so it is not a fuzzer-only concern: k-means
+/// computes distances between training vectors, and for components near
+/// `f32::MAX` every one of those is `inf`. The centroids that come out are
+/// meaningless, and `l2_normalize` on the cosine path overflows while summing
+/// squares before any of that. Found by `fuzz_ivfpq_kmeans`, which asserted
+/// that `assign_nearest` never returns a non-finite distance.
+#[test]
+fn enormous_training_vectors_are_rejected() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let good: Vec<(u64, Vec<f32>)> = (0..8).map(|i| (i, random_vector(i + 100, 8))).collect();
+    let mut poisoned = good.clone();
+    poisoned[3].1 = vec![1e38f32; 8];
+    assert!(poisoned[3].1.iter().all(|v| v.is_finite()));
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+        assert!(
+            idx.train(poisoned.into_iter(), 25).is_err(),
+            "a training vector whose squares overflow must not reach k-means"
+        );
+        // The same set without the outlier trains normally, so the check is
+        // not rejecting every input.
+        idx.train(good.into_iter(), 25).unwrap();
+    }
+    write_txn.commit().unwrap();
+}

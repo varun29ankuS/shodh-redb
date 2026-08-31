@@ -29,9 +29,32 @@ jobs:
             ~/.cargo/git/db/
             target/
             fuzz/target/
-            fuzz/corpus/
-          key: fuzz-${{ hashFiles('**/Cargo.toml', 'fuzz/**') }}
-          restore-keys: fuzz-
+          key: fuzz-build-${{ hashFiles('**/Cargo.toml', 'fuzz/**') }}
+          restore-keys: fuzz-build-
+
+      # The corpus is cached separately from the build, and deliberately not
+      # under a content-derived key.
+      #
+      # It used to share the build cache above, whose key hashes `fuzz/**`. The
+      # corpus is gitignored, so at restore time that hash only covers the fuzz
+      # SOURCE, which rarely changes -- so the key hit EXACTLY, and
+      # `actions/cache` skips saving on an exact hit. The corpus was therefore
+      # frozen at whatever it held the first run after a fuzz-source change and
+      # never grew again.
+      #
+      # That is fatal for coverage-guided fuzzing, which is a search that only
+      # pays off as the corpus accumulates. Every night was re-running a cold
+      # search over shallow states, which is why defects here surface strictly
+      # one at a time, each only once the previous one stops blocking the path.
+      #
+      # `run_id` is unique per run, so the key never hits exactly and the save
+      # always happens; `restore-keys` then picks up the most recent corpus.
+      - name: Restore fuzz corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
 
       - name: Install Rust
         run: |
@@ -55,53 +78,53 @@ jobs:
 
       - name: Fuzz redb core (5 minutes)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_redb -- -max_len=10000 -max_total_time=300
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_redb -- -max_len=10000 -max_total_time=900
 
       - name: Fuzz crafted database images (5 minutes)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_db_image -- -max_len=4096 -max_total_time=300
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_db_image -- -max_len=4096 -max_total_time=600
 
       - name: Fuzz vector ops (90s)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_vector_ops -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_vector_ops -- -max_len=10000 -max_total_time=240
 
       - name: Fuzz quantization (90s)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_quantization -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_quantization -- -max_len=10000 -max_total_time=240
 
       - name: Fuzz blob types (60s)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_blob_types -- -max_len=10000 -max_total_time=60
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_blob_types -- -max_len=10000 -max_total_time=240
 
       - name: Fuzz IVF-PQ kmeans (90s)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_ivfpq_kmeans -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_ivfpq_kmeans -- -max_len=10000 -max_total_time=240
 
       # Every [[bin]] in fuzz/Cargo.toml must appear in this job or in ci.yml.
       # fuzz_ivfpq_index was in neither, so it had never been run at all.
       - name: Fuzz IVF-PQ index (90s)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_ivfpq_index -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_ivfpq_index -- -max_len=10000 -max_total_time=240
 
       - name: Fuzz CDC deser (90s)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_cdc_deser -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_cdc_deser -- -max_len=10000 -max_total_time=240
 
       - name: Fuzz cluster blob (90s)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_cluster_blob -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_cluster_blob -- -max_len=10000 -max_total_time=240
 
       - name: Fuzz incremental deser (90s)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_incremental_deser -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_incremental_deser -- -max_len=10000 -max_total_time=240
 
       - name: Fuzz merge ops (90s)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_merge_ops -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_merge_ops -- -max_len=10000 -max_total_time=240
 
       - name: Fuzz PQ codebook (90s)
         continue-on-error: true
-        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_pq_codebook -- -max_len=10000 -max_total_time=90
+        run: cargo fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_pq_codebook -- -max_len=10000 -max_total_time=240
 
       # Every fuzz step above runs with `continue-on-error`, so one target
       # cannot skip the other eleven -- which is exactly what happened the first
@@ -125,6 +148,36 @@ jobs:
             exit 1
           fi
           echo "no crash, timeout, or OOM artifacts"
+
+      # An accumulating corpus is the point, but an unminimised one becomes its
+      # own problem: libFuzzer replays every input at startup, so unchecked
+      # growth converts the budget above from exploration into replay, and the
+      # cache has a size limit that evicts LRU. `cmin` keeps the smallest set of
+      # inputs that preserves coverage.
+      #
+      # Best-effort: a cmin failure must not fail the run or skip the save, and
+      # a target whose corpus is still empty has nothing to minimise.
+      - name: Minimise fuzz corpus
+        if: always()
+        continue-on-error: true
+        run: |
+          for dir in fuzz/corpus/*/; do
+            [ -d "$dir" ] || continue
+            target=$(basename "$dir")
+            [ -n "$(ls -A "$dir" 2>/dev/null)" ] || continue
+            echo "cmin $target ($(ls -1 "$dir" | wc -l) inputs)"
+            cargo fuzz cmin --sanitizer=none --target "$HOST_TARGET" "$target" ||               echo "::warning::cmin failed for $target, keeping the unminimised corpus"
+          done
+
+      # Must run even when a target failed: a run that found a crash has by
+      # definition explored new territory, and that is exactly the corpus worth
+      # keeping.
+      - name: Save fuzz corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
 
       - name: Upload corpus and artifacts
         if: always()

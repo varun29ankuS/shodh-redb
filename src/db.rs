@@ -128,6 +128,45 @@ impl MultimapTableHandle for UntypedMultimapTableHandle {
 
 impl Sealed for UntypedMultimapTableHandle {}
 
+/// Lower clamp for the cache budget detected on `std` targets.
+const STD_MIN_CACHE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Upper clamp for the cache budget detected on `std` targets, and the
+/// fallback when physical memory cannot be measured.
+const STD_MAX_CACHE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
+
+/// Default cache budget on `no_std` targets, where physical memory cannot be
+/// detected.
+///
+/// The budget is a ceiling enforced by eviction, not a reservation: the cache
+/// grows lazily and only evicts once usage exceeds the budget. A budget larger
+/// than physical RAM therefore does not merely waste memory, it means eviction
+/// never runs at all and the read cache grows until allocation fails.
+///
+/// `no_std` here means embedded -- `Cargo.toml` pays for CAS-free atomics
+/// specifically to support thumbv6m / Cortex-M0+, naming the RP2040 and its
+/// 264 KiB of SRAM -- so this default has to be a number a small device can
+/// actually reach. It previously sat at the 1 GiB `std` ceiling, which is about
+/// four thousand times an RP2040's entire address space and so switched
+/// eviction off on every microcontroller.
+///
+/// 1 MiB splits 90/10 into 900 KiB of read cache (225 pages at the 4 KiB
+/// default page size) and 100 KiB of write cache. Targets that want more, or
+/// less, should say so with [`Builder::set_cache_size`].
+const NO_STD_DEFAULT_CACHE_SIZE: usize = 1024 * 1024; // 1 MiB
+
+/// The `no_std` default must be conservative, not merely clamped into the same
+/// range a `std` host would accept. Checked at compile time rather than in a
+/// test: comparing two constants at runtime is a tautology the optimizer
+/// removes, and this way the invariant is enforced on every target the crate
+/// builds for, including the bare-metal ones that run no tests at all.
+const _: () = assert!(NO_STD_DEFAULT_CACHE_SIZE < STD_MIN_CACHE_SIZE);
+
+/// `detect_system_cache_size` passes these to `clamp`, which panics if the
+/// bounds are inverted. Ordering them is not obviously worth a runtime check,
+/// but it costs nothing here.
+const _: () = assert!(STD_MIN_CACHE_SIZE <= STD_MAX_CACHE_SIZE);
+
 /// Const-compatible byte-level prefix check for use in `const fn` table name validation.
 const fn const_starts_with(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.len() > haystack.len() {
@@ -2994,8 +3033,15 @@ impl Builder {
 
     /// Compute system-aware default cache size.
     ///
-    /// On `std` targets, uses 25% of physical RAM, clamped to \[16 MiB, 1 GiB\].
-    /// On `no_std` targets (or if detection fails), returns 1 GiB.
+    /// On `std` targets, uses 25% of physical RAM, clamped to
+    /// \[16 MiB, 1 GiB\]. On `no_std` targets, returns a 1 MiB budget.
+    ///
+    /// The two defaults point in opposite directions on purpose. Failing to
+    /// measure a `std` host means assuming it has memory to spare, so the
+    /// fallback there is the maximum. A `no_std` target cannot be measured at
+    /// all and is assumed to be small, so its default must be the minimum --
+    /// see `NO_STD_DEFAULT_CACHE_SIZE` for why a large budget is not merely
+    /// wasteful there but disables eviction outright.
     fn default_cache_size() -> usize {
         #[cfg(feature = "std")]
         {
@@ -3003,18 +3049,15 @@ impl Builder {
         }
         #[cfg(not(feature = "std"))]
         {
-            1024 * 1024 * 1024
+            NO_STD_DEFAULT_CACHE_SIZE
         }
     }
 
     #[cfg(feature = "std")]
     fn detect_system_cache_size() -> usize {
-        const MIN_CACHE: usize = 16 * 1024 * 1024; // 16 MiB
-        const MAX_CACHE: usize = 1024 * 1024 * 1024; // 1 GiB
-
         match Self::total_physical_memory() {
-            Some(bytes) => (bytes / 4).clamp(MIN_CACHE, MAX_CACHE),
-            None => MAX_CACHE,
+            Some(bytes) => (bytes / 4).clamp(STD_MIN_CACHE_SIZE, STD_MAX_CACHE_SIZE),
+            None => STD_MAX_CACHE_SIZE,
         }
     }
 
@@ -3496,6 +3539,27 @@ mod test {
     use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
     use std::sync::Arc;
+
+    /// `set_cache_size` splits the budget 90/10 by integer division, so a
+    /// default small enough to be safe must still leave both partitions able to
+    /// hold at least one 4 KiB page. A budget that rounds the write partition
+    /// to zero would be a different bug in the other direction.
+    #[test]
+    fn no_std_cache_default_partitions_into_usable_halves() {
+        const PAGE: usize = 4096;
+        let mut builder = Database::builder();
+        builder.set_cache_size(super::NO_STD_DEFAULT_CACHE_SIZE);
+        assert!(
+            builder.read_cache_size_bytes >= PAGE,
+            "read partition {} cannot hold a page",
+            builder.read_cache_size_bytes
+        );
+        assert!(
+            builder.write_cache_size_bytes >= PAGE,
+            "write partition {} cannot hold a page",
+            builder.write_cache_size_bytes
+        );
+    }
 
     #[derive(Debug)]
     struct FailingBackend {

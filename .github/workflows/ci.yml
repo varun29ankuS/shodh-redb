@@ -96,6 +96,16 @@ jobs:
           - name: wasm32
             args: ""
             wasm: true
+          # Cortex-M0+ has no native pointer-width atomic CAS, so it is the
+          # target that actually exercises the portable-atomic-util Arc and the
+          # critical-section CAS strategy that Cargo.toml enables for every
+          # build. wasm32 does not: it has the atomics available and selects
+          # different code. Without this entry the RP2040 support the manifest
+          # claims, and pays a per-atomic critical section for, is never
+          # compiled. See issue #374.
+          - name: thumbv6m
+            args: ""
+            embedded: thumbv6m-none-eabi
     steps:
       - uses: actions/checkout@v4
 
@@ -112,8 +122,16 @@ jobs:
           restore-keys: compile-${{ matrix.name }}-
 
       - name: Compile
-        if: ${{ !matrix.wasm }}
+        if: ${{ !matrix.wasm && !matrix.embedded }}
         run: cargo check ${{ matrix.args }}
+
+      - name: Compile (${{ matrix.embedded }})
+        if: ${{ matrix.embedded }}
+        run: |
+          rustup target add ${{ matrix.embedded }}
+          # Bare-metal target: lib only. There is no std, so no test harness,
+          # no build scripts that assume a host, and no dev-dependencies.
+          cargo check -p shodh-redb --target ${{ matrix.embedded }} --no-default-features --lib
 
       - name: Compile (wasm32-unknown-unknown)
         if: ${{ matrix.wasm }}

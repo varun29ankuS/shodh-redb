@@ -48,6 +48,20 @@ impl<I: SliceIndex<[u8]>> Index<I> for WritablePage {
     }
 }
 
+/// What [`LRUWriteCache::remove`] found at a key. The three cases have to stay
+/// distinguishable: "present but checked out" needs different byte accounting
+/// from "absent", and collapsing the two is the bug this enum replaced.
+enum RemovedEntry {
+    /// Present, holding its buffer.
+    Buffered(Arc<[u8]>),
+    /// Present, but `take_value` has handed the buffer to a live
+    /// `WritablePage`. That page is still writing, and on drop it will try to
+    /// return the buffer to a slot that no longer exists.
+    CheckedOut,
+    /// No entry at this key.
+    Absent,
+}
+
 #[derive(Default)]
 struct LRUWriteCache {
     cache: LRUCache<Option<Arc<[u8]>>>,
@@ -72,15 +86,20 @@ impl LRUWriteCache {
         self.cache.get(key).and_then(|x| x.as_ref())
     }
 
-    fn remove(&mut self, key: u64) -> Option<Arc<[u8]>> {
-        if let Some(value) = self.cache.remove(key) {
-            debug_assert!(
-                value.is_some(),
-                "LRUWriteCache::remove() found None value for key {key}"
-            );
-            return value;
+    /// Remove `key`, reporting whether it was present and whether its buffer
+    /// was checked out.
+    ///
+    /// This used to collapse [`RemovedEntry::CheckedOut`] into "absent" behind
+    /// a `debug_assert!(value.is_some())`, which made the caller silently skip
+    /// its byte accounting and fired under fuzzing. The state is reachable:
+    /// `cancel_pending_write` runs from the page free and rollback paths, and
+    /// a page can be freed while a `WritablePage` for it is still alive.
+    fn remove(&mut self, key: u64) -> RemovedEntry {
+        match self.cache.remove(key) {
+            Some(Some(buffer)) => RemovedEntry::Buffered(buffer),
+            Some(None) => RemovedEntry::CheckedOut,
+            None => RemovedEntry::Absent,
         }
-        None
     }
 
     fn return_value(&mut self, key: u64, value: Arc<[u8]>) {
@@ -92,12 +111,12 @@ impl LRUWriteCache {
                 prev.is_none(),
                 "LRUWriteCache::return_value() slot was not empty for key {key}"
             );
-        } else {
-            debug_assert!(
-                false,
-                "LRUWriteCache::return_value() key {key} not found in cache"
-            );
         }
+        // No entry: `cancel_pending_write` removed it while this page held the
+        // buffer, which is what happens when the page is freed mid-write.
+        // Dropping `value` is the intended outcome -- the write is being
+        // cancelled -- and its bytes have already come off `write_buffer_bytes`
+        // there, so there is nothing to undo here.
     }
 
     fn take_value(&mut self, key: u64) -> Option<Arc<[u8]>> {
@@ -553,15 +572,28 @@ impl PagedCachedFile {
     }
 
     // Discard pending writes to the given range
-    pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
+    pub(super) fn cancel_pending_write(&self, offset: u64, len: usize) {
         debug_assert_eq!(
             0,
             offset % self.page_size,
             "cancel_pending_write: offset not page-aligned"
         );
-        if let Some(removed) = self.write_buffer.lock().remove(offset) {
-            self.write_buffer_bytes
-                .fetch_sub(removed.len(), Ordering::Release);
+        match self.write_buffer.lock().remove(offset) {
+            // Account with the buffer's own length.
+            RemovedEntry::Buffered(removed) => {
+                self.write_buffer_bytes
+                    .fetch_sub(removed.len(), Ordering::Release);
+            }
+            // Present but checked out to a live `WritablePage`. The buffer's
+            // length is not available here, which is why the caller's `len` is
+            // now used rather than ignored. Without this the bytes were never
+            // returned and `write_buffer_bytes` drifted upward for the life of
+            // the database, shrinking the effective write budget on every
+            // cancelled write and evicting more and more aggressively.
+            RemovedEntry::CheckedOut => {
+                self.write_buffer_bytes.fetch_sub(len, Ordering::Release);
+            }
+            RemovedEntry::Absent => {}
         }
     }
 
@@ -636,14 +668,40 @@ impl PagedCachedFile {
         let existing = {
             let mut lock = self.read_cache[cache_slot].write();
             if let Some(removed) = lock.remove(offset) {
-                if len != removed.len() {
-                    return Err(StorageError::Internal(String::from(
-                        "write: cache inconsistency, length mismatch for cached page",
-                    )));
-                }
+                // The entry has left the cache either way, so its bytes come off
+                // the accounting either way.
                 self.read_cache_bytes
                     .fetch_sub(removed.len(), Ordering::AcqRel);
-                Some(removed)
+                if len == removed.len() {
+                    Some(removed)
+                } else {
+                    // Stale, not corrupt. The read cache is keyed by offset
+                    // alone, so a page freed at one order and reallocated at
+                    // another reuses the offset with a different length. The
+                    // free paths do invalidate (`page_manager::free` and the
+                    // rollback loop), but both derive the length from
+                    // `address_range(..)?`, which fails on corrupted input, and
+                    // savepoint restore and repair replace allocator state
+                    // wholesale rather than freeing page by page.
+                    //
+                    // `invalidate_cache` already treats exactly this state as
+                    // benign -- it drops the entry regardless, behind a
+                    // `debug_assert` that is gated `not(fuzzing)`. This branch
+                    // used to call the same state a logic bug and return
+                    // `Internal`, so the two paths disagreed about whether a
+                    // stale-length entry was a defect. Agreeing with the one
+                    // that tolerates it is the safe direction: the cached bytes
+                    // describe a different extent and are not valid for this
+                    // request under any interpretation, so discarding them and
+                    // falling through to a fresh buffer (or a `read_direct` at
+                    // the requested length) is what the caller needs.
+                    //
+                    // This does not weaken any allocator guard. A genuine double
+                    // allocation is caught by the free-list and page-count
+                    // validation on load, and by the `open_dirty_pages`
+                    // checks -- not by a cache-coherence comparison here.
+                    None
+                }
             } else {
                 None
             }
@@ -808,6 +866,79 @@ mod test {
         // The reader must still see its own bytes, not the writer's scratch.
         assert_eq!(reader.len(), 128);
         drop(reader);
+    }
+
+    /// `page_manager::free` and the rollback loop call `cancel_pending_write`,
+    /// and a page can be freed while a `WritablePage` for it is still alive.
+    /// That left the write cache entry removed while the buffer was checked
+    /// out, which broke two invariants at once: `remove` hit
+    /// `debug_assert!(value.is_some())` (`fuzz_db_image` panicked here once
+    /// #365 removed the OOM that had been stopping it earlier), and the later
+    /// `return_value` from `Drop` hit `key not found`.
+    ///
+    /// In release, where both asserts are absent, the failure was quieter and
+    /// worse: the bytes were never returned, so `write_buffer_bytes` drifted
+    /// upward permanently and shrank the effective write budget.
+    #[test]
+    fn cancel_pending_write_while_the_page_is_checked_out() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(1024).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024, 512, None).unwrap();
+
+        let before = cached_file.write_buffer_bytes.load(Ordering::Acquire);
+
+        // Check the buffer out of the write cache.
+        let page = cached_file.write(0, 128, true).unwrap();
+        assert!(
+            cached_file.write_buffer_bytes.load(Ordering::Acquire) > before,
+            "the write should have been charged to the budget"
+        );
+
+        // Free the page while it is still held.
+        cached_file.cancel_pending_write(0, 128);
+
+        // Must not panic: the slot this page wants to return to is gone.
+        drop(page);
+
+        assert_eq!(
+            cached_file.write_buffer_bytes.load(Ordering::Acquire),
+            before,
+            "cancelling a checked-out write must return its bytes to the budget"
+        );
+    }
+
+    /// The read cache is keyed by offset alone, so a page freed at one order
+    /// and reallocated at another reuses the offset with a different length.
+    /// `write` used to call that a logic bug and return
+    /// `Internal("write: cache inconsistency, length mismatch for cached page")`,
+    /// which `fuzz_redb` hit once the shared-Arc defect in #376 was fixed.
+    ///
+    /// It is stale, not corrupt: `invalidate_cache` already drops exactly this
+    /// state behind a `not(fuzzing)` debug assert. The cached bytes describe a
+    /// different extent, so discarding them and reading fresh is what the
+    /// caller needs.
+    #[test]
+    fn write_discards_a_cached_page_of_the_wrong_length() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(4096).unwrap();
+        backend.write(0, &[0xCD; 512]).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 4096, 512, None).unwrap();
+
+        // Cache the offset at one length, then drop the reader's clone so this
+        // isolates the length mismatch rather than the uniqueness check.
+        let cached = cached_file.read(0, 128, PageHint::None).unwrap();
+        assert_eq!(cached.len(), 128);
+        drop(cached);
+
+        // Same offset, larger order. Must succeed and be the requested size.
+        let mut page = cached_file
+            .write(0, 256, false)
+            .expect("a stale-length cache entry must not be fatal");
+        assert_eq!(
+            page.mem_mut().unwrap().len(),
+            256,
+            "the page handed back must match the requested length"
+        );
     }
 
     /// `overwrite` promises a zeroed page, but the cached-entry branch was

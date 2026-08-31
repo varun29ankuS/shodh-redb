@@ -636,14 +636,40 @@ impl PagedCachedFile {
         let existing = {
             let mut lock = self.read_cache[cache_slot].write();
             if let Some(removed) = lock.remove(offset) {
-                if len != removed.len() {
-                    return Err(StorageError::Internal(String::from(
-                        "write: cache inconsistency, length mismatch for cached page",
-                    )));
-                }
+                // The entry has left the cache either way, so its bytes come off
+                // the accounting either way.
                 self.read_cache_bytes
                     .fetch_sub(removed.len(), Ordering::AcqRel);
-                Some(removed)
+                if len == removed.len() {
+                    Some(removed)
+                } else {
+                    // Stale, not corrupt. The read cache is keyed by offset
+                    // alone, so a page freed at one order and reallocated at
+                    // another reuses the offset with a different length. The
+                    // free paths do invalidate (`page_manager::free` and the
+                    // rollback loop), but both derive the length from
+                    // `address_range(..)?`, which fails on corrupted input, and
+                    // savepoint restore and repair replace allocator state
+                    // wholesale rather than freeing page by page.
+                    //
+                    // `invalidate_cache` already treats exactly this state as
+                    // benign -- it drops the entry regardless, behind a
+                    // `debug_assert` that is gated `not(fuzzing)`. This branch
+                    // used to call the same state a logic bug and return
+                    // `Internal`, so the two paths disagreed about whether a
+                    // stale-length entry was a defect. Agreeing with the one
+                    // that tolerates it is the safe direction: the cached bytes
+                    // describe a different extent and are not valid for this
+                    // request under any interpretation, so discarding them and
+                    // falling through to a fresh buffer (or a `read_direct` at
+                    // the requested length) is what the caller needs.
+                    //
+                    // This does not weaken any allocator guard. A genuine double
+                    // allocation is caught by the free-list and page-count
+                    // validation on load, and by the `open_dirty_pages`
+                    // checks -- not by a cache-coherence comparison here.
+                    None
+                }
             } else {
                 None
             }
@@ -808,6 +834,40 @@ mod test {
         // The reader must still see its own bytes, not the writer's scratch.
         assert_eq!(reader.len(), 128);
         drop(reader);
+    }
+
+    /// The read cache is keyed by offset alone, so a page freed at one order
+    /// and reallocated at another reuses the offset with a different length.
+    /// `write` used to call that a logic bug and return
+    /// `Internal("write: cache inconsistency, length mismatch for cached page")`,
+    /// which `fuzz_redb` hit once the shared-Arc defect in #376 was fixed.
+    ///
+    /// It is stale, not corrupt: `invalidate_cache` already drops exactly this
+    /// state behind a `not(fuzzing)` debug assert. The cached bytes describe a
+    /// different extent, so discarding them and reading fresh is what the
+    /// caller needs.
+    #[test]
+    fn write_discards_a_cached_page_of_the_wrong_length() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(4096).unwrap();
+        backend.write(0, &[0xCD; 512]).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 4096, 512, None).unwrap();
+
+        // Cache the offset at one length, then drop the reader's clone so this
+        // isolates the length mismatch rather than the uniqueness check.
+        let cached = cached_file.read(0, 128, PageHint::None).unwrap();
+        assert_eq!(cached.len(), 128);
+        drop(cached);
+
+        // Same offset, larger order. Must succeed and be the requested size.
+        let mut page = cached_file
+            .write(0, 256, false)
+            .expect("a stale-length cache entry must not be fatal");
+        assert_eq!(
+            page.mem_mut().unwrap().len(),
+            256,
+            "the page handed back must match the requested length"
+        );
     }
 
     /// `overwrite` promises a zeroed page, but the cached-entry branch was

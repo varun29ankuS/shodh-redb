@@ -485,7 +485,19 @@ impl UntypedBtreeMut {
         } else {
             return Ok(None);
         };
-        new_page.memory_mut()?.copy_from_slice(old_page.memory());
+        // Both lengths derive from page numbers that came off disk, so
+        // they can disagree on a corrupt file and `copy_from_slice`
+        // panics on a length mismatch rather than reporting one.
+        let old_mem = old_page.memory();
+        let new_mem = new_page.memory_mut()?;
+        if new_mem.len() != old_mem.len() {
+            return Err(StorageError::Corrupted(format!(
+                "relocation: source page is {} bytes but its replacement is {}",
+                old_mem.len(),
+                new_mem.len()
+            )));
+        }
+        new_mem.copy_from_slice(old_mem);
 
         let node_mem = old_page.memory();
         match node_mem[0] {
@@ -833,7 +845,19 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                         })?;
                 let mut new_page = self.mem.allocate(required, &mut allocated)?;
                 let old_page = self.mem.get_page(root.root)?;
-                new_page.memory_mut()?.copy_from_slice(old_page.memory());
+                // Both lengths derive from page numbers that came off disk, so
+                // they can disagree on a corrupt file and `copy_from_slice`
+                // panics on a length mismatch rather than reporting one.
+                let old_mem = old_page.memory();
+                let new_mem = new_page.memory_mut()?;
+                if new_mem.len() != old_mem.len() {
+                    return Err(StorageError::Corrupted(format!(
+                        "root relocation: source page is {} bytes but its replacement is {}",
+                        old_mem.len(),
+                        new_mem.len()
+                    )));
+                }
+                new_mem.copy_from_slice(old_mem);
                 drop(old_page);
                 freed_pages.push(root.root);
 
@@ -913,9 +937,19 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                         })?;
                     let mut new_page = self.mem.allocate(required, &mut allocated)?;
                     let old_child_page = self.mem.get_page(child_page)?;
-                    new_page
-                        .memory_mut()?
-                        .copy_from_slice(old_child_page.memory());
+                    // Both lengths derive from page numbers that came off disk, so
+                    // they can disagree on a corrupt file and `copy_from_slice`
+                    // panics on a length mismatch rather than reporting one.
+                    let old_mem = old_child_page.memory();
+                    let new_mem = new_page.memory_mut()?;
+                    if new_mem.len() != old_mem.len() {
+                        return Err(StorageError::Corrupted(format!(
+                            "child relocation: source page is {} bytes but its replacement is {}",
+                            old_mem.len(),
+                            new_mem.len()
+                        )));
+                    }
+                    new_mem.copy_from_slice(old_mem);
                     drop(old_child_page);
                     freed_pages.push(child_page);
 

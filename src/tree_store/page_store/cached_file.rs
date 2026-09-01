@@ -58,9 +58,15 @@ enum RemovedEntry {
     /// Present, holding its buffer.
     Buffered(Arc<[u8]>),
     /// Present, but `take_value` has handed the buffer to a live
-    /// `WritablePage`. That page is still writing, and on drop it will try to
-    /// return the buffer to a slot that no longer exists.
-    CheckedOut,
+    /// `WritablePage`. Carries the entry length, because there is no buffer
+    /// left to measure and the caller still has to take those bytes off the
+    /// write budget.
+    ///
+    /// Making the caller supply that length is what went wrong before:
+    /// `cancel_pending_write` was handed a `len` it ignored, so the bytes were
+    /// never returned and the budget drifted upward for the life of the
+    /// database. The length is the entry own fact, so the entry reports it.
+    CheckedOut(usize),
     /// No entry at this key.
     Absent,
 }
@@ -84,6 +90,11 @@ enum RemovedEntry {
 #[derive(Default)]
 struct WriteCacheEntry {
     generation: u64,
+    /// Length of the buffer, kept on the entry rather than derived from
+    /// `value`, because a checked-out entry has no buffer to measure. Without
+    /// it `cancel_pending_write` could not account for the bytes it was
+    /// dropping and had to be handed a length by its caller.
+    len: usize,
     value: Option<Arc<[u8]>>,
 }
 
@@ -106,10 +117,12 @@ impl LRUWriteCache {
     fn insert(&mut self, key: u64, value: Arc<[u8]>) -> u64 {
         let generation = self.next_generation;
         self.next_generation += 1;
+        let len = value.len();
         let prev = self.cache.insert(
             key,
             WriteCacheEntry {
                 generation,
+                len,
                 value: Some(value),
             },
         );
@@ -138,7 +151,9 @@ impl LRUWriteCache {
                 value: Some(buffer),
                 ..
             }) => RemovedEntry::Buffered(buffer),
-            Some(WriteCacheEntry { value: None, .. }) => RemovedEntry::CheckedOut,
+            Some(WriteCacheEntry {
+                value: None, len, ..
+            }) => RemovedEntry::CheckedOut(len),
             None => RemovedEntry::Absent,
         }
     }
@@ -634,14 +649,17 @@ impl PagedCachedFile {
                 self.write_buffer_bytes
                     .fetch_sub(removed.len(), Ordering::Release);
             }
-            // Present but checked out to a live `WritablePage`. The buffer's
-            // length is not available here, which is why the caller's `len` is
-            // now used rather than ignored. Without this the bytes were never
-            // returned and `write_buffer_bytes` drifted upward for the life of
-            // the database, shrinking the effective write budget on every
-            // cancelled write and evicting more and more aggressively.
-            RemovedEntry::CheckedOut => {
-                self.write_buffer_bytes.fetch_sub(len, Ordering::Release);
+            // Present but checked out to a live `WritablePage`. The entry
+            // reports its own length, so this cannot silently disagree with
+            // what was charged at insert -- which is how the budget drifted
+            // upward for the life of the database on every cancelled write.
+            RemovedEntry::CheckedOut(entry_len) => {
+                debug_assert_eq!(
+                    entry_len, len,
+                    "cancel_pending_write: caller says {len} bytes, entry holds {entry_len}"
+                );
+                self.write_buffer_bytes
+                    .fetch_sub(entry_len, Ordering::Release);
             }
             RemovedEntry::Absent => {}
         }

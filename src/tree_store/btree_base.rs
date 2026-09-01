@@ -532,7 +532,15 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
                 if i == self.entry_index {
                     builder.push(&key_bytes, &stored_value);
                 } else {
-                    let entry = accessor.entry(i).unwrap();
+                    // `entry` returns None when the offsets on the page name a
+                    // range outside it. That used to panic inside `entry`
+                    // itself; making it fallible only moved the panic here
+                    // unless the caller handles it.
+                    let entry = accessor.entry(i).ok_or_else(|| {
+                        StorageError::Corrupted(format!(
+                            "leaf entry {i} is unreadable: offsets name a range outside the page"
+                        ))
+                    })?;
                     builder.push(entry.key(), entry.value());
                 }
             }
@@ -921,20 +929,31 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         self.pairs.push((key, value));
     }
 
+    /// Returns `Err` when an entry cannot be read.
+    ///
+    /// This used to return `()` and `unwrap` each entry. Skipping an
+    /// unreadable one instead would be worse than the panic: this copies a
+    /// leaf into a builder, so a dropped entry is silent data loss rather
+    /// than a visible failure.
     pub(super) fn push_all_except(
         &mut self,
         accessor: &'a LeafAccessor<'_>,
         except: Option<usize>,
-    ) {
+    ) -> Result<()> {
         for i in 0..accessor.num_pairs() {
             if let Some(except) = except
                 && except == i
             {
                 continue;
             }
-            let entry = accessor.entry(i).unwrap();
+            let entry = accessor.entry(i).ok_or_else(|| {
+                StorageError::Corrupted(format!(
+                    "leaf entry {i} is unreadable: offsets name a range outside the page"
+                ))
+            })?;
             self.push(entry.key(), entry.value());
         }
+        Ok(())
     }
 
     pub(super) fn should_split(&self) -> bool {

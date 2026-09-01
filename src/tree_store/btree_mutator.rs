@@ -179,7 +179,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         K::fixed_width(),
                         self.value_width(),
                     );
-                    builder.push_all_except(&accessor, Some(deleted_pair));
+                    builder.push_all_except(&accessor, Some(deleted_pair))?;
                     let page = builder.build()?;
                     // Same disk-derived comparison: a mismatch means the
                     // stored length disagrees with the leaf, which is
@@ -246,7 +246,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         K::fixed_width(),
                         self.value_width(),
                     );
-                    builder.push_all_except(&accessor, Some(deleted_pair));
+                    builder.push_all_except(&accessor, Some(deleted_pair))?;
                     let page = builder.build()?;
                     // Same disk-derived comparison: a mismatch means the
                     // stored length disagrees with the leaf, which is
@@ -448,7 +448,15 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 {
                     let page_number = page.get_page_number();
                     let existing_value = if found {
-                        let copied_value = accessor.entry(position).unwrap().value().to_vec();
+                        let copied_value = accessor
+                            .entry(position)
+                            .ok_or_else(|| {
+                                StorageError::Corrupted(format!(
+                                    "leaf entry {position} is unreadable: offsets name a range outside the page"
+                                ))
+                            })?
+                            .value()
+                            .to_vec();
                         if self.compression.is_enabled() {
                             Some(AccessGuard::with_owned_value_decompress(copied_value)?)
                         } else {
@@ -490,7 +498,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         builder.push(key, value);
                     }
                     if !found || i != position {
-                        let entry = accessor.entry(i).unwrap();
+                        let entry = accessor.entry(i).ok_or_else(|| {
+                            StorageError::Corrupted(format!(
+                                "leaf entry {i} is unreadable: offsets name a range outside the page"
+                            ))
+                        })?;
                         builder.push(entry.key(), entry.value());
                     }
                 }
@@ -826,7 +838,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         }
         // Extract key bytes for pop operations before any page modifications
         if matches!(target, DeleteTarget::First | DeleteTarget::Last) {
-            let entry = accessor.entry(position).unwrap();
+            let entry = accessor.entry(position).ok_or_else(|| {
+                StorageError::Corrupted(format!(
+                    "leaf entry {position} is unreadable: offsets name a range outside the page"
+                ))
+            })?;
             self.extracted_key = Some(entry.key().to_vec());
         }
         let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
@@ -893,7 +909,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 if i == position {
                     continue;
                 }
-                let entry = accessor.entry(i).unwrap();
+                let entry = accessor.entry(i).ok_or_else(|| {
+                    StorageError::Corrupted(format!(
+                        "leaf entry {i} is unreadable: offsets name a range outside the page"
+                    ))
+                })?;
                 builder.push(entry.key(), entry.value());
             }
             let new_page = builder.build()?;
@@ -1076,7 +1096,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         K::fixed_width(),
                         self.value_width(),
                     );
-                    child_builder.push_all_except(&partial_child_accessor, Some(deleted_pair));
+                    child_builder.push_all_except(&partial_child_accessor, Some(deleted_pair))?;
                     let new_page = child_builder.build()?;
                     builder.push_all(&accessor);
                     builder.replace_child(child_index, new_page.get_page_number(), DEFERRED);
@@ -1108,12 +1128,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         );
                         if child_index < merge_with {
                             child_builder
-                                .push_all_except(&partial_child_accessor, Some(deleted_pair));
+                                .push_all_except(&partial_child_accessor, Some(deleted_pair))?;
                         }
-                        child_builder.push_all_except(&merge_with_accessor, None);
+                        child_builder.push_all_except(&merge_with_accessor, None)?;
                         if child_index > merge_with {
                             child_builder
-                                .push_all_except(&partial_child_accessor, Some(deleted_pair));
+                                .push_all_except(&partial_child_accessor, Some(deleted_pair))?;
                         }
                         if child_builder.should_split() {
                             let (new_page1, split_key, new_page2) = child_builder.build_split()?;

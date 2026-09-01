@@ -1,3 +1,24 @@
+# Everything CI enforces, in one command, failing on the first error.
+#
+# This exists because the checklist used to live only in people's heads, and
+# the steps that get skipped are always the same two: the no-default-features
+# clippy pass and the bare-metal targets. Default-feature builds compile the
+# `cfg(feature = ...)` and `cfg(not(std))` blocks OUT, so nothing local catches
+# what breaks in them -- a missing `use log::warn;`, a `to_string()` that needs
+# `alloc::string::ToString`, a bare `format!` that is only in scope with std.
+# Each of those reached CI at least once.
+#
+# `just prepush` before every push. Not "the parts that seem relevant".
+prepush:
+    cargo fmt --all -- --check
+    cargo clippy --all --all-targets --all-features -- -Dwarnings
+    cargo clippy --all --all-targets --no-default-features -- -Dwarnings
+    rustup target add wasm32-unknown-unknown
+    cargo clippy --target wasm32-unknown-unknown --no-default-features --lib -- -Dwarnings
+    rustup target add thumbv6m-none-eabi
+    RUSTFLAGS="--deny warnings" cargo check -p shodh-redb --target thumbv6m-none-eabi --no-default-features --lib
+    RUST_BACKTRACE=1 cargo test --all --all-features
+
 build: pre
     cargo build --all-targets --all-features
     cargo doc

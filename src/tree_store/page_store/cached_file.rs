@@ -17,6 +17,9 @@ use portable_atomic::{AtomicBool, AtomicUsize};
 pub(super) struct WritablePage {
     buffer: Arc<Mutex<LRUWriteCache>>,
     offset: u64,
+    /// Generation of the write-cache entry this buffer was taken from. Offsets
+    /// get reused, so identity needs more than the offset alone.
+    generation: u64,
     data: Arc<[u8]>,
 }
 
@@ -36,7 +39,7 @@ impl Drop for WritablePage {
     fn drop(&mut self) {
         self.buffer
             .lock()
-            .return_value(self.offset, self.data.clone());
+            .return_value(self.offset, self.generation, self.data.clone());
     }
 }
 
@@ -55,35 +58,83 @@ enum RemovedEntry {
     /// Present, holding its buffer.
     Buffered(Arc<[u8]>),
     /// Present, but `take_value` has handed the buffer to a live
-    /// `WritablePage`. That page is still writing, and on drop it will try to
-    /// return the buffer to a slot that no longer exists.
-    CheckedOut,
+    /// `WritablePage`. Carries the entry length, because there is no buffer
+    /// left to measure and the caller still has to take those bytes off the
+    /// write budget.
+    ///
+    /// Making the caller supply that length is what went wrong before:
+    /// `cancel_pending_write` was handed a `len` it ignored, so the bytes were
+    /// never returned and the budget drifted upward for the life of the
+    /// database. The length is the entry own fact, so the entry reports it.
+    CheckedOut(usize),
     /// No entry at this key.
     Absent,
 }
 
+/// One write-buffer entry, stamped with the generation it was created in.
+///
+/// The stamp lets a returning `WritablePage` tell its own entry from a
+/// different entry that happens to sit at the same offset. Offsets are reused:
+/// a page can be freed mid-write, which removes its entry while the page is
+/// still alive, and the next allocation inserts a fresh entry at that offset.
+/// Without the stamp the stale page returned its buffer into the new entry
+/// slot, and the new page own return then found the slot occupied:
+///
+/// ```text
+/// LRUWriteCache::return_value() slot was not empty for key 5120
+/// ```
+///
+/// Silently dropping one of the two buffers would be worse than the panic:
+/// whichever arrives second loses, so the entry can be left holding the
+/// cancelled page stale bytes.
+#[derive(Default)]
+struct WriteCacheEntry {
+    generation: u64,
+    /// Length of the buffer, kept on the entry rather than derived from
+    /// `value`, because a checked-out entry has no buffer to measure. Without
+    /// it `cancel_pending_write` could not account for the bytes it was
+    /// dropping and had to be handed a length by its caller.
+    len: usize,
+    value: Option<Arc<[u8]>>,
+}
+
 #[derive(Default)]
 struct LRUWriteCache {
-    cache: LRUCache<Option<Arc<[u8]>>>,
+    cache: LRUCache<WriteCacheEntry>,
+    next_generation: u64,
 }
 
 impl LRUWriteCache {
     fn new() -> Self {
         Self {
             cache: Default::default(),
+            next_generation: 0,
         }
     }
 
-    fn insert(&mut self, key: u64, value: Arc<[u8]>) {
-        let prev = self.cache.insert(key, Some(value));
+    /// Insert `value` and return the generation stamp that `return_value` will
+    /// require in order to accept the buffer back.
+    fn insert(&mut self, key: u64, value: Arc<[u8]>) -> u64 {
+        let generation = self.next_generation;
+        self.next_generation += 1;
+        let len = value.len();
+        let prev = self.cache.insert(
+            key,
+            WriteCacheEntry {
+                generation,
+                len,
+                value: Some(value),
+            },
+        );
         debug_assert!(
             prev.is_none(),
             "LRUWriteCache::insert() duplicate key {key}"
         );
+        generation
     }
 
     fn get(&self, key: u64) -> Option<&Arc<[u8]>> {
-        self.cache.get(key).and_then(|x| x.as_ref())
+        self.cache.get(key).and_then(|x| x.value.as_ref())
     }
 
     /// Remove `key`, reporting whether it was present and whether its buffer
@@ -96,45 +147,59 @@ impl LRUWriteCache {
     /// a page can be freed while a `WritablePage` for it is still alive.
     fn remove(&mut self, key: u64) -> RemovedEntry {
         match self.cache.remove(key) {
-            Some(Some(buffer)) => RemovedEntry::Buffered(buffer),
-            Some(None) => RemovedEntry::CheckedOut,
+            Some(WriteCacheEntry {
+                value: Some(buffer),
+                ..
+            }) => RemovedEntry::Buffered(buffer),
+            Some(WriteCacheEntry {
+                value: None, len, ..
+            }) => RemovedEntry::CheckedOut(len),
             None => RemovedEntry::Absent,
         }
     }
 
-    fn return_value(&mut self, key: u64, value: Arc<[u8]>) {
-        // Called from Drop, which cannot propagate errors. The entry must exist
-        // (it was inserted before take_value) and its slot must be None (taken).
-        if let Some(slot) = self.cache.get_mut(key) {
-            let prev = slot.replace(value);
+    /// Return a checked-out buffer, but only to the entry it came from.
+    ///
+    /// Called from `Drop`, which cannot propagate errors, so every rejected
+    /// case just drops `value`. There are two, and both are expected:
+    ///
+    /// - No entry. `cancel_pending_write` removed it while this page held the
+    ///   buffer, which is what happens when a page is freed mid-write. Its
+    ///   bytes already came off `write_buffer_bytes` there.
+    /// - Generation mismatch. The entry at this offset was removed and a
+    ///   different one inserted in its place while this page was alive. That
+    ///   newer entry owns the offset now, and writing a cancelled page bytes
+    ///   into it would be silent corruption rather than a lost update.
+    fn return_value(&mut self, key: u64, generation: u64, value: Arc<[u8]>) {
+        if let Some(entry) = self.cache.get_mut(key) {
+            if entry.generation != generation {
+                return;
+            }
+            let prev = entry.value.replace(value);
             debug_assert!(
                 prev.is_none(),
                 "LRUWriteCache::return_value() slot was not empty for key {key}"
             );
         }
-        // No entry: `cancel_pending_write` removed it while this page held the
-        // buffer, which is what happens when the page is freed mid-write.
-        // Dropping `value` is the intended outcome -- the write is being
-        // cancelled -- and its bytes have already come off `write_buffer_bytes`
-        // there, so there is nothing to undo here.
     }
 
-    fn take_value(&mut self, key: u64) -> Option<Arc<[u8]>> {
-        if let Some(value) = self.cache.get_mut(key) {
-            return value.take();
-        }
-        None
+    fn take_value(&mut self, key: u64) -> Option<(u64, Arc<[u8]>)> {
+        let entry = self.cache.get_mut(key)?;
+        let generation = entry.generation;
+        entry.value.take().map(|value| (generation, value))
     }
 
     fn pop_lowest_priority(&mut self) -> Option<(u64, Arc<[u8]>)> {
         for _ in 0..self.cache.len() {
-            if let Some((k, v)) = self.cache.pop_lowest_priority() {
-                if let Some(v_inner) = v {
-                    return Some((k, v_inner));
+            if let Some((k, mut entry)) = self.cache.pop_lowest_priority() {
+                if let Some(value) = entry.value.take() {
+                    return Some((k, value));
                 }
 
-                // Value is borrowed by take_value(). We can't evict it, so put it back.
-                self.cache.insert(k, v);
+                // Value is borrowed by take_value(). We can't evict it, so put
+                // it back -- with its original generation, or the live page
+                // holding that buffer could not return it.
+                self.cache.insert(k, entry);
             } else {
                 break;
             }
@@ -398,7 +463,7 @@ impl PagedCachedFile {
         let mut write_buffer = self.write_buffer.lock();
 
         for (offset, buffer) in write_buffer.cache.iter() {
-            let raw = buffer.as_ref().ok_or_else(|| {
+            let raw = buffer.value.as_ref().ok_or_else(|| {
                 StorageError::Internal(String::from(
                     "flush_write_buffer: write cache entry has no data",
                 ))
@@ -406,7 +471,7 @@ impl PagedCachedFile {
             self.file.write(*offset, raw)?;
         }
         for (offset, buffer) in write_buffer.cache.iter_mut() {
-            let buffer = buffer.take().ok_or_else(|| {
+            let buffer = buffer.value.take().ok_or_else(|| {
                 StorageError::Internal(String::from(
                     "flush_write_buffer: write cache entry has no data during promotion",
                 ))
@@ -572,7 +637,11 @@ impl PagedCachedFile {
     }
 
     // Discard pending writes to the given range
-    pub(super) fn cancel_pending_write(&self, offset: u64, len: usize) {
+    /// `_len` is the caller's idea of the page length. It is no longer used:
+    /// the entry reports what it was charged, which is the only figure that
+    /// can balance the insert. Kept in the signature because callers derive it
+    /// anyway and removing it would churn `page_manager` for nothing.
+    pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
         debug_assert_eq!(
             0,
             offset % self.page_size,
@@ -584,14 +653,22 @@ impl PagedCachedFile {
                 self.write_buffer_bytes
                     .fetch_sub(removed.len(), Ordering::Release);
             }
-            // Present but checked out to a live `WritablePage`. The buffer's
-            // length is not available here, which is why the caller's `len` is
-            // now used rather than ignored. Without this the bytes were never
-            // returned and `write_buffer_bytes` drifted upward for the life of
-            // the database, shrinking the effective write budget on every
-            // cancelled write and evicting more and more aggressively.
-            RemovedEntry::CheckedOut => {
-                self.write_buffer_bytes.fetch_sub(len, Ordering::Release);
+            // Present but checked out to a live `WritablePage`. Subtract what
+            // the entry was actually charged at insert.
+            //
+            // The caller's length is deliberately not used, and asserting the
+            // two agree was wrong: `fuzz_redb` produced "caller says 1024
+            // bytes, entry holds 4096" immediately. The caller derives its
+            // length from the page number's CURRENT order, while the entry
+            // holds what was charged when it was inserted, and an offset
+            // reused at a different order makes those differ legitimately --
+            // the same reuse behind every other defect in this file.
+            //
+            // Only the entry's figure can balance the insert, so only the
+            // entry's figure is used.
+            RemovedEntry::CheckedOut(entry_len) => {
+                self.write_buffer_bytes
+                    .fetch_sub(entry_len, Ordering::Release);
             }
             RemovedEntry::Absent => {}
         }
@@ -728,8 +805,8 @@ impl PagedCachedFile {
         // I got wrong when this check was left alone while the read-cache one
         // was fixed.
         let buffered = match lock.take_value(offset) {
-            Some(removed) if removed.len() == len => Some(removed),
-            Some(removed) => {
+            Some((generation, removed)) if removed.len() == len => Some((generation, removed)),
+            Some((_, removed)) => {
                 // Drop the whole entry, not just its value: `take_value` leaves
                 // the slot in place, and the fresh path below inserts at this
                 // same offset, which would trip the duplicate-key assert.
@@ -741,10 +818,10 @@ impl PagedCachedFile {
             None => None,
         };
 
-        let data = if let Some(removed) = buffered {
+        let (generation, data) = if let Some((generation, removed)) = buffered {
             #[cfg(feature = "cache_metrics")]
             self.writes_hits.fetch_add(1, Ordering::AcqRel);
-            Self::uniquely_owned(removed)
+            (generation, Self::uniquely_owned(removed))
         } else {
             let previous = self.write_buffer_bytes.fetch_add(len, Ordering::AcqRel);
             // Compute how many bytes to evict: at least the overage beyond the limit.
@@ -809,6 +886,7 @@ impl PagedCachedFile {
         Ok(WritablePage {
             buffer: self.write_buffer.clone(),
             offset,
+            generation,
             data,
         })
     }
@@ -920,6 +998,46 @@ mod test {
             cached_file.write_buffer_bytes.load(Ordering::Acquire),
             before,
             "cancelling a checked-out write must return its bytes to the budget"
+        );
+    }
+
+    /// A page freed mid-write leaves a live `WritablePage` whose entry is gone.
+    /// The next allocation reuses the offset and inserts a fresh entry, and the
+    /// stale page then returned its buffer into that new entry, panicking with
+    /// `LRUWriteCache::return_value() slot was not empty for key 5120`,
+    /// which the 2026-09-01 nightly hit on `fuzz_redb`. The panic is the mild
+    /// version. Dropping one of the two buffers instead, which is the obvious
+    /// way to silence it, leaves whichever arrived second discarded -- so the
+    /// entry can end up holding the cancelled page stale bytes and the live
+    /// page loses its write. The generation stamp settles which buffer belongs
+    /// to the entry instead of guessing from arrival order.
+    #[test]
+    fn a_cancelled_page_does_not_return_its_buffer_to_a_reused_offset() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(4096).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 1024, 4096, 4096, None).unwrap();
+
+        // A checks out the buffer at this offset.
+        let mut stale = cached_file.write(1024, 1024, true).unwrap();
+        stale.mem_mut().unwrap().fill(0xAA);
+
+        // The page is freed while A is still alive: its entry is removed.
+        cached_file.cancel_pending_write(1024, 1024);
+
+        // The offset is reallocated, so B gets a brand new entry there.
+        let mut fresh = cached_file.write(1024, 1024, true).unwrap();
+        fresh.mem_mut().unwrap().fill(0xBB);
+
+        // A returns first and must not claim B entry.
+        drop(stale);
+        // B returns into its own entry, which must still be empty.
+        drop(fresh);
+
+        // The write buffer must hold B bytes, not A.
+        let seen = cached_file.read(1024, 1024, PageHint::None).unwrap();
+        assert!(
+            seen.iter().all(|&b| b == 0xBB),
+            "the reused offset must hold the live page bytes, not the cancelled page"
         );
     }
 

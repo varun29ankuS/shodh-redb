@@ -1344,6 +1344,51 @@ impl Database {
     /// Compacts the database file
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
+    /// Commit until no pending freed pages remain, then return.
+    ///
+    /// The number of commits this takes is not fixed. A durable commit frees
+    /// the entries older than itself but can add its own, because the freed
+    /// page trees are system tables that allocate pages while committing. The
+    /// two call sites in `compact` encoded a guess at the count -- two here,
+    /// three after relocation, with a comment explaining why three -- and then
+    /// declared anything still pending a logic bug:
+    ///
+    /// ```text
+    /// internal error: compaction: pending free pages remain after exclusive
+    ///                 durable commit
+    /// ```
+    ///
+    /// `fuzz_redb` found a state that needed more than the guess. Nothing was
+    /// wrong with the engine there; the drain simply had not finished, and a
+    /// fixed count cannot know when it has. Loop until it converges instead.
+    ///
+    /// Bounded, because a corrupt state must not spin here: the failure is
+    /// reported as `Corrupted`, not `Internal`, since not converging says
+    /// something about the data rather than about the code.
+    fn drain_pending_free_pages(&self, shrink: bool) -> Result<(), CompactionError> {
+        const MAX_DRAIN_COMMITS: usize = 16;
+
+        for _ in 0..MAX_DRAIN_COMMITS {
+            let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            let pending = txn.pending_free_pages().map_err(CompactionError::Storage)?;
+            txn.abort().map_err(CompactionError::Storage)?;
+            if !pending {
+                return Ok(());
+            }
+
+            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            txn.set_two_phase_commit(true);
+            if shrink {
+                txn.set_shrink_policy(ShrinkPolicy::Maximum);
+            }
+            txn.commit().map_err(|e| e.into_storage_error())?;
+        }
+
+        Err(CompactionError::Storage(StorageError::Corrupted(
+            alloc::format!("compaction: freed pages did not drain in {MAX_DRAIN_COMMITS} commits"),
+        )))
+    }
+
     pub fn compact(&mut self) -> Result<bool, CompactionError> {
         if self
             .transaction_tracker
@@ -1374,16 +1419,11 @@ impl Database {
         let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
         txn.set_two_phase_commit(true);
         txn.commit().map_err(|e| e.into_storage_error())?;
-        // There can't be any outstanding transactions because we have a `&mut self`, so all pending free pages
-        // should have been cleared out by the above commit()
-        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-        if txn.pending_free_pages()? {
-            return Err(StorageError::Internal(
-                "compaction: pending free pages remain after exclusive durable commit".into(),
-            )
-            .into());
-        }
-        txn.abort()?;
+        // There can't be any outstanding transactions because we have a
+        // `&mut self`, so the freed pages can be drained to completion here.
+        // How many commits that takes is not fixed -- see
+        // `drain_pending_free_pages`.
+        self.drain_pending_free_pages(false)?;
 
         let mut compacted = false;
         // Iteratively compact until no progress is made.
@@ -1413,23 +1453,11 @@ impl Database {
             // Also shrink the database file by the maximum amount
             txn.set_shrink_policy(ShrinkPolicy::Maximum);
             txn.commit().map_err(|e| e.into_storage_error())?;
-            // Triple commit to free up the relocated pages for reuse
-            // Design: triple commit is required because the data freed tree is a system table
-            // that allocates pages during commit. First commit writes user data, second
-            // processes freed pages, third ensures freed-page metadata is committed.
-            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-            txn.set_two_phase_commit(true);
-            // Also shrink the database file by the maximum amount
-            txn.set_shrink_policy(ShrinkPolicy::Maximum);
-            txn.commit().map_err(|e| e.into_storage_error())?;
-            let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-            if txn.pending_free_pages()? {
-                return Err(StorageError::Internal(
-                    "compaction: pending free pages remain after exclusive durable commit".into(),
-                )
-                .into());
-            }
-            txn.abort()?;
+            // The freed-page trees are system tables that allocate while
+            // committing, so a commit can leave entries of its own behind.
+            // This used to commit a third time and assume that was enough.
+            // Drain until it converges instead.
+            self.drain_pending_free_pages(true)?;
 
             if !progress {
                 break;

@@ -832,8 +832,20 @@ impl<'a> LeafAccessor<'a> {
     }
 
     pub(crate) fn entry(&self, n: usize) -> Option<EntryAccessor<'a>> {
-        let key = &self.page[self.key_start(n)?..self.key_end(n)?];
-        let value = &self.page[self.value_start(n)?..self.value_end(n)?];
+        // These offsets are read off the page, so a corrupt leaf can name a
+        // range that runs past its end, and indexing panicked on it:
+        //
+        //   range end index 1626 out of range for slice of length 1024
+        //
+        // `key_unchecked` immediately above already reads the same offsets
+        // through `get`; this is that guard at the sibling that lacked it.
+        // `entry_ranges` needs none: its callers build an `AccessGuard`,
+        // whose `value_checked` clamps against the page length.
+        //
+        // `None` means the same thing here as it already does for an
+        // out-of-bounds index -- no such entry -- and every caller handles it.
+        let key = self.page.get(self.key_start(n)?..self.key_end(n)?)?;
+        let value = self.page.get(self.value_start(n)?..self.value_end(n)?)?;
         Some(EntryAccessor::new(key, value))
     }
 

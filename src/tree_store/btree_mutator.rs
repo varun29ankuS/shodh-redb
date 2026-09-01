@@ -1,5 +1,6 @@
 use crate::compat::Arc;
 use crate::compat::Mutex;
+use crate::tree_store::btree::MAX_TREE_DEPTH;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
     LeafBuilder, LeafMutator,
@@ -152,6 +153,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 self.mem.get_page(p)?,
                 checksum,
                 DeleteTarget::Key(K::as_bytes(key).as_ref()),
+                0,
             )?;
             // `length` comes off disk in the root BtreeHeader. A tree that
             // yields an entry while claiming to be empty is inconsistent, so
@@ -219,7 +221,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         {
             self.extracted_key = None;
             let (deletion_result, found) =
-                *self.delete_helper(self.mem.get_page(p)?, checksum, target)?;
+                *self.delete_helper(self.mem.get_page(p)?, checksum, target, 0)?;
             // `length` comes off disk in the root BtreeHeader. A tree that
             // yields an entry while claiming to be empty is inconsistent, so
             // report it rather than underflowing.
@@ -305,6 +307,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 checksum,
                 K::as_bytes(key).as_ref(),
                 value_bytes_ref,
+                0,
             )?;
 
             let new_length = if result.old_value.is_some() {
@@ -349,13 +352,32 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         Ok((old_value, guard))
     }
 
+    /// `depth` bounds the recursion the same way `MAX_TREE_DEPTH` bounds the
+    /// read path in `btree`. #306 added that limit to every traversal and left
+    /// the mutation path unbounded, so a corrupt tree whose branch pointers
+    /// form a cycle recursed until the stack ran out:
+    ///
+    /// ```text
+    /// AddressSanitizer: stack-overflow
+    ///   MutateHelper::insert_helper (repeated to the stack limit)
+    /// ```
+    ///
+    /// A stack overflow is not a panic. It cannot be caught, it takes the
+    /// process with it, and it is reachable here from the allocator state tree
+    /// during commit -- which `Database::drop` performs.
     fn insert_helper(
         &mut self,
         page: PageImpl,
         page_checksum: Checksum,
         key: &[u8],
         value: &[u8],
+        depth: u32,
     ) -> Result<Box<InsertionResult<'a, V>>> {
+        if depth > MAX_TREE_DEPTH {
+            return Err(StorageError::Corrupted(format!(
+                "B-tree depth {depth} exceeds maximum {MAX_TREE_DEPTH} while inserting"
+            )));
+        }
         let node_mem = page.memory();
         Ok(match node_mem[0] {
             LEAF => {
@@ -591,8 +613,13 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         "Branch: missing checksum at index {child_index}"
                     ))
                 })?;
-                let sub_result =
-                    self.insert_helper(self.mem.get_page(child_page)?, child_checksum, key, value)?;
+                let sub_result = self.insert_helper(
+                    self.mem.get_page(child_page)?,
+                    child_checksum,
+                    key,
+                    value,
+                    depth + 1,
+                )?;
 
                 if sub_result.additional_sibling.is_none()
                     && self.modify_uncommitted
@@ -914,6 +941,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         page: PageImpl,
         checksum: Checksum,
         target: DeleteTarget<'_>,
+        depth: u32,
     ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
         let accessor = BranchAccessor::new(&page, K::fixed_width())?;
         let original_page_number = page.get_page_number();
@@ -940,6 +968,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             self.mem.get_page(child_page_number)?,
             child_checksum,
             target,
+            depth + 1,
         )?;
         if found.is_none() {
             return Ok(Box::new((Subtree(original_page_number, checksum), None)));
@@ -1242,16 +1271,25 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
     // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
     // If key is not found, guaranteed not to modify the tree
+    /// `depth` bounds this recursion for the same reason it bounds
+    /// `insert_helper`: the delete path recurses through
+    /// `delete_branch_helper` and was equally unbounded.
     fn delete_helper(
         &mut self,
         page: PageImpl,
         checksum: Checksum,
         target: DeleteTarget<'_>,
+        depth: u32,
     ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
+        if depth > MAX_TREE_DEPTH {
+            return Err(StorageError::Corrupted(format!(
+                "B-tree depth {depth} exceeds maximum {MAX_TREE_DEPTH} while deleting"
+            )));
+        }
         let page_type = page.memory()[0];
         match page_type {
             LEAF => self.delete_leaf_helper(page, checksum, target),
-            BRANCH => self.delete_branch_helper(page, checksum, target),
+            BRANCH => self.delete_branch_helper(page, checksum, target, depth),
             x => Err(StorageError::invalid_page_type(page.get_page_number(), x)),
         }
     }

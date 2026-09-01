@@ -323,7 +323,19 @@ pub(crate) fn relocate_subtrees(
         return Ok(root);
     };
     let new_page_number = new_page.get_page_number();
-    new_page.memory_mut()?.copy_from_slice(old_page.memory());
+    // Both lengths derive from page numbers that came off disk, so
+    // they can disagree on a corrupt file and `copy_from_slice`
+    // panics on a length mismatch rather than reporting one.
+    let old_mem = old_page.memory();
+    let new_mem = new_page.memory_mut()?;
+    if new_mem.len() != old_mem.len() {
+        return Err(StorageError::Corrupted(format!(
+            "multimap relocation: source page is {} bytes but its replacement is {}",
+            old_mem.len(),
+            new_mem.len()
+        )));
+    }
+    new_mem.copy_from_slice(old_mem);
 
     match old_page.memory()[0] {
         LEAF => {

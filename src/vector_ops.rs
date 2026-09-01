@@ -92,13 +92,20 @@ impl DistanceMetric {
     ///
     /// Returns [`f32::MAX`] when the vectors have mismatched dimensions
     /// (truncated or corrupted data) to prevent garbage results from being
-    /// promoted to the top of nearest-neighbor heaps. Also returns
-    /// [`f32::MAX`] when the computed distance is NaN (e.g. due to NaN
-    /// elements in the input vectors) to avoid silent NaN propagation
-    /// through search results.
+    /// promoted to the top of nearest-neighbor heaps, and whenever the
+    /// computed distance is not finite, so that `BinaryHeap` ordering is never
+    /// corrupted.
     ///
-    /// NaN distances are replaced with `f32::MAX` (treated as maximally
-    /// distant) so that `BinaryHeap` ordering is never corrupted.
+    /// Non-finite covers more than NaN, which is all this used to check.
+    /// Finite inputs overflow: `euclidean_distance_sq` of components around
+    /// 1e20 squares past `f32::MAX`, giving `+inf`. Worse, `DotProduct`
+    /// negates its result, so an overflow there yields `-inf` -- which sorts
+    /// to the FRONT of a nearest-neighbour heap and promotes exactly the
+    /// garbage this guard exists to keep out. Both now collapse to
+    /// `f32::MAX`, treated as maximally distant.
+    ///
+    /// Found by `fuzz_ivfpq_kmeans`, which sanitises its inputs to finite
+    /// values and still saw `assign_nearest` return `inf`.
     #[inline]
     pub fn compute(&self, a: &[f32], b: &[f32]) -> f32 {
         if a.len() != b.len() {
@@ -110,7 +117,7 @@ impl DistanceMetric {
             Self::DotProduct => -dot_product(a, b),
             Self::Manhattan => manhattan_distance(a, b),
         };
-        if d.is_nan() { f32::MAX } else { d }
+        if d.is_finite() { d } else { f32::MAX }
     }
 }
 

@@ -1083,6 +1083,27 @@ impl TransactionalMemory {
             .collect::<Result<Vec<_>>>()?;
         drop(state);
 
+        // `num_regions` comes from the header; `region_allocators` is separate
+        // data that a corrupt file can leave shorter. The two disagreeing was
+        // handled two different wrong ways: indexing `region_lens` below
+        // panicked, and `try_save_allocator_state` answered the same condition
+        // with `Ok(false)` -- which its caller reads as "retry".
+        //
+        // Retrying cannot lengthen the loaded state, so that turned a panic
+        // into an unbounded loop, and because `Database::drop` writes the
+        // allocator state, it hung on close. `fuzz_redb` sat in one input for
+        // 1766 seconds there.
+        //
+        // Neither outcome is right. The state is unsaveable, so say so once and
+        // let the caller take its documented fallback: without this table the
+        // next open performs a full repair instead of a quick one.
+        if region_lens.len() < num_regions as usize {
+            return Err(StorageError::Corrupted(alloc::format!(
+                "allocator state has {} regions but the header claims {num_regions}",
+                region_lens.len()
+            )));
+        }
+
         for i in 0..num_regions {
             let region_bytes_len = region_lens[i as usize];
             tree.insert(

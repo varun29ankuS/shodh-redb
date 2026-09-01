@@ -2945,7 +2945,30 @@ impl WriteTransaction {
             system_tree.create_table_and_flush_table_root(
                 ALLOCATOR_STATE_TABLE_NAME,
                 |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
+                    // `try_save_allocator_state` answers "not yet" and "never"
+                    // with the same `false`, so this loop cannot tell a
+                    // transient miss from a permanent one. Its termination
+                    // argument was the comment below -- clearing the table
+                    // frees pages, so the retry has room -- which holds only
+                    // while every `false` is transient.
+                    //
+                    // It is not. A corrupt file whose header disagrees with its
+                    // loaded allocator state produced a `false` no retry could
+                    // ever clear, and because `Database::drop` writes this
+                    // table, the whole database hung on close: `fuzz_redb` sat
+                    // in a single input for 1766 seconds there.
+                    //
+                    // `reserve_allocator_state` now rejects that specific
+                    // disagreement up front, so this bound is the backstop
+                    // rather than the fix: no future permanent-`false`
+                    // condition should be able to hang a close again. The
+                    // legitimate cases converge in one or two passes -- the
+                    // reservation is resized to what the state actually needs
+                    // -- so exceeding this many means it is not converging.
+                    const MAX_SAVE_ATTEMPTS: usize = 64;
+
                     let mut pagination_counter = 0;
+                    let mut attempts = 0usize;
 
                     loop {
                         let num_regions = self
@@ -2964,6 +2987,19 @@ impl WriteTransaction {
 
                         if self.mem.try_save_allocator_state(tree, num_regions)? {
                             return Ok(());
+                        }
+
+                        attempts += 1;
+                        if attempts >= MAX_SAVE_ATTEMPTS {
+                            // Not a panic and not a retry: report it. The
+                            // allocator state table is an optimisation, so the
+                            // caller degrades rather than fails -- without it
+                            // the next open runs a full repair instead of a
+                            // quick one, which `Database::drop` already logs as
+                            // "Repair may be required at restart."
+                            return Err(StorageError::Corrupted(alloc::format!(
+                                "allocator state did not converge in {MAX_SAVE_ATTEMPTS} attempts"
+                            )));
                         }
 
                         // Clear out the table before retrying, just in case the number of regions

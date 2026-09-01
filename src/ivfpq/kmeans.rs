@@ -313,12 +313,14 @@ pub fn assign_nearest(
 ) -> (u32, f32) {
     let mut best_c = 0u32;
     let mut best_d = f32::INFINITY;
+    let mut examined = false;
     for c in 0..num_clusters {
         let start = c * dim;
         let end = start + dim;
         if end > centroids.len() {
             break;
         }
+        examined = true;
         let centroid = &centroids[start..end];
         let d = metric.compute(vector, centroid);
         if d < best_d {
@@ -328,6 +330,14 @@ pub fn assign_nearest(
                 best_c = c as u32;
             }
         }
+    }
+    // `best_d` is still the `INFINITY` seed when no centroid was examined --
+    // `num_clusters` is zero, or `centroids` is too short to hold even the
+    // first one. Returning that propagates a non-finite distance into heap
+    // ordering and cluster-distance arithmetic, so report maximally distant
+    // instead, matching `DistanceMetric::compute`.
+    if !examined {
+        return (best_c, f32::MAX);
     }
     (best_c, best_d)
 }
@@ -462,6 +472,47 @@ mod tests {
         assert!(
             (near_origin(c0) && near_ten(c1)) || (near_origin(c1) && near_ten(c0)),
             "centroids did not converge: c0={c0:?}, c1={c1:?}"
+        );
+    }
+
+    #[test]
+    fn assign_nearest_never_returns_a_non_finite_distance() {
+        // Finite inputs whose EuclideanSq overflows f32: 1e20 squared is 1e40,
+        // past f32::MAX (~3.4e38). `fuzz_ivfpq_kmeans` sanitises its inputs to
+        // finite values and still saw `inf` come back, because `compute` only
+        // mapped NaN to f32::MAX and let overflow through.
+        // Every centroid must overflow, or a finite one wins and the bug hides:
+        // (2e20)^2 + (2e20)^2 and (3e20)^2 + (3e20)^2 both exceed f32::MAX.
+        let centroids = vec![-1e20f32, -1e20, -2e20, -2e20];
+        let (_c, d) = assign_nearest(&[1e20, 1e20], &centroids, 2, 2, DistanceMetric::EuclideanSq);
+        assert!(
+            d.is_finite(),
+            "EuclideanSq overflow leaked a non-finite distance: {d}"
+        );
+
+        // DotProduct negates, so its overflow is -inf, which sorts to the FRONT
+        // of a nearest-neighbour heap rather than the back.
+        let (_c, d) = assign_nearest(&[1e20, 1e20], &centroids, 2, 2, DistanceMetric::DotProduct);
+        assert!(
+            d.is_finite(),
+            "DotProduct overflow leaked a non-finite distance: {d}"
+        );
+        assert!(
+            d >= 0.0,
+            "an unmeasurable distance must not sort ahead of real ones: {d}"
+        );
+
+        // No centroid examinable: the loop breaks immediately and `best_d` is
+        // still the INFINITY seed.
+        let (_c, d) = assign_nearest(&[1.0, 2.0], &[], 2, 4, DistanceMetric::EuclideanSq);
+        assert!(
+            d.is_finite(),
+            "empty centroids leaked a non-finite distance: {d}"
+        );
+        let (_c, d) = assign_nearest(&[1.0, 2.0], &[1.0], 2, 1, DistanceMetric::EuclideanSq);
+        assert!(
+            d.is_finite(),
+            "short centroids leaked a non-finite distance: {d}"
         );
     }
 

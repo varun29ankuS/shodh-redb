@@ -1804,7 +1804,7 @@ impl TransactionalMemory {
             // An allocation that cannot be satisfied is a storage condition,
             // not a logic bug, so report it. Found by `fuzz_db_image`.
             Self::allocate_helper_retry(&mut state, required_order, lowest)?.ok_or_else(|| {
-                StorageError::Corrupted(format!(
+                StorageError::Corrupted(alloc::format!(
                     "failed to allocate {allocation_size} bytes (order {required_order}) after growing the file"
                 ))
             })?

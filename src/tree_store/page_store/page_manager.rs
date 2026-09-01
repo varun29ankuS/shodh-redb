@@ -1794,7 +1794,20 @@ impl TransactionalMemory {
             page_number
         } else {
             self.grow(&mut state, required_order)?;
-            Self::allocate_helper_retry(&mut state, required_order, lowest)?.unwrap()
+            // `grow` is expected to make room, and on a healthy file it does.
+            // It extends a layout that was read off disk though, so a corrupt
+            // one can leave the retry with nothing to hand back, and unwrapping
+            // turned that into a panic:
+            //
+            //   page_manager.rs: called `Option::unwrap()` on a `None` value
+            //
+            // An allocation that cannot be satisfied is a storage condition,
+            // not a logic bug, so report it. Found by `fuzz_db_image`.
+            Self::allocate_helper_retry(&mut state, required_order, lowest)?.ok_or_else(|| {
+                StorageError::Corrupted(format!(
+                    "failed to allocate {allocation_size} bytes (order {required_order}) after growing the file"
+                ))
+            })?
         };
 
         #[cfg(all(debug_assertions, not(fuzzing)))]

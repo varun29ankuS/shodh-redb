@@ -815,7 +815,29 @@ impl PagedCachedFile {
                     .fetch_sub(removed.len(), Ordering::AcqRel);
                 None
             }
-            None => None,
+            None => {
+                // No buffer came back, which means one of two different
+                // things: there is no entry at this offset, or there is one
+                // whose buffer is checked out to a live `WritablePage`.
+                // `take_value` cannot tell them apart -- it returns `None`
+                // either way.
+                //
+                // In the second case the fresh path below inserts at this same
+                // offset and trips
+                // `LRUWriteCache::insert() duplicate key`, which is what the
+                // nightly hit. Drop the entry first so the insert is clean.
+                //
+                // That is safe now and was not before: the live page carries
+                // the old generation, so when it returns, `return_value`
+                // rejects it on the mismatch instead of writing a cancelled
+                // page's bytes into the new entry. The generation stamp is
+                // what makes replacing a checked-out entry a legal move.
+                if let RemovedEntry::CheckedOut(entry_len) = lock.remove(offset) {
+                    self.write_buffer_bytes
+                        .fetch_sub(entry_len, Ordering::AcqRel);
+                }
+                None
+            }
         };
 
         let (generation, data) = if let Some((generation, removed)) = buffered {
@@ -998,6 +1020,44 @@ mod test {
             cached_file.write_buffer_bytes.load(Ordering::Acquire),
             before,
             "cancelling a checked-out write must return its bytes to the budget"
+        );
+    }
+
+    /// Writing an offset whose buffer is already checked out to a live page.
+    ///
+    /// `take_value` returns `None` both when there is no entry and when there
+    /// is one whose buffer is out on loan, so the fresh path inserted straight
+    /// over the existing entry and tripped
+    /// `LRUWriteCache::insert() duplicate key`, which the 2026-09-01 nightly
+    /// hit on `fuzz_redb`.
+    ///
+    /// Replacing the entry is legal because of the generation stamp: the older
+    /// page returns to a mismatched generation and is dropped, rather than
+    /// writing its bytes into the newer entry.
+    #[test]
+    fn write_replaces_an_entry_whose_buffer_is_checked_out() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(8192).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 1024, 8192, 8192, None).unwrap();
+
+        // First page checks the buffer out and keeps it.
+        let mut first = cached_file.write(2048, 1024, true).unwrap();
+        first.mem_mut().unwrap().fill(0x11);
+
+        // Second write to the same offset while the first is still alive.
+        let mut second = cached_file
+            .write(2048, 1024, true)
+            .expect("a checked-out entry must not make a second write fatal");
+        second.mem_mut().unwrap().fill(0x22);
+
+        // The older page returns to an entry that is no longer its own.
+        drop(first);
+        drop(second);
+
+        let seen = cached_file.read(2048, 1024, PageHint::None).unwrap();
+        assert!(
+            seen.iter().all(|&b| b == 0x22),
+            "the offset must hold the newer page bytes, not the superseded one"
         );
     }
 

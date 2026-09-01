@@ -637,7 +637,11 @@ impl PagedCachedFile {
     }
 
     // Discard pending writes to the given range
-    pub(super) fn cancel_pending_write(&self, offset: u64, len: usize) {
+    /// `_len` is the caller's idea of the page length. It is no longer used:
+    /// the entry reports what it was charged, which is the only figure that
+    /// can balance the insert. Kept in the signature because callers derive it
+    /// anyway and removing it would churn `page_manager` for nothing.
+    pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
         debug_assert_eq!(
             0,
             offset % self.page_size,
@@ -649,15 +653,20 @@ impl PagedCachedFile {
                 self.write_buffer_bytes
                     .fetch_sub(removed.len(), Ordering::Release);
             }
-            // Present but checked out to a live `WritablePage`. The entry
-            // reports its own length, so this cannot silently disagree with
-            // what was charged at insert -- which is how the budget drifted
-            // upward for the life of the database on every cancelled write.
+            // Present but checked out to a live `WritablePage`. Subtract what
+            // the entry was actually charged at insert.
+            //
+            // The caller's length is deliberately not used, and asserting the
+            // two agree was wrong: `fuzz_redb` produced "caller says 1024
+            // bytes, entry holds 4096" immediately. The caller derives its
+            // length from the page number's CURRENT order, while the entry
+            // holds what was charged when it was inserted, and an offset
+            // reused at a different order makes those differ legitimately --
+            // the same reuse behind every other defect in this file.
+            //
+            // Only the entry's figure can balance the insert, so only the
+            // entry's figure is used.
             RemovedEntry::CheckedOut(entry_len) => {
-                debug_assert_eq!(
-                    entry_len, len,
-                    "cancel_pending_write: caller says {len} bytes, entry holds {entry_len}"
-                );
                 self.write_buffer_bytes
                     .fetch_sub(entry_len, Ordering::Release);
             }

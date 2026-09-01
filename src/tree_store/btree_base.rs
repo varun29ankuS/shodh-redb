@@ -423,9 +423,23 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
         fixed_value_size: Option<usize>,
         compression: CompressionConfig,
     ) -> Result<Self> {
-        assert!(mem.uncommitted(page.get_page_number()));
-        if let Some((ref parent_page, _)) = parent {
-            assert!(mem.uncommitted(parent_page.get_page_number()));
+        // Same condition as `insert_inplace_helper`, same reason it cannot be an
+        // assertion: both page numbers come from a tree walked off disk, so a
+        // corrupt file reaches here with a committed page. This function
+        // already returns `Corrupted` for the bounds check a few lines below.
+        if !mem.uncommitted(page.get_page_number()) {
+            return Err(StorageError::Corrupted(format!(
+                "AccessGuardMut: page {:?} was not allocated by this transaction",
+                page.get_page_number()
+            )));
+        }
+        if let Some((ref parent_page, _)) = parent
+            && !mem.uncommitted(parent_page.get_page_number())
+        {
+            return Err(StorageError::Corrupted(format!(
+                "AccessGuardMut: parent page {:?} was not allocated by this transaction",
+                parent_page.get_page_number()
+            )));
         }
         let decompressed_value = if compression.is_enabled() && len > 0 {
             let end = offset.saturating_add(len);

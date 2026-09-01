@@ -746,7 +746,17 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
     }
 
     fn insert_inplace_helper(&mut self, mut page: PageMut, key: &[u8], value: &[u8]) -> Result<()> {
-        assert!(self.mem.uncommitted(page.get_page_number()));
+        // Mutating in place is only sound on a page this transaction allocated.
+        // The page number reaches here from the root `BtreeHeader`, which is
+        // read off disk, so a corrupt file names a committed page and this was
+        // a bare `assert!` -- a panic present in release builds, not just a
+        // debug check.
+        if !self.mem.uncommitted(page.get_page_number()) {
+            return Err(StorageError::Corrupted(format!(
+                "insert_inplace: page {:?} was not allocated by this transaction",
+                page.get_page_number()
+            )));
+        }
 
         let node_mem = page.memory();
         match node_mem[0] {

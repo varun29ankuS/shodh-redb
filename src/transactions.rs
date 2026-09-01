@@ -3006,10 +3006,25 @@ impl WriteTransaction {
                         // has somehow shrunk. Don't use retain_in() for this, since it doesn't
                         // free the pages immediately -- we need to reuse those pages to guarantee
                         // that our retry loop will eventually terminate
+                        //
+                        // This loop terminates only while `remove` actually
+                        // removes what `last` just reported. On a corrupt tree
+                        // the two disagree, `last` keeps returning the same key,
+                        // and the close never finishes -- which is where the
+                        // 1766-second `fuzz_redb` hang actually sat, one level
+                        // below the retry loop above.
+                        //
+                        // `extract_if` already guards the identical
+                        // iterate-then-delete disagreement in `btree_iters`;
+                        // this is the same check, in the same words.
                         while let Some(guards) = tree.last()? {
                             let key = guards.0.value();
                             drop(guards);
-                            tree.remove(&key)?;
+                            if tree.remove(&key)?.is_none() {
+                                return Err(StorageError::Corrupted(String::from(
+                                    "allocator state: key existed during iteration but delete returned None",
+                                )));
+                            }
                         }
                     }
                 },

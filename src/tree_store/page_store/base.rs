@@ -349,6 +349,17 @@ impl PageTrackerPolicy {
         PageTrackerPolicy::Track(HashSet::new())
     }
 
+    /// The pages recorded so far, or empty when tracking is off.
+    ///
+    /// `restore_savepoint` needs the set without consuming it, because it frees
+    /// through this same tracker afterwards.
+    pub(crate) fn tracked_pages(&self) -> alloc::vec::Vec<PageNumber> {
+        match self {
+            PageTrackerPolicy::Ignore | PageTrackerPolicy::Closed => alloc::vec::Vec::new(),
+            PageTrackerPolicy::Track(x) => x.iter().copied().collect(),
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             PageTrackerPolicy::Ignore | PageTrackerPolicy::Closed => true,

@@ -230,11 +230,30 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
                 "entry ranges outside the page: key {key_range:?}, value {value_range:?}, page length {page_len}"
             )));
         }
+        let mut value_range = value_range;
         let decompressed_value = if compression_enabled {
             let raw = &page.memory()[value_range.clone()];
             match decompress_value(raw) {
                 Ok(Cow::Owned(decompressed)) => Some(decompressed),
-                Ok(Cow::Borrowed(_)) => None,
+                Ok(Cow::Borrowed(stripped)) => {
+                    // Stored uncompressed, behind a one-byte flags envelope.
+                    // `decompress_value` has already removed that byte from the
+                    // slice it hands back, but this guard reads through
+                    // `value_range` instead, so leaving the range alone served
+                    // the envelope byte as part of the value: `get()` returned
+                    // "hello" while `iter()` returned "\0hello".
+                    //
+                    // Narrow the range by however much was actually stripped
+                    // rather than assuming one byte, which also handles the
+                    // empty-value case where nothing is stripped.
+                    //
+                    // The four `AccessGuard::*_decompress` constructors already
+                    // do this at construction and `AccessGuardMut::value` does
+                    // it at access; this was the one read path that did
+                    // neither.
+                    value_range.start = value_range.end - stripped.len();
+                    None
+                }
                 Err(_) => {
                     return Err(StorageError::Corrupted(String::from(
                         "value decompression failed: compressed data is corrupt",

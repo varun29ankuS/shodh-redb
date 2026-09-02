@@ -102,9 +102,13 @@ Four defects, three of which are silent in release builds:
   opened (#371).
 
 ### Known issues
-* `fuzz_db_image` can exceed libFuzzer's 2 GB RSS limit over a long run. This is
-  cumulative process memory rather than a single allocation, so it needs a leak
-  run rather than input-level debugging. The cause is not identified.
+* The `fuzz_db_image` OOM that motivated #365 has not recurred. Four consecutive
+  nightlies run that target for 600s against a persistent, growing corpus --
+  strictly harder than the 300s cold run that first hit it -- with no
+  out-of-memory error. A local check driving 1000 opens of mutated images showed
+  the working set flat at 9-10 MiB, so nothing accumulates per open either.
+  Recorded as resolved by #365 bounding `page_size` rather than removed
+  silently, since "has not recurred" is weaker than a proof.
 * `fuzz_redb` can report a table length one greater than the reference model
   after a transaction whose commit failed with a simulated IO error. Reproducer
   at `fuzz/regressions/fuzz_redb/crash-f14b73608b1d426ffed4f4b2c53de2b374829ab0`.

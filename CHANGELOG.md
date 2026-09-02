@@ -4,18 +4,24 @@
 
 Hardening release. 69 commits since 0.5.0.
 
-Seventeen defects, found by giving the fuzzer a memory. `fuzz/corpus/` had been
-sharing a cache key derived from the fuzz source, which always hit exactly, so
-`actions/cache` never re-saved it: every night restarted a cold 90-second
-search over the same shallow states. Fixing that one cache key (#378) is what
-surfaced everything below, and the reproducer for each is committed under
-`fuzz/regressions/` so none can regress silently.
+Eighteen defects.
 
-Eleven of the seventeen are reachable in a release build. Four are not crashes
-at all -- they are silent wrong behaviour that no assertion would have caught,
-and one of those four loses a committed transaction.
+Seventeen came from giving the fuzzer a memory. `fuzz/corpus/` had been sharing
+a cache key derived from the fuzz source, which always hit exactly, so
+`actions/cache` never re-saved it: every night restarted a cold 90-second search
+over the same shallow states. Fixing that one cache key (#378) is what surfaced
+them, and the reproducer for each is committed under `fuzz/regressions/` so none
+can regress silently.
 
-Nine of the seventeen share one shape: a guard that existed at one site and not
+The eighteenth came from reading the issue tracker. Nothing in the fuzz work
+would have found it: the corruption is silent rather than a panic, and no fuzz
+target enables compression.
+
+Twelve of the eighteen are reachable in a release build. Five are not crashes at
+all -- they are silent wrong behaviour that no assertion would have caught. One
+of those loses a committed transaction; another silently disables TTL.
+
+Ten of the eighteen share one shape: a guard that existed at one site and not
 at its twin.
 
 Tag namespace: tagged `shodh-v0.6.0` (not `v0.6.0`), preserving upstream redb's
@@ -47,6 +53,19 @@ Four defects, three of which are silent in release builds:
   caches are keyed by offset alone, so a page freed at one order and
   reallocated at another legitimately reuses the offset at a different length.
   The write-buffer case truncated writes in release builds.
+
+### Bug fixes -- data correctness
+* **Compression corrupted iterator reads and silently disabled TTL (#393,
+  closes #323).** A value stored uncompressed sits behind a one-byte flags
+  envelope. `get()` stripped it and the iterator path did not, so the same key
+  read back as `hello` through `get()` and `\0hello` through `iter()`.
+
+  For TTL tables the stored layout is `[flags][expiry u64 LE][value]`, so
+  reading one byte early decoded the expiry as `expiry << 8` -- a timestamp far
+  in the future. Every uncompressed entry looked permanently alive: iterators
+  never skipped it and `purge_expired` removed nothing. Any table with short or
+  incompressible values, such as embeddings or encrypted blobs, had TTL
+  silently off whenever compression was enabled.
 
 ### Bug fixes -- durability
 * **A committed transaction could be lost to a later crash (#392).**

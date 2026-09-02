@@ -4,17 +4,18 @@
 
 Hardening release. 69 commits since 0.5.0.
 
-Sixteen defects, found by giving the fuzzer a memory. `fuzz/corpus/` had been
+Seventeen defects, found by giving the fuzzer a memory. `fuzz/corpus/` had been
 sharing a cache key derived from the fuzz source, which always hit exactly, so
 `actions/cache` never re-saved it: every night restarted a cold 90-second
 search over the same shallow states. Fixing that one cache key (#378) is what
 surfaced everything below, and the reproducer for each is committed under
 `fuzz/regressions/` so none can regress silently.
 
-Ten of the sixteen are reachable in a release build. Three are not crashes at
-all -- they are silent wrong behaviour that no assertion would have caught.
+Eleven of the seventeen are reachable in a release build. Four are not crashes
+at all -- they are silent wrong behaviour that no assertion would have caught,
+and one of those four loses a committed transaction.
 
-Nine of the sixteen share one shape: a guard that existed at one site and not
+Nine of the seventeen share one shape: a guard that existed at one site and not
 at its twin.
 
 Tag namespace: tagged `shodh-v0.6.0` (not `v0.6.0`), preserving upstream redb's
@@ -46,6 +47,18 @@ Four defects, three of which are silent in release builds:
   caches are keyed by offset alone, so a page freed at one order and
   reallocated at another legitimately reuses the offset at a different length.
   The write-buffer case truncated writes in release builds.
+
+### Bug fixes -- durability
+* **A committed transaction could be lost to a later crash (#392).**
+  `restore_savepoint` freed every page allocated since the last commit,
+  including the system-tree pages a `persistent_savepoint` earlier in the same
+  transaction had just allocated -- which are live, because a restore rolls back
+  the user tree and leaves system-tree changes in place. Freeing one discarded
+  its pending write, so the commit persisted a system tree referencing bytes
+  that were never written; the next open failed checksum verification and
+  silently rolled back to the previous commit. No panic and no error: a
+  transaction that returned `Ok` from a durable commit simply disappeared.
+  Introduced in this fork by #305; upstream redb has no equivalent.
 
 ### Bug fixes -- liveness
 * **`Database::drop` could hang forever on a corrupt file (#382).** The header's
@@ -109,15 +122,7 @@ Four defects, three of which are silent in release builds:
   the working set flat at 9-10 MiB, so nothing accumulates per open either.
   Recorded as resolved by #365 bounding `page_size` rather than removed
   silently, since "has not recurred" is weaker than a proof.
-* `fuzz_redb` can report a table length one greater than the reference model
-  after a transaction whose commit failed with a simulated IO error. Reproducer
-  at `fuzz/regressions/fuzz_redb/crash-f14b73608b1d426ffed4f4b2c53de2b374829ab0`.
-  Ruled out so far, each with a passing deterministic test: an aborted insert
-  surviving a reopen, the same after a prior commit, an abort that first
-  restored a persistent savepoint, and a `Durability::None` contract violation
-  (`non_durable_commit` updates only the in-memory secondary slot and never
-  writes the header, so the documented behaviour holds). The mechanism is not
-  yet identified.
+(none outstanding)
 
 ## 0.5.0 - 2026-05-04
 

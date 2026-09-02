@@ -1,5 +1,148 @@
 # redb - Changelog
 
+## 0.6.0 - 2026-09-02
+
+Hardening release. 69 commits since 0.5.0.
+
+Eighteen defects.
+
+Seventeen came from giving the fuzzer a memory. `fuzz/corpus/` had been sharing
+a cache key derived from the fuzz source, which always hit exactly, so
+`actions/cache` never re-saved it: every night restarted a cold 90-second search
+over the same shallow states. Fixing that one cache key (#378) is what surfaced
+them, and the reproducer for each is committed under `fuzz/regressions/` so none
+can regress silently.
+
+The eighteenth came from reading the issue tracker. Nothing in the fuzz work
+would have found it: the corruption is silent rather than a panic, and no fuzz
+target enables compression.
+
+Twelve of the eighteen are reachable in a release build. Five are not crashes at
+all -- they are silent wrong behaviour that no assertion would have caught. One
+of those loses a committed transaction; another silently disables TTL.
+
+Ten of the eighteen share one shape: a guard that existed at one site and not
+at its twin.
+
+Tag namespace: tagged `shodh-v0.6.0` (not `v0.6.0`), preserving upstream redb's
+`v0.5.0` -- `v4.x.x` tag history.
+
+### Breaking changes
+* None. Public API surface unchanged from 0.5.0.
+
+### Behaviour changes
+* **`no_std` default cache budget is now 1 MiB, was 1 GiB (#375).** The budget
+  is a ceiling enforced by eviction, not a reservation, so a budget above
+  physical RAM meant eviction never ran and the read cache grew until the
+  allocator failed. `no_std` targets that want a larger cache must now say so
+  with `Builder::set_cache_size`.
+
+### Bug fixes -- page cache
+Four defects, three of which are silent in release builds:
+* **A writable page could share its buffer with a live reader (#376).** `write`
+  reused an `Arc` removed from the read cache, but removing an entry drops only
+  the cache's reference; a `PageImpl` handed out earlier kept its clone.
+* **`overwrite` returned stale page contents (#376).** The cached-entry branch
+  won over the zeroing branch on a cache hit, so a freshly allocated page could
+  surface the bytes of whatever occupied it before it was freed.
+* **A cancelled write corrupted the byte budget (#377).** Freeing a page whose
+  buffer was checked out skipped the accounting, so `write_buffer_bytes`
+  drifted upward permanently and shrank the effective write cache for the life
+  of the database.
+* **Stale-length cache entries were treated as logic bugs (#377, #379).** Both
+  caches are keyed by offset alone, so a page freed at one order and
+  reallocated at another legitimately reuses the offset at a different length.
+  The write-buffer case truncated writes in release builds.
+
+### Bug fixes -- data correctness
+* **Compression corrupted iterator reads and silently disabled TTL (#393,
+  closes #323).** A value stored uncompressed sits behind a one-byte flags
+  envelope. `get()` stripped it and the iterator path did not, so the same key
+  read back as `hello` through `get()` and `\0hello` through `iter()`.
+
+  For TTL tables the stored layout is `[flags][expiry u64 LE][value]`, so
+  reading one byte early decoded the expiry as `expiry << 8` -- a timestamp far
+  in the future. Every uncompressed entry looked permanently alive: iterators
+  never skipped it and `purge_expired` removed nothing. Any table with short or
+  incompressible values, such as embeddings or encrypted blobs, had TTL
+  silently off whenever compression was enabled.
+
+### Bug fixes -- durability
+* **A committed transaction could be lost to a later crash (#392).**
+  `restore_savepoint` freed every page allocated since the last commit,
+  including the system-tree pages a `persistent_savepoint` earlier in the same
+  transaction had just allocated -- which are live, because a restore rolls back
+  the user tree and leaves system-tree changes in place. Freeing one discarded
+  its pending write, so the commit persisted a system tree referencing bytes
+  that were never written; the next open failed checksum verification and
+  silently rolled back to the previous commit. No panic and no error: a
+  transaction that returned `Ok` from a durable commit simply disappeared.
+  Introduced in this fork by #305; upstream redb has no equivalent.
+
+### Bug fixes -- liveness
+* **`Database::drop` could hang forever on a corrupt file (#382).** The header's
+  `num_regions` and the loaded allocator state can disagree; one site panicked
+  on that and another answered it with a retryable `Ok(false)`, so the retry
+  loop never terminated. Closing a database is not an exotic path -- every user
+  reaches it, and the hang was silent.
+* **Unbounded recursion on the B-tree mutation path (#383).** `MAX_TREE_DEPTH`
+  had been enforced on every traversal since #306 and on no mutation. A corrupt
+  tree with a cycle in its branch pointers recursed until the stack ran out,
+  which cannot be caught and takes the process with it.
+* **Compaction guessed how many commits a drain takes (#384).** A durable commit
+  frees older entries while adding its own, so the count is not fixed. Both call
+  sites hardcoded a guess and reported anything still pending as a logic bug.
+
+### Bug fixes -- crafted-file robustness
+* Bound `page_size` instead of allocating whatever the header claims (#365).
+* Bound the blob region against the real file (#370).
+* Stop a compressed value envelope naming its own allocation size (#369).
+* Make layout recalculation total on untrusted input (#368).
+* Reject a free list that would allocate a page twice (#366).
+* A torn commit slot is recoverable, not fatal (#372).
+* A leaf entry range read off disk is checked before slicing (#386), and every
+  caller handles an entry that cannot be read (#388) -- making the accessor
+  fallible only moved the panic until the callers were followed.
+* An uncommitted-page check on a disk-derived page number returns `Corrupted`
+  rather than tripping a bare `assert!` that ships in release builds (#387).
+* A page copy compares both lengths before `copy_from_slice` (#389). Two of the
+  four sites take their destination from `allocate(required)`, which rounds up
+  to a power-of-two order, so a source length that is not a clean order size
+  yields a larger destination and the same panic.
+* An allocator order beyond the last bitmap is rejected instead of indexing past
+  it (#390), on both the free and the record-allocation recursion.
+
+### Bug fixes -- vector indexing
+* Validate every vector that reaches a distance computation, including the
+  training paths (#367).
+* Correct the scalar quantization error bound (#373). The previous bound scaled
+  only with the value range and omitted the f32 representation floor, which is
+  proportional to magnitude, so it rejected correct output for data clustered
+  far from zero.
+
+### Testing and CI
+* **The fuzz corpus now persists and accumulates (#378).** It had shared a
+  cache key derived from the fuzz source, which hit exactly and so was never
+  re-saved -- every night restarted a cold search. Corpus is now cached under a
+  run-scoped key, minimised with `cargo fuzz cmin`, and budgets are raised.
+* **`thumbv6m-none-eabi` is compiled in CI (#375).** The Cortex-M0+ support the
+  manifest pays for on every build was previously never built.
+* `fuzz_redb` no longer deadlocks against its own write transaction (#356), and
+  its leaked-page check tolerates a database left corrupt by simulated IO
+  errors (#361).
+* `begin_read_at` eviction test waits for the race window instead of hoping it
+  opened (#371).
+
+### Known issues
+* The `fuzz_db_image` OOM that motivated #365 has not recurred. Four consecutive
+  nightlies run that target for 600s against a persistent, growing corpus --
+  strictly harder than the 300s cold run that first hit it -- with no
+  out-of-memory error. A local check driving 1000 opens of mutated images showed
+  the working set flat at 9-10 MiB, so nothing accumulates per open either.
+  Recorded as resolved by #365 bounding `page_size` rather than removed
+  silently, since "has not recurred" is weaker than a proof.
+(none outstanding)
+
 ## 0.5.0 - 2026-05-04
 
 Hardening release. 78 commits since 0.4.0. Theme: production-readiness --

@@ -26,7 +26,7 @@
 
 ```toml
 [dependencies]
-shodh-redb = "0.4"
+shodh-redb = "0.6"
 ```
 
 ---
@@ -260,7 +260,7 @@ Value-level compression is built in via two algorithms, off by default and selec
 
 ```toml
 [dependencies]
-shodh-redb = { version = "0.4", features = ["compression_lz4"] }
+shodh-redb = { version = "0.6", features = ["compression_lz4"] }
 # or: features = ["compression_zstd"]
 # or: features = ["compression"]    # both
 ```
@@ -270,7 +270,7 @@ shodh-redb = { version = "0.4", features = ["compression_lz4"] }
 - Adds CPU on every value insert and read; not always a win
 - Smaller default dependency tree, faster compile, smaller attack surface
 
-Compression operates at the value level: each value is compressed *before* entering the B-tree, with a self-describing 5-byte envelope (1-byte flags + 4-byte original size). Values that don't shrink are stored raw with zero envelope overhead. The chosen algorithm is recorded in the database header and validated on open -- a database written with `compression_zstd` will refuse to open without that feature.
+Compression operates at the value level: each value is compressed *before* entering the B-tree. A compressed value carries a self-describing 5-byte envelope (1-byte flags + 4-byte original size). A value that does not shrink -- or that falls below the 64-byte minimum compression size -- is stored raw behind a 1-byte flags byte of `0x00`. When compression is enabled, every non-empty value carries that flags byte; it is what lets a reader distinguish the two cases without ambiguity, so it is stripped on read rather than being absent. The chosen algorithm is recorded in the database header and validated on open -- a database written with `compression_zstd` will refuse to open without that feature.
 
 ---
 
@@ -281,6 +281,7 @@ Compression operates at the value level: each value is compressed *before* enter
 | `std` | Yes | File backends, group commit, TTL, SIMD dispatch |
 | `logging` | No | `log` crate integration |
 | `cache_metrics` | No | Cache hit/miss counters |
+| `metrics` | No | Database-wide metrics (transaction counts, write amplification); implies `cache_metrics` |
 | `compression_lz4` | No | LZ4 value compression (see [Compression](#compression)) |
 | `compression_zstd` | No | Zstandard value compression (see [Compression](#compression)) |
 | `compression` | No | Enable both LZ4 and zstd |

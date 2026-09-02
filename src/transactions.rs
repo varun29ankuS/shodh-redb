@@ -1399,11 +1399,34 @@ impl WriteTransaction {
         //    and new roots
         // 3) update the system tree to remove invalid persistent savepoints.
 
-        // 1) Snapshot pages allocated in this transaction before restore operations.
-        // These pages were allocated for the rolled-back writes and are now
-        // unreachable. We snapshot BEFORE the restore's own B-tree operations
-        // (which may allocate new pages that must NOT be freed).
-        let orphaned_pages = self.mem.drain_uncommitted();
+        // 1) Snapshot the pages this transaction allocated for USER-tree writes.
+        // Swapping the root below is what makes those unreachable, so they are
+        // exactly the set to free.
+        //
+        // This used to snapshot `drain_uncommitted()` -- every page allocated
+        // since the last commit -- on the assumption, stated in the old comment
+        // here, that they "were allocated for the rolled-back writes". That is
+        // false whenever a savepoint was created earlier in this same
+        // transaction: `persistent_savepoint` allocates SYSTEM-tree pages that
+        // stay live and referenced, because a restore rolls back the user tree
+        // and leaves system-tree changes in place.
+        //
+        // Freeing one of those discarded its pending write through
+        // `cancel_pending_write`, so the commit persisted a system tree
+        // pointing at bytes that were never written. The next open failed
+        // `verify_primary_checksums` on that page and rolled back to the
+        // previous commit -- losing a transaction that had committed durably.
+        // A crash after a successful commit must not lose it.
+        //
+        // The user tracker is the right source: it records only the pages this
+        // transaction allocated for user-tree content. Tracking is guaranteed
+        // on here, because it is disabled only when no savepoint exists (see
+        // `TableNamespace::mark_dirty`) and a restore requires one.
+        let orphaned_pages: Vec<PageNumber> = {
+            let tables = self.tables.lock();
+            let tracker = tables.allocated_pages.lock();
+            tracker.tracked_pages()
+        };
 
         // 1a) restore the table tree (set_root also clears pending_table_updates)
         {

@@ -1,10 +1,21 @@
 # redb - Changelog
 
-## 0.6.0 - 2026-09-01
+## 0.6.0 - 2026-09-02
 
-Hardening release. 59 commits since 0.5.0. Theme: crafted-file robustness and
-the page cache -- every allocation the header can size is now bounded, and the
-read/write cache ownership rules are enforced rather than asserted.
+Hardening release. 69 commits since 0.5.0.
+
+Sixteen defects, found by giving the fuzzer a memory. `fuzz/corpus/` had been
+sharing a cache key derived from the fuzz source, which always hit exactly, so
+`actions/cache` never re-saved it: every night restarted a cold 90-second
+search over the same shallow states. Fixing that one cache key (#378) is what
+surfaced everything below, and the reproducer for each is committed under
+`fuzz/regressions/` so none can regress silently.
+
+Ten of the sixteen are reachable in a release build. Three are not crashes at
+all -- they are silent wrong behaviour that no assertion would have caught.
+
+Nine of the sixteen share one shape: a guard that existed at one site and not
+at its twin.
 
 Tag namespace: tagged `shodh-v0.6.0` (not `v0.6.0`), preserving upstream redb's
 `v0.5.0` -- `v4.x.x` tag history.
@@ -36,6 +47,20 @@ Four defects, three of which are silent in release builds:
   reallocated at another legitimately reuses the offset at a different length.
   The write-buffer case truncated writes in release builds.
 
+### Bug fixes -- liveness
+* **`Database::drop` could hang forever on a corrupt file (#382).** The header's
+  `num_regions` and the loaded allocator state can disagree; one site panicked
+  on that and another answered it with a retryable `Ok(false)`, so the retry
+  loop never terminated. Closing a database is not an exotic path -- every user
+  reaches it, and the hang was silent.
+* **Unbounded recursion on the B-tree mutation path (#383).** `MAX_TREE_DEPTH`
+  had been enforced on every traversal since #306 and on no mutation. A corrupt
+  tree with a cycle in its branch pointers recursed until the stack ran out,
+  which cannot be caught and takes the process with it.
+* **Compaction guessed how many commits a drain takes (#384).** A durable commit
+  frees older entries while adding its own, so the count is not fixed. Both call
+  sites hardcoded a guess and reported anything still pending as a logic bug.
+
 ### Bug fixes -- crafted-file robustness
 * Bound `page_size` instead of allocating whatever the header claims (#365).
 * Bound the blob region against the real file (#370).
@@ -43,6 +68,17 @@ Four defects, three of which are silent in release builds:
 * Make layout recalculation total on untrusted input (#368).
 * Reject a free list that would allocate a page twice (#366).
 * A torn commit slot is recoverable, not fatal (#372).
+* A leaf entry range read off disk is checked before slicing (#386), and every
+  caller handles an entry that cannot be read (#388) -- making the accessor
+  fallible only moved the panic until the callers were followed.
+* An uncommitted-page check on a disk-derived page number returns `Corrupted`
+  rather than tripping a bare `assert!` that ships in release builds (#387).
+* A page copy compares both lengths before `copy_from_slice` (#389). Two of the
+  four sites take their destination from `allocate(required)`, which rounds up
+  to a power-of-two order, so a source length that is not a clean order size
+  yields a larger destination and the same panic.
+* An allocator order beyond the last bitmap is rejected instead of indexing past
+  it (#390), on both the free and the record-allocation recursion.
 
 ### Bug fixes -- vector indexing
 * Validate every vector that reaches a distance computation, including the
@@ -66,9 +102,18 @@ Four defects, three of which are silent in release builds:
   opened (#371).
 
 ### Known issues
-* `fuzz_db_image` can exceed libFuzzer's 2 GB RSS limit over a long run. This
-  is cumulative process memory, not a single allocation; the cause is not yet
-  identified.
+* `fuzz_db_image` can exceed libFuzzer's 2 GB RSS limit over a long run. This is
+  cumulative process memory rather than a single allocation, so it needs a leak
+  run rather than input-level debugging. The cause is not identified.
+* `fuzz_redb` can report a table length one greater than the reference model
+  after a transaction whose commit failed with a simulated IO error. Reproducer
+  at `fuzz/regressions/fuzz_redb/crash-f14b73608b1d426ffed4f4b2c53de2b374829ab0`.
+  Ruled out so far, each with a passing deterministic test: an aborted insert
+  surviving a reopen, the same after a prior commit, an abort that first
+  restored a persistent savepoint, and a `Durability::None` contract violation
+  (`non_durable_commit` updates only the in-memory secondary slot and never
+  writes the header, so the documented behaviour holds). The mechanism is not
+  yet identified.
 
 ## 0.5.0 - 2026-05-04
 

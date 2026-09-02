@@ -611,6 +611,16 @@ impl BuddyAllocator {
         page_number: u32,
         order: u8,
     ) -> Result<(), crate::StorageError> {
+        // Same exposure as `free_inner`, same reason: this recurses on
+        // `order + 1` to split a parent, so reaching it at `max_order` walks
+        // one past the last bitmap. `record_alloc` guards its own entry but
+        // cannot guard the recursion below it.
+        if order > self.max_order {
+            return Err(crate::StorageError::Corrupted(alloc::format!(
+                "buddy_allocator: order {order} exceeds max_order {} while recording an allocation",
+                self.max_order
+            )));
+        }
         let allocator = self.get_order_free_mut(order);
         if allocator.get(page_number)? {
             // Need to split parent page
@@ -642,6 +652,21 @@ impl BuddyAllocator {
         page_number: u32,
         order: u8,
     ) -> Result<(), crate::StorageError> {
+        // `free` holds one bitmap per order, `0..=max_order`, so a larger
+        // order names no bitmap and `self.free[order]` panicked:
+        //
+        //   index out of bounds: the len is 7 but the index is 7
+        //
+        // The order arrives from a `PageNumber` whose order field was read off
+        // disk, and this function recurses on `order + 1` while merging, so it
+        // is also its own caller. `record_alloc` already rejects the same
+        // condition this way; this is that check where it was missing.
+        if order > self.max_order {
+            return Err(crate::StorageError::Corrupted(alloc::format!(
+                "buddy_allocator: order {order} exceeds max_order {}",
+                self.max_order
+            )));
+        }
         if order == self.max_order {
             let allocator = self.get_order_free_mut(order);
             allocator.clear(page_number)?;
